@@ -1,0 +1,5 @@
+/home/ulas/PyCharmMiscProject/memos_trading_refactor/target/release/deps/bist_async_yahoo_test-867d469a88a1226b.d: memos_trading_core/tests/bist_async_yahoo_test.rs
+
+/home/ulas/PyCharmMiscProject/memos_trading_refactor/target/release/deps/bist_async_yahoo_test-867d469a88a1226b: memos_trading_core/tests/bist_async_yahoo_test.rs
+
+memos_trading_core/tests/bist_async_yahoo_test.rs:

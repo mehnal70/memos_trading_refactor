@@ -1,0 +1,4 @@
+[INIT] Robotic Trading — symbol=BTCUSDT market=Spot paper=true capital=10000 autonomous=false ml=false
+[CONFIG] Position Profile : 
+[CONFIG] Security Profile : 
+[START] Trading loop başlatılıyor — Ctrl+C ile durdur

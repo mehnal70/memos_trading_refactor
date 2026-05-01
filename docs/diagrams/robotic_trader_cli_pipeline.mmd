@@ -1,0 +1,53 @@
+flowchart TD
+    A[Uygulama Açılışı] --> B{Tam RTC Paneli Açık mı?}
+    B -- Hayır --> B1[Light Mode\nAğır döngüler kapalı\nUI responsive]
+    B -- Evet --> C[Runtime Başlat\nTek Tık Güvenli Akış]
+
+    C --> D[S1: Manual Sync\nStatus + Preflight + Logs]
+    D --> Dg{S1 Başarılı mı?}
+    Dg -- Hayır --> Df[Uyarı + Retry\nDebug Timeline'a yaz]
+    Df --> D
+    Dg -- Evet --> E[S2: Polling Aktif\nDüzenli Status/Preflight/Logs]
+    E --> F[S3: Automation Aktif]
+
+    F --> G[Stage Gate Hesabı]
+    G --> G1[Level 1 Ön Kontrol]
+    G1 --> G2[Level 2 Smoke Test]
+    G2 --> G3[Level 3 Full Check]
+    G3 --> G4[Level 4 Robotic Start]
+    G4 --> G5[Level 5 Autonomous]
+
+    F -. S3 aktifse .-> G4
+
+    G5 --> H{GO / NO-GO}
+    H -- NO-GO --> H1[Eksik guardrail göster\nCompliance detayı ver]
+    H1 --> I[Ayarları Düzelt\nör. kalite eşiği >=70, watchdog, auto-pause]
+    I --> H
+
+    H -- GO --> J[Otonomu Başlat]
+    J --> K[Hands-free Pipeline\nSmoke -> Full Check -> Robotic Start -> Otonom Start]
+
+    K --> L{Mainnet mi?}
+    L -- Testnet --> M[Testnet normal akış]
+    L -- Mainnet --> N[Mainnet Arm gerekli\nCooldown politikası uygula]
+
+    M --> O[Incident Timeline + Readiness Log izleme]
+    N --> O
+
+    O --> P{Hata / Risk Artışı?}
+    P -- Evet --> Q[Auto-pause + Self-healing + Recovery Action]
+    Q --> O
+    P -- Hayır --> R[Cycle devam\nSkor ve durum güncelle]
+    R --> O
+
+    classDef start fill:#0f172a,stroke:#38bdf8,color:#e2e8f0
+    classDef runtime fill:#111827,stroke:#8b5cf6,color:#e5e7eb
+    classDef stage fill:#1f2937,stroke:#10b981,color:#ecfeff
+    classDef gate fill:#312e81,stroke:#f59e0b,color:#fff7ed
+    classDef ops fill:#052e16,stroke:#22c55e,color:#dcfce7
+
+    class A,B,B1 start
+    class C,D,Dg,Df,E,F runtime
+    class G,G1,G2,G3,G4,G5 stage
+    class H,H1,I,L,N gate
+    class J,K,M,O,P,Q,R ops

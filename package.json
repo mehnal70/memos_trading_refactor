@@ -1,0 +1,24 @@
+{
+  "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/icons-material": "^7.3.8",
+    "@mui/material": "^7.3.8",
+    "@tauri-apps/api": "1.5.4",
+    "@tauri-apps/cli": "1.5.4",
+    "vuetify": "^3.6.7"
+  },
+  "devDependencies": {
+    "vite": "^6.4.1"
+  },
+  "scripts": {
+    "dev": "npm --prefix memos_trading_desktop run dev",
+    "build": "npm --prefix memos_trading_desktop run build",
+    "preview": "npm --prefix memos_trading_desktop run preview",
+    "tauri:dev": "npm --prefix memos_trading_desktop run tauri:dev",
+    "tauri:build": "npm --prefix memos_trading_desktop run tauri:build",
+    "rtc:build": "cargo build --bin rtc_cli --manifest-path memos_trading_core/Cargo.toml",
+    "rtc:run": "cargo run --bin rtc_cli --manifest-path memos_trading_core/Cargo.toml",
+    "rtc:release": "cargo build --release --bin rtc_cli --manifest-path memos_trading_core/Cargo.toml"
+  }
+}

@@ -1,0 +1,33 @@
+# Multi-Cloud ve Vendor Lock-in Önleyici CI/CD Pipeline (GitHub Actions)
+# Her bulut sağlayıcıya otomatik deploy, bulut bağımsız K8s manifestleriyle.
+
+name: Multi-Cloud Deploy
+on:
+  push:
+    branches: [ main ]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        provider: [aws, gcp, azure]
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+      - name: Set K8s context
+        run: |
+          if [ "${{ matrix.provider }}" = "aws" ]; then
+            aws eks update-kubeconfig --region $AWS_REGION --name $AWS_CLUSTER
+          elif [ "${{ matrix.provider }}" = "gcp" ]; then
+            gcloud container clusters get-credentials $GCP_CLUSTER --zone $GCP_ZONE --project $GCP_PROJECT
+          elif [ "${{ matrix.provider }}" = "azure" ]; then
+            az aks get-credentials --resource-group $AZURE_RG --name $AZURE_CLUSTER
+          fi
+      - name: Deploy manifests
+        run: |
+          kubectl apply -f k8s/multi-cloud-deployment.yaml
+          kubectl apply -f k8s/multi-cloud-dr.yaml
+      - name: Health check
+        run: |
+          kubectl rollout status deployment/memos-trading -n memos-trading

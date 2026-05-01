@@ -1,0 +1,77 @@
+{
+  "arms": [
+    [
+      {
+        "n": 0,
+        "total": 0.0,
+        "wins": 0
+      },
+      {
+        "n": 0,
+        "total": 0.0,
+        "wins": 0
+      },
+      {
+        "n": 0,
+        "total": 0.0,
+        "wins": 0
+      },
+      {
+        "n": 0,
+        "total": 0.0,
+        "wins": 0
+      }
+    ],
+    [
+      {
+        "n": 11,
+        "total": 13.86663309677038,
+        "wins": 8
+      },
+      {
+        "n": 7,
+        "total": -3.882045311044115,
+        "wins": 2
+      },
+      {
+        "n": 15,
+        "total": -84.39867019890589,
+        "wins": 4
+      },
+      {
+        "n": 22,
+        "total": 44.61958899637551,
+        "wins": 13
+      }
+    ],
+    [
+      {
+        "n": 1,
+        "total": 144.3360628341099,
+        "wins": 1
+      },
+      {
+        "n": 2,
+        "total": 4.821625346103063,
+        "wins": 2
+      },
+      {
+        "n": 2,
+        "total": -6.050194177626437,
+        "wins": 0
+      },
+      {
+        "n": 3,
+        "total": 77.40276115,
+        "wins": 2
+      }
+    ]
+  ],
+  "total_n": 63,
+  "eval_count": 3,
+  "last_eval_at": 60,
+  "scalp_disabled": false,
+  "swing_disabled": false,
+  "reg_disabled": false,
+  "last_reason": ""
+}

@@ -1,0 +1,23 @@
+[2026-01-24 11:40:49.022114045 UTC][INFO][metrics] TotalPnL: 0.00, WinRate: 0.00%, MaxDrawdown: 0.00%
+[2026-01-24 11:41:00.256405410 UTC][INFO][metrics] TotalPnL: 0.00, WinRate: 0.00%, MaxDrawdown: 0.00%
+[2026-01-24 11:41:07.027930886 UTC][INFO][metrics] TotalPnL: 0.00, WinRate: 0.00%, MaxDrawdown: 0.00%
+[2026-01-24 11:41:51.930657996 UTC][INFO][metrics] TotalPnL: 0.00, WinRate: 0.00%, MaxDrawdown: 0.00%
+[2026-01-24 11:41:52.931901600 UTC][INFO][metrics] TotalPnL: 0.00, WinRate: 0.00%, MaxDrawdown: 0.00%
+[2026-01-26 19:14:31.509923624 UTC][INFO][metrics] TotalPnL: 0.00, WinRate: 0.00%, MaxDrawdown: 0.00%
+[2026-01-26 19:14:32.542274921 UTC][INFO][metrics] TotalPnL: 0.00, WinRate: 0.00%, MaxDrawdown: 0.00%
+[2026-01-30 07:37:30.743474802 UTC][INFO][metrics] TotalPnL: 0.00, WinRate: 0.00%, MaxDrawdown: 0.00%
+[2026-01-30 07:37:31.759655687 UTC][INFO][metrics] TotalPnL: 0.00, WinRate: 0.00%, MaxDrawdown: 0.00%
+[2026-02-22 16:40:14.860036115 UTC][INFO][metrics] TotalPnL: 0.00, WinRate: 0.00%, MaxDrawdown: 0.00%
+[2026-02-22 16:40:15.082566746 UTC][INFO][quality] Kalite esikleri guncel: rr>=2.00, vol=[0.10%, 3.00%]
+[2026-02-22 16:40:16.083876296 UTC][INFO][metrics] TotalPnL: 0.00, WinRate: 0.00%, MaxDrawdown: 0.00%
+[2026-02-22 16:40:16.083929788 UTC][INFO][quality] Kalite esikleri guncel: rr>=2.00, vol=[0.10%, 3.00%]
+[2026-02-22 16:43:34.665110256 UTC][INFO][metrics] TotalPnL: 0.00, WinRate: 0.00%, MaxDrawdown: 0.00%
+[2026-02-22 16:43:34.665148747 UTC][INFO][quality] Kalite esikleri guncel: rr>=2.00, vol=[0.10%, 3.00%]
+[2026-02-22 16:43:35.666406926 UTC][INFO][metrics] TotalPnL: 0.00, WinRate: 0.00%, MaxDrawdown: 0.00%
+[2026-02-22 16:43:35.666485323 UTC][INFO][quality] Kalite esikleri guncel: rr>=2.00, vol=[0.10%, 3.00%]
+[2026-04-02 21:15:34.998617692 UTC][ERROR][cache] Seed: boş interval verisi
+[2026-04-02 21:15:35.133373728 UTC][INFO][cache] CandleCache seed: BTCUSDT 0 candle [HTF=1h]
+[2026-04-02 21:15:35.133463765 UTC][INFO][quality] Kalite esikleri guncel: rr>=2.00, vol=[0.10%, 3.00%]
+[2026-04-07 13:16:03.708468196 UTC][ERROR][cache] Seed: boş interval verisi
+[2026-04-07 13:16:03.756448312 UTC][INFO][cache] CandleCache seed: BTCUSDT 0 candle [HTF=1h]
+[2026-04-07 13:16:03.756557805 UTC][INFO][quality] Kalite esikleri guncel: rr>=1.50, vol=[0.10%, 5.00%]

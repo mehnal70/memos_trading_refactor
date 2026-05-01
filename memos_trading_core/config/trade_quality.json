@@ -1,0 +1,27 @@
+{
+  "min_rr": 1.2,
+  "volatility_min_pct": 0.05,
+  "volatility_max_pct": 3.0,
+
+  "trend_short_period": 20,
+  "trend_long_period": 50,
+  "trend_filter_enabled": true,
+  "trend_margin_pct": 0.5,
+
+  "adaptive_enabled": true,
+  "min_rr_tight": 1.5,
+  "min_rr_loose": 1.1,
+  "volatility_max_tight": 2.5,
+  "volatility_max_loose": 4.0,
+  "win_rate_low": 40.0,
+  "win_rate_high": 55.0,
+
+  "volume_filter_enabled": false,
+  "volume_min_ratio": 0.7,
+
+  "rsi_extreme_filter_enabled": false,
+  "rsi_extreme_ob": 80.0,
+  "rsi_extreme_os": 20.0,
+
+  "htf_require_alignment": false
+}

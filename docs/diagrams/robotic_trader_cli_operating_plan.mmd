@@ -1,0 +1,31 @@
+timeline
+    title Robotic Trader CLI · Sistem Çalışma Planı
+
+    section 🧭 1) Hazırlık
+      🔐 Ön Kontrol : API key/secret + TRADING_ENV doğrulanır
+      🧪 Smoke Test : Testnet kısa pilot ile bağlantı ve emir zinciri kontrol edilir
+      ✅ Full Check : GO/NO-GO için readiness kanıtları toplanır
+
+    section ⚙️ 2) Runtime Başlatma
+      🚀 Tek Tık Başlat : Güvenli sıralı akış tetiklenir
+      🔄 S1 Senkron : Status + Preflight + Logs birlikte alınır
+      📡 S2 Polling : Düzenli sağlık/payload güncellemeleri çalışır
+      🤖 S3 Automation : Otomasyon döngüsü etkinleşir
+
+    section 🧱 3) Stage Gate İlerlemesi
+      🥇 Level 1 : Ön Kontrol tamamlandı
+      🥈 Level 2 : Smoke geçildi
+      🥉 Level 3 : Full Check hazır
+      🏁 Level 4 : Robotic döngü aktif
+      🌐 Level 5 : Otonom mod açılır
+
+    section 🛡️ 4) GO Politikası
+      📊 Compliance : Preflight + Smoke + Logs + Robotic + Safety + Auto puanlanır
+      🚦 Policy Gate : Eşik altı NO-GO, eşik üstü GO
+      🧰 Safe Guards : Kalite eşiği, watchdog, auto-pause, self-healing doğrulanır
+
+    section 🔁 5) Otonom Operasyon
+      🧠 Hands-free : Smoke → Full Check → Robotic Start → Otonom Start sırası otomatik denenir
+      ⏱️ Cooldown : Mainnet arm/cooldown kuralları uygulanır
+      📜 Audit + Incident : Olaylar, risk kararları ve recovery adımları kayda alınır
+      ♻️ Recovery Loop : Hata/risk artışında auto-pause + self-healing ile güvenli geri kazanım yapılır

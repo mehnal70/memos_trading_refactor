@@ -1,0 +1,12 @@
+{
+  "position_profile": "Balanced",
+  "security_profile": "Development",
+
+  "sl_cooldown_secs": 600,
+
+  "breakeven_at_rr": null,
+
+  "atr_trail_mult": null,
+
+  "partial_tp_ratio": null
+}

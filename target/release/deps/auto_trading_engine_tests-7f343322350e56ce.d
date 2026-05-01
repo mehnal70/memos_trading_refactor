@@ -1,0 +1,5 @@
+/home/ulas/PyCharmMiscProject/memos_trading_refactor/target/release/deps/auto_trading_engine_tests-7f343322350e56ce.d: memos_trading_core/tests/auto_trading_engine_tests.rs
+
+/home/ulas/PyCharmMiscProject/memos_trading_refactor/target/release/deps/auto_trading_engine_tests-7f343322350e56ce: memos_trading_core/tests/auto_trading_engine_tests.rs
+
+memos_trading_core/tests/auto_trading_engine_tests.rs:

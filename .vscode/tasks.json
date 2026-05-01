@@ -1,0 +1,43 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Memos Trading Desktop (Tauri)",
+			"type": "shell",
+			"command": "npm run tauri:dev",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Build RTC CLI",
+			"type": "shell",
+			"command": "cargo build --bin rtc_cli --manifest-path memos_trading_core/Cargo.toml",
+			"problemMatcher": ["$rustc"],
+			"group": "build"
+		},
+		{
+			"label": "Run RTC CLI (Paper Mode)",
+			"type": "shell",
+			"command": "./run_rtc.sh",
+			"problemMatcher": [],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			}
+		},
+		{
+			"label": "Run RTC CLI (Release)",
+			"type": "shell",
+			"command": "./run_rtc.sh --release",
+			"problemMatcher": [],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			}
+		}
+	]
+}

@@ -1,0 +1,5 @@
+/home/ulas/PyCharmMiscProject/memos_trading_refactor/target/release/build/generic-array-de44323590d54dde/build_script_build-de44323590d54dde.d: /home/ulas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/generic-array-0.14.7/build.rs
+
+/home/ulas/PyCharmMiscProject/memos_trading_refactor/target/release/build/generic-array-de44323590d54dde/build_script_build-de44323590d54dde: /home/ulas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/generic-array-0.14.7/build.rs
+
+/home/ulas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/generic-array-0.14.7/build.rs:

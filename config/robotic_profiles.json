@@ -1,0 +1,8 @@
+{
+  "position_profile": "",
+  "security_profile": "",
+  "sl_cooldown_secs": 600,
+  "breakeven_at_rr": 1.0,
+  "atr_trail_mult": 1.5,
+  "partial_tp_ratio": 0.5
+}

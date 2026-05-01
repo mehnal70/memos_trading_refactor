@@ -1,0 +1,1128 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<title>Memos Trading — Trading Mantigi Referans</title>
+<style>
+  body { font-family: 'DejaVu Sans', Arial, sans-serif; font-size: 10pt; margin: 2cm; color: #222; }
+  h1 { color: #1a3a5c; border-bottom: 2px solid #1a3a5c; padding-bottom: 4px; }
+  h2 { color: #1a3a5c; border-bottom: 1px solid #ccc; margin-top: 2em; }
+  h3 { color: #2c5f8a; }
+  h4 { color: #555; }
+  code, pre { font-family: 'DejaVu Sans Mono', monospace; font-size: 8.5pt; background: #f5f5f5; }
+  pre { padding: 8px; border-left: 3px solid #1a3a5c; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 9pt; }
+  th { background: #1a3a5c; color: white; padding: 5px 8px; text-align: left; }
+  td { border: 1px solid #ddd; padding: 4px 8px; }
+  tr:nth-child(even) td { background: #f9f9f9; }
+  blockquote { border-left: 3px solid #e67e22; margin: 0.5em 0; padding-left: 12px; color: #555; }
+  a { color: #1a3a5c; }
+</style>
+</head>
+<body>
+<h1 id="memos-trading-trading-mantg-referans-dokuman">Memos Trading — Trading Mantığı Referans Dökümanı</h1>
+<p><strong>Sürüm:</strong> 1.0 | <strong>Tarih:</strong> 2026-03-24 | <strong>Kapsam:</strong> memos_trading_core</p>
+<hr />
+<h2 id="icindekiler">İçindekiler</h2>
+<ol>
+<li><a href="#1-sistem-mimarisi-genel-bakış">Sistem Mimarisi Genel Bakış</a></li>
+<li><a href="#2-veri-akışı--candle-pipeline">Veri Akışı — Candle Pipeline</a></li>
+<li><a href="#3-teknik-göstergeler-ve-formüller">Teknik Göstergeler ve Formüller</a></li>
+<li><a href="#4-strateji-katmanı">Strateji Katmanı</a></li>
+<li><a href="#5-sinyal-seçimi--dinamik-sıralama-ve-konsensüs-oylama">Sinyal Seçimi — Dinamik Sıralama ve Konsensüs Oylama</a></li>
+<li><a href="#6-sinyal-filtre-zinciri">Sinyal Filtre Zinciri</a></li>
+<li><a href="#7-pozisyon-boyutu-ve-kaldıraç">Pozisyon Boyutu ve Kaldıraç</a></li>
+<li><a href="#8-stop-loss-ve-take-profit-mekanizmaları">Stop-Loss ve Take-Profit Mekanizmaları</a></li>
+<li><a href="#9-pnl-hesabı">PnL Hesabı</a></li>
+<li><a href="#10-risk-kapıları-ve-otonom-kontrol">Risk Kapıları ve Otonom Kontrol</a></li>
+<li><a href="#11-backtest-motoru-ve-performans-metrikleri">Backtest Motoru ve Performans Metrikleri</a></li>
+<li><a href="#12-evrimsel-optimizasyon-genetik-algoritma">Evrimsel Optimizasyon (Genetik Algoritma)</a></li>
+<li><a href="#13-ml-katmanı--anomali-tespiti">ML Katmanı — Anomali Tespiti</a></li>
+<li><a href="#14-destek--direnç-sr-dedektörü">Destek/Direnç (S/R) Dedektörü</a></li>
+<li><a href="#15-tespit-edilen-sorunlar-ve-geliştirme-tavsiyeleri">Tespit Edilen Sorunlar ve Geliştirme Tavsiyeleri</a></li>
+</ol>
+<hr />
+<h2 id="1-sistem-mimarisi-genel-baks">1. Sistem Mimarisi Genel Bakış</h2>
+<pre><code>┌────────────────────────────────────────────────────────────────┐
+│                        rtc_cli (TUI)                           │
+│  Tab0:Dashboard  Tab1:Evo  Tab2:ML  Tab3:Pozisyon  ...         │
+└──────────────────────────┬─────────────────────────────────────┘
+                           │  Arc&lt;Mutex&lt;AppState&gt;&gt;
+          ┌────────────────┼──────────────────────┐
+          ▼                ▼                      ▼
+   WorkerOrchestrator  RoboticLoop         AutonomousController
+   (per-symbol WS)     (candle tick)       (FSM: Active/SafeMode/Halt)
+          │                │                      │
+          │         ┌──────┴──────┐               │
+          │         ▼             ▼               ▼
+          │    StrategyRanker  Filters       AdaptiveBrain
+          │    (composite)     (7 katman)    (Q-Learning)
+          │         │             │               │
+          │         └──────┬──────┘               │
+          │                ▼                      ▼
+          │         Consensus Vote          PopulationManager
+          │         (BUY/SELL/HOLD)         (Genetik Evrim)
+          │                │
+          ▼                ▼
+    Binance WS      TradeExecutor
+    (fiyat güncelle) (paper/live)
+                           │
+                    SQLite DB (candles,
+                    patterns, evolution)
+</code></pre>
+<p><strong>Ana akış özeti:</strong>
+Her interval sonunda <code>process_symbol()</code> çağrılır. Bu fonksiyon; veri çeker, strateji puanlar, oy toplar, filtreden geçirir, kaldıraç hesaplar ve emri çalıştırır. WS fiyatları her saniye SL/TP kontrolü için bağımsız olarak işlenir.</p>
+<hr />
+<h2 id="2-veri-aks-candle-pipeline">2. Veri Akışı — Candle Pipeline</h2>
+<h3 id="21-candle-cekme">2.1 Candle Çekme</h3>
+<p><strong>Kaynak:</strong> <code>RoboticLoop::process_symbol()</code> → <code>fetcher.fetch_latest()</code></p>
+<pre><code>Binance REST API
+  └─ /api/v3/klines (spot)
+  └─ /fapi/v1/klines (futures)
+  └─ /dapi/v1/klines (coinm)
+</code></pre>
+<p><strong>Tazelik Kontrolü:</strong></p>
+<pre><code>max_lag = interval_secs × 3
+if (now - last_candle.timestamp) &gt; max_lag → log uyarı
+</code></pre>
+<h3 id="22-htf-ust-zaman-dilimi-eslesmesi">2.2 HTF (Üst Zaman Dilimi) Eşleşmesi</h3>
+<p>Mevcut interval'den bir üst zaman dilimine otomatik eşleme:</p>
+<table>
+<thead>
+<tr>
+<th>LTF (Ana)</th>
+<th>HTF (Filtre)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1m, 5m</td>
+<td>1h</td>
+</tr>
+<tr>
+<td>15m, 30m</td>
+<td>4h</td>
+</tr>
+<tr>
+<td>1h</td>
+<td>4h</td>
+</tr>
+<tr>
+<td>4h, 1d</td>
+<td>1d</td>
+</tr>
+</tbody>
+</table>
+<p>HTF candle'ları SQLite DB'den yüklenir (<code>load_htf_candles_from_db</code>, son 200 bar).</p>
+<h3 id="23-veri-normalizasyonu">2.3 Veri Normalizasyonu</h3>
+<pre><code>Candle { timestamp, open, high, low, close, volume, symbol }
+</code></pre>
+<p>Tüm göstergeler <code>close</code> fiyatı üzerinden çalışır; ATR, Stochastic, ADX için <code>high</code>/<code>low</code> da kullanılır.</p>
+<hr />
+<h2 id="3-teknik-gostergeler-ve-formuller">3. Teknik Göstergeler ve Formüller</h2>
+<h3 id="31-sma-basit-hareketli-ortalama">3.1 SMA — Basit Hareketli Ortalama</h3>
+<pre><code>SMA(n) = Σ(close[i], i=len-n..len) / n
+</code></pre>
+<p><strong>Kaynak:</strong> <code>calculate_sma()</code> — <code>indicators.rs:7</code></p>
+<h3 id="32-ema-ussel-hareketli-ortalama">3.2 EMA — Üssel Hareketli Ortalama</h3>
+<pre><code>k = 2 / (n + 1)
+EMA₀ = SMA(n)  [seed: son n barın ortalaması]
+EMAᵢ = closeᵢ × k + EMAᵢ₋₁ × (1 - k)
+</code></pre>
+<p><strong>Kaynak:</strong> <code>calculate_ema()</code> — <code>indicators.rs:14</code></p>
+<blockquote>
+<p><strong>SORUN:</strong> Mevcut implementasyon seed ve iterasyonu aynı N-pencere üzerinde yapıyor (çift sayım). Düzgün EMA seed için ilk N barı kullanıp N+1'den devam etmelidir. Bkz. §15.1.</p>
+</blockquote>
+<h3 id="33-rsi-goreceli-guc-endeksi">3.3 RSI — Göreceli Güç Endeksi</h3>
+<pre><code>Gain = Σ(closeᵢ₊₁ - closeᵢ, eğer &gt; 0) / n
+Loss = Σ(closeᵢ - closeᵢ₊₁, eğer &lt; 0) / n
+RS   = Gain / Loss
+RSI  = 100 - (100 / (1 + RS))
+</code></pre>
+<p><strong>Varsayılan periyot:</strong> 14 | OB: 70 | OS: 30</p>
+<p><strong>Kaynak:</strong> <code>calculate_rsi()</code> — <code>indicators.rs:25</code></p>
+<blockquote>
+<p><strong>SORUN:</strong> Wilder'ın orijinal RSI smoothing'i (SMMA = EMA α=1/n) kullanılmıyor; basit ortalama kullanılıyor. Standart platform değerlerinden sapma oluşur. Bkz. §15.2.</p>
+</blockquote>
+<h3 id="34-macd-hareketli-ortalama-yaknsamairaksama">3.4 MACD — Hareketli Ortalama Yakınsama/Iraksama</h3>
+<pre><code>k_fast   = 2 / (fast + 1)    [varsayılan: fast=12]
+k_slow   = 2 / (slow + 1)    [varsayılan: slow=26]
+k_signal = 2 / (signal + 1)  [varsayılan: signal=9]
+
+MACD_line    = EMA(fast) - EMA(slow)
+Signal_line  = EMA(MACD_line, signal)
+Histogram    = MACD_line - Signal_line
+</code></pre>
+<p><strong>Kaynak:</strong> <code>calculate_macd()</code> — <code>indicators.rs:38</code></p>
+<blockquote>
+<p><strong>SORUN:</strong> Signal EMA macd_series[0] = 0 ile seed ediliyor; standart hesaplama ilk <code>signal</code> barın SMA'sını kullanır. Bkz. §15.3.</p>
+</blockquote>
+<h3 id="35-bollinger-bands">3.5 Bollinger Bands</h3>
+<pre><code>SMA  = SMA(period)          [varsayılan: period=20]
+σ    = StdDev(son period bar)
+Upper = SMA + (std_dev × σ)  [varsayılan: std_dev=2.0]
+Lower = SMA - (std_dev × σ)
+</code></pre>
+<p><strong>Kaynak:</strong> <code>calculate_bollinger()</code> — <code>indicators.rs:62</code></p>
+<h3 id="36-stochastic-oscillator">3.6 Stochastic Oscillator</h3>
+<pre><code>%K = (close - min_low[n]) / (max_high[n] - min_low[n]) × 100
+</code></pre>
+<p><strong>Varsayılan:</strong> k=6, OB=70, OS=20 (DB kanıtlı değerler)</p>
+<p><strong>Kaynak:</strong> <code>calculate_stochastic()</code> — <code>indicators.rs:73</code></p>
+<h3 id="37-atr-ortalama-gercek-aralk">3.7 ATR — Ortalama Gerçek Aralık</h3>
+<pre><code>TR = max(High - Low, |High - prev_close|, |Low - prev_close|)
+ATR = Σ(TR[i], i=len-period..len) / period
+</code></pre>
+<p><strong>Kaynak:</strong> <code>calculate_atr()</code> — <code>indicators.rs:82</code></p>
+<blockquote>
+<p><strong>NOT:</strong> Gerçek ATR Wilder's SMMA (EMA α=1/n) kullanır; burada basit ortalama kullanılıyor. Normalize edilmiş kullanımda (ATR%) fark az önemlidir.</p>
+</blockquote>
+<h3 id="38-adx-ortalama-yonlu-endeks">3.8 ADX — Ortalama Yönlü Endeks</h3>
+<pre><code>TR = max(H-L, |H-PC|, |L-PC|)
++DM = max(H - prev_H, 0) [eğer down_move'dan büyükse]
+-DM = max(prev_L - L, 0) [eğer up_move'dan büyükse]
+
++DI = 100 × Σ(+DM) / Σ(TR)
+-DI = 100 × Σ(-DM) / Σ(TR)
+DX  = 100 × |+DI - (-DI)| / (+DI + (-DI))
+ADX ≈ DX  [son periyod]
+</code></pre>
+<p><strong>Kaynak:</strong> <code>calculate_adx()</code> — <code>indicators.rs:135</code></p>
+<blockquote>
+<p><strong>SORUN:</strong> ADX standarda göre DX serisinin Wilder SMMA'sıdır, burada sadece son periyodun DX değeri alınıyor. Trende geç tepki verir. Bkz. §15.4.</p>
+</blockquote>
+<h3 id="39-vwap-hacim-agrlkl-ortalama-fiyat">3.9 VWAP — Hacim Ağırlıklı Ortalama Fiyat</h3>
+<pre><code>Typical_Price = (High + Low + Close) / 3
+VWAP = Σ(Typical × Volume) / Σ(Volume)
+</code></pre>
+<p><strong>Kaynak:</strong> <code>calculate_vwap()</code> — <code>indicators.rs:166</code></p>
+<h3 id="310-williams-r">3.10 Williams %R</h3>
+<pre><code>%R = (HH[n] - close) / (HH[n] - LL[n]) × (-100)
+</code></pre>
+<p>Aralık: -100 (oversold) .. 0 (overbought).</p>
+<h3 id="311-supertrend">3.11 Supertrend</h3>
+<pre><code>HL2 = (High + Low) / 2
+Upper_Band = HL2 + (multiplier × ATR)   [varsayılan: mult=3.0]
+Lower_Band = HL2 - (multiplier × ATR)
+</code></pre>
+<p>Trend: fiyat Upper_Band üstündeyse +1 (bullish), altındaysa -1 (bearish).</p>
+<h3 id="312-stochastic-rsi">3.12 Stochastic RSI</h3>
+<pre><code>RSI_series = RSI hesapla (tüm barlar)
+StochRSI = (RSI - min(RSI[k])) / (max(RSI[k]) - min(RSI[k]))
+%K = StochRSI × 100
+%D = SMA(%K, 3)  [sinyal çizgisi]
+</code></pre>
+<h3 id="313-cci-emtia-kanal-endeksi">3.13 CCI — Emtia Kanal Endeksi</h3>
+<pre><code>Typical = (H + L + C) / 3
+Mean     = SMA(Typical, period)
+MeanDev  = Σ|Typical - Mean| / period
+CCI      = (Typical - Mean) / (0.015 × MeanDev)
+</code></pre>
+<hr />
+<h2 id="4-strateji-katman">4. Strateji Katmanı</h2>
+<h3 id="41-mevcut-stratejiler">4.1 Mevcut Stratejiler</h3>
+<table>
+<thead>
+<tr>
+<th>İsim</th>
+<th>Gösterge</th>
+<th>BUY sinyali koşulu</th>
+<th>SELL sinyali koşulu</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MA</td>
+<td>SMA fast/slow</td>
+<td>fast_sma &gt; slow_sma (crossover)</td>
+<td>fast_sma &lt; slow_sma</td>
+</tr>
+<tr>
+<td>EMA</td>
+<td>EMA fast/slow</td>
+<td>fast_ema &gt; slow_ema</td>
+<td>fast_ema &lt; slow_ema</td>
+</tr>
+<tr>
+<td>RSI</td>
+<td>RSI(14)</td>
+<td>RSI &lt; oversold (30) → alım</td>
+<td>RSI &gt; overbought (70) → satım</td>
+</tr>
+<tr>
+<td>MACD</td>
+<td>MACD(12,26,9)</td>
+<td>macd_line &gt; signal_line (crossover)</td>
+<td>macd_line &lt; signal_line</td>
+</tr>
+<tr>
+<td>BB</td>
+<td>BB(20, 2σ)</td>
+<td>close &lt; lower_band</td>
+<td>close &gt; upper_band</td>
+</tr>
+<tr>
+<td>DONCHIAN</td>
+<td>Donchian Ch(20)</td>
+<td>close &gt; upper_channel (kırılım)</td>
+<td>close &lt; lower_channel</td>
+</tr>
+<tr>
+<td>SUPERTREND</td>
+<td>ATR(10, 3x)</td>
+<td>supertrend_dir = +1</td>
+<td>supertrend_dir = -1</td>
+</tr>
+<tr>
+<td>STOCH_RSI</td>
+<td>StochRSI(14)</td>
+<td>%K &lt; 20 (oversold)</td>
+<td>%K &gt; 80 (overbought)</td>
+</tr>
+<tr>
+<td>STOCHASTIC</td>
+<td>Stoch(6)</td>
+<td>%K &lt; 20</td>
+<td>%K &gt; 70</td>
+</tr>
+<tr>
+<td>CCI</td>
+<td>CCI(20)</td>
+<td>CCI &lt; -100</td>
+<td>CCI &gt; +100</td>
+</tr>
+<tr>
+<td>WILLIAMS</td>
+<td>%R(14)</td>
+<td>%R &lt; -80 (oversold)</td>
+<td>%R &gt; -20 (overbought)</td>
+</tr>
+<tr>
+<td>ADX</td>
+<td>ADX(14)</td>
+<td>ADX &gt; 25 + +DI &gt; -DI</td>
+<td>ADX &gt; 25 + -DI &gt; +DI</td>
+</tr>
+<tr>
+<td>VWAP</td>
+<td>VWAP</td>
+<td>close &gt; VWAP (fiyat üstünde)</td>
+<td>close &lt; VWAP</td>
+</tr>
+</tbody>
+</table>
+<h3 id="42-strateji-parametreleri-statik-grid">4.2 Strateji Parametreleri — Statik Grid</h3>
+<p>Her tick'te 6 parametre kombinasyonu denenir (hesap maliyeti düşük, hız yüksek):</p>
+<pre><code>[0] HyperOpt optimize edilmiş (config'den, +0.1 bonus)
+[1] fast=9,  slow=21, period=10, OB=80, OS=20
+[2] fast=8,  slow=25, period=14, OB=70, OS=30
+[3] fast=12, slow=26, period=14, OB=75, OS=25
+[4] fast=5,  slow=15, period=9,  OB=70, OS=30
+[5] fast=5,  slow=20, period=14, OB=70, OS=30
+</code></pre>
+<hr />
+<h2 id="5-sinyal-secimi-dinamik-sralama-ve-konsensus-oylama">5. Sinyal Seçimi — Dinamik Sıralama ve Konsensüs Oylama</h2>
+<h3 id="51-composite-score-hesab">5.1 Composite Score Hesabı</h3>
+<p>Her strateji için <code>HyperOptimizer::simulate_score_htf()</code> çağrılır. Composite skor:</p>
+<pre><code>composite = w_sharpe × Sharpe
+          + w_sortino × Sortino
+          + w_wr × Win_Rate
+          + w_pf × Profit_Factor
+          + w_calmar × Calmar
+</code></pre>
+<p>Ağırlıklar interval kategorisine göre dinamik:</p>
+<table>
+<thead>
+<tr>
+<th>Interval</th>
+<th>Öncelikli Metrik</th>
+<th>Strateji Grubu</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1m, 5m</td>
+<td>Win Rate, Profit Factor</td>
+<td>Momentum (RSI, Stoch, CCI)</td>
+</tr>
+<tr>
+<td>15m, 30m</td>
+<td>Sharpe, Sortino</td>
+<td>Hybrid</td>
+</tr>
+<tr>
+<td>1h</td>
+<td>Sharpe, Sortino</td>
+<td>Trend (MACD, EMA, ST)</td>
+</tr>
+<tr>
+<td>4h, 1d</td>
+<td>Calmar, PF</td>
+<td>Structural (ADX, BB)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="52-top-5-agrlkl-oylama">5.2 Top-5 Ağırlıklı Oylama</h3>
+<pre><code>Toplam Top-5 strateji belirlenir (rank_strategies_for_interval)
+
+BUY_weight  = Σ(composite_score, BUY  veren stratejiler)
+SELL_weight = Σ(composite_score, SELL veren stratejiler)
+total_weight = BUY_weight + SELL_weight
+
+buy_pct  = BUY_weight  / total_weight
+sell_pct = SELL_weight / total_weight
+
+Eşik: 0.50 (≥ %50 ağırlık)
+
+Karar:
+  buy_pct  &gt;= 0.50 ve buy_pct  &gt; sell_pct  → BUY
+  sell_pct &gt;= 0.50 ve sell_pct &gt; buy_pct   → SELL
+  aksi halde                               → HOLD
+</code></pre>
+<p><strong>Neden bu yöntem?</strong> Tek bir stratejinin hatalı sinyali tüm sistemi etkilemez. Ağırlıklı konsensüs, piyasa rejimi bazlı en iyi strateji grubuyla kararı verir.</p>
+<h3 id="53-en-iyi-parametre-secimi-grid-search">5.3 En İyi Parametre Seçimi (Grid Search)</h3>
+<pre><code>for params in [optimized, grid[1..5]]:
+    score = simulate_score_htf(strategy, candles, params)
+    if params == optimized: score += 0.1  # bias: optimize edilmişi tercih et
+
+best_params = argmax(score)
+</code></pre>
+<hr />
+<h2 id="6-sinyal-filtre-zinciri">6. Sinyal Filtre Zinciri</h2>
+<p>Bir BUY/SELL sinyali aşağıdaki 10 filtrenin tamamından geçmek zorundadır. Her engel <code>HOLD</code>'a döndürür ve loglara kaydedilir.</p>
+<pre><code>Konsensüs Sinyal
+      │
+      ▼ [1] HyperOpt Güvensizlik Filtresi
+      │   raw_score &lt; 0.05 → ENGEL (parametreler geçmişte zararlı)
+      │
+      ▼ [2] R/R Oranı Filtresi
+      │   rr = take_profit_pct / stop_loss_pct
+      │   rr &lt; min_rr → ENGEL
+      │
+      ▼ [3] Volatilite Bant Filtresi
+      │   avg_range_pct = Σ(|H-L|/C × 100) / 20 bar
+      │   avg_range_pct &lt; vol_min OR &gt; vol_max → ENGEL
+      │
+      ▼ [4] HTF Trend Filtresi
+      │   LTF=1m → HTF=1h | LTF=15m → HTF=4h ...
+      │   BUY  + HTF Bearish → ENGEL
+      │   SELL + HTF Bullish → ENGEL
+      │
+      ▼ [5] LTF Trend Filtresi
+      │   SMA_short &gt; SMA_long → Bullish
+      │   SMA_short &lt; SMA_long → Bearish
+      │   |fark| &lt; margin_pct(0.5%) → Neutral (geçer)
+      │   BUY + Bearish → ENGEL | SELL + Bullish → ENGEL
+      │
+      ▼ [6] S/R Kalite Filtresi
+      │   buy_quality = compute_buy_quality(dist_support, dist_resistance)
+      │   buy_quality &lt; min_buy_quality → ENGEL
+      │
+      ▼ [7] Futures Flip Kontrolü
+      │   Ters yönde açık pozisyon var → önce kapat, sonra devam
+      │   (Sadece Futures/CoinM, Spot'ta bu adım yok)
+      │
+      ▼ [8] HyperOpt Skor Kapısı
+      │   hyperopt_score &lt; 0.0 → ENGEL (zararlı parametre rejimi)
+      │
+      ▼ [9] Seans/Saat Filtresi
+      │   blocked_hours listesinde → ENGEL
+      │   allowed_hours listesi doluysa ve saatte yok → ENGEL
+      │   long_preferred_hours'da SELL → ENGEL
+      │
+      ▼ [10] Pattern Kapısı (opsiyonel, varsayılan kapalı)
+      │   DB'deki geçmiş pattern (trend|vol|momentum) eşleşmesi
+      │   win_rate &lt; 55% veya trade_count &lt; 10 → ENGEL
+      │   confidence = f(win_rate, trade_count, avg_pnl) &lt; 0.20 → ENGEL
+      │
+      ▼ [11] SL Cooldown
+          Son SL kapanışından &lt; 1800 sn (30 dk) → ENGEL
+</code></pre>
+<h3 id="61-trend-bias-formulu">6.1 Trend Bias Formülü</h3>
+<pre><code>SMA_short = SMA(trend_short_period)  [varsayılan: 20]
+SMA_long  = SMA(trend_long_period)   [varsayılan: 50]
+diff_pct  = |SMA_short - SMA_long| / SMA_long × 100
+
+if diff_pct &lt; margin_pct (0.5%) → Neutral
+elif SMA_short &gt; SMA_long        → Bullish
+else                             → Bearish
+</code></pre>
+<h3 id="62-volatilite-filtresi">6.2 Volatilite Filtresi</h3>
+<pre><code>avg_range = Σ((Hᵢ - Lᵢ) / Cᵢ × 100) / n  [n=20 bar]
+
+Geçerli aralık: [volatility_min_pct, volatility_max_pct]
+</code></pre>
+<p><strong>Neden?</strong> Çok düşük volatilite = sahte kırılım riski. Çok yüksek volatilite = spread ve slippage riski.</p>
+<h3 id="63-pattern-confidence-formulu">6.3 Pattern Confidence Formülü</h3>
+<pre><code>conf_base = win_rate × 0.6 + (avg_pnl / 5.0).clamp(0,1) × 0.4
+conf = conf_base × min(1.0, trade_count / 20.0)
+</code></pre>
+<p>Sample penalty: 20 trade'e kadar lineer düşüş (az veriyle aşırı güven engellenir).</p>
+<hr />
+<h2 id="7-pozisyon-boyutu-ve-kaldrac">7. Pozisyon Boyutu ve Kaldıraç</h2>
+<h3 id="71-temel-pozisyon-boyutu">7.1 Temel Pozisyon Boyutu</h3>
+<p><strong>Kelly Kriteri (opsiyonel):</strong></p>
+<pre><code>f* = (b × p - q) / b
+   b = win_loss_ratio (ort kazanç / ort kayıp)
+   p = win_rate
+   q = 1 - p
+
+max_risk = capital × max_portfolio_risk_pct
+qty = (max_risk × f*) / entry_price
+</code></pre>
+<p><strong>Klasik (varsayılan):</strong></p>
+<pre><code>max_risk = capital × max_portfolio_risk_pct
+qty = min(max_risk, capital × max_position_size_pct) / entry_price
+</code></pre>
+<h3 id="72-dinamik-kaldrac-sadece-futures">7.2 Dinamik Kaldıraç (Sadece Futures)</h3>
+<p>Spot piyasada kaldıraç her zaman 1x'dir.</p>
+<pre><code>lev = base_leverage   [varsayılan: 7x]
+
++1.0  HTF trend sinyalle aynı yönde
+-2.0  ATR% &gt; 2.5  (yüksek volatilite)
+-1.0  ATR% &gt; 1.5  (orta volatilite)
+-1.0  drawdown% &gt; 5
+→base drawdown% &gt; 10 (koruma modu)
++0.5  HyperOpt_score &gt; 0.70 (güçlü sinyal)
++0.5  session_rr &gt; 2.0 (çok iyi RR)
+-1.0  session_rr &lt; 0.8 (kötü RR)
+-0.5  loss_streak &gt;= 2
+-1.5  loss_streak &gt;= 3
+→base loss_streak &gt;= 5 (ciddi koruma)
+-1.0  open_count &gt;= 3 (risk konsantrasyonu)
+-2.0  open_count &gt;= 5
+
+effective_leverage = clamp(lev, base, max)
+</code></pre>
+<h3 id="73-kaldracl-lot-hesab">7.3 Kaldıraçlı Lot Hesabı</h3>
+<pre><code>base_qty = calculate_position_size(equity, entry_price)
+qty      = base_qty × effective_leverage
+notional = qty × entry_price
+</code></pre>
+<hr />
+<h2 id="8-stop-loss-ve-take-profit-mekanizmalar">8. Stop-Loss ve Take-Profit Mekanizmaları</h2>
+<h3 id="81-statik-sltp">8.1 Statik SL/TP</h3>
+<pre><code>Long  SL = entry × (1 - stop_loss_pct / 100)
+Long  TP = entry × (1 + take_profit_pct / 100)
+Short SL = entry × (1 + stop_loss_pct / 100)
+Short TP = entry × (1 - take_profit_pct / 100)
+</code></pre>
+<h3 id="82-sl-guvenlik-klamp-tasfiye-korumas">8.2 SL Güvenlik Klampı (Tasfiye Koruması)</h3>
+<pre><code>max_sl_pct = 80.0 / effective_leverage
+
+Örn: 10x kaldıraç → max SL = %8
+     7x  kaldıraç → max SL = %11.4
+</code></pre>
+<p><strong>Neden?</strong> Binance Futures tasfiye marjı ~%5-10 aralığındadır. SL her zaman tasfiyeden önce tetiklenmeli.</p>
+<h3 id="83-trailing-stop-loss">8.3 Trailing Stop-Loss</h3>
+<pre><code>Başlangıç: trailing_sl = None (kâra geçmeden aktif değil)
+
+Her fiyat güncellemesinde:
+  Long:  best_price = max(best_price, current_price)
+         trailing_sl = best_price × (1 - trailing_pct / 100)
+         Tetiklenir: current_price &lt;= trailing_sl
+
+  Short: best_price = min(best_price, current_price)
+         trailing_sl = best_price × (1 + trailing_pct / 100)
+         Tetiklenir: current_price &gt;= trailing_sl
+</code></pre>
+<h3 id="84-sr-tabanl-dinamik-sltp">8.4 S/R Tabanlı Dinamik SL/TP</h3>
+<pre><code>SL (Long)  = max_strength_support.price_low × (1 - buffer_pct / 100)
+TP (Long)  = nearest_resistance.price_low × (1 - buffer_pct / 100)
+
+SL (Short) = max_strength_resistance.price_high × (1 + buffer_pct / 100)
+TP (Short) = nearest_support.price_high × (1 + buffer_pct / 100)
+</code></pre>
+<p>ATR uyarlaması (indicator_adjusted_sl_tp):
+- SL_dist &lt; 0.8×ATR → genişlet (gürültüden kapanma)
+- SL_dist &gt; 3.0×ATR → daralt (aşırı risk)
+- ADX &gt; 25 → TP + 0.5×ATR (trend devam edebilir)
+- ADX &lt; 20 → TP max 2×ATR (range ortalaması)
+- BB_width &gt; %4 → SL + 0.3×ATR buffer</p>
+<h3 id="85-sltp-tetikleme-onceligi">8.5 SL/TP Tetikleme Önceliği</h3>
+<pre><code>1. Trailing SL (en öncelikli — kâr koruma)
+2. Static SL
+3. Static TP
+</code></pre>
+<p><strong>Çıkış fiyatı:</strong> SL/TP seviyesi kullanılır, WS anlık fiyatı değil (slippage adil simülasyonu).</p>
+<h3 id="86-cks-fiyat-slippage-duzeltmesi">8.6 Çıkış Fiyatı Slippage Düzeltmesi</h3>
+<pre><code>adj = slippage_pct / 100 / 2
+
+BUY  exit: price × (1 + adj)   [daha pahalı çıkış]
+SELL exit: price × (1 - adj)   [daha ucuz çıkış]
+</code></pre>
+<hr />
+<h2 id="9-pnl-hesab">9. PnL Hesabı</h2>
+<h3 id="91-brut-pnl">9.1 Brüt PnL</h3>
+<pre><code>Long:  gross_pnl = (exit_price - entry_price) × qty
+Short: gross_pnl = (entry_price - exit_price) × qty
+</code></pre>
+<h3 id="92-net-pnl-komisyon-dahil">9.2 Net PnL (Komisyon Dahil)</h3>
+<pre><code>entry_notional = entry_price × qty
+exit_notional  = exit_price  × qty
+commission     = (entry_notional + exit_notional) × commission_pct
+                                                    [varsayılan: 0.001 = %0.1]
+net_pnl = gross_pnl - commission
+</code></pre>
+<p>Binance Spot Maker/Taker: %0.1 | VIP ile düşer.
+Binance Futures: %0.02 Maker / %0.05 Taker (typik).</p>
+<h3 id="93-marjin-bazl-pnl-yuzdesi">9.3 Marjin Bazlı PnL Yüzdesi</h3>
+<pre><code>margin = entry_price × qty / leverage
+pnl_pct = (net_pnl / margin) × 100
+        = net_pnl × leverage / (entry_price × qty) × 100
+
+Örn: %1 fiyat hareketi × 8x kaldıraç = %8 pnl_pct
+</code></pre>
+<h3 id="94-kumulatif-takip">9.4 Kümülatif Takip</h3>
+<pre><code>current_equity = (capital + cumulative_pnl).max(0.0)
+peak_equity    = max(peak_equity, current_equity)
+drawdown_pct   = (peak_equity - current_equity) / peak_equity × 100
+</code></pre>
+<hr />
+<h2 id="10-risk-kaplar-ve-otonom-kontrol">10. Risk Kapıları ve Otonom Kontrol</h2>
+<h3 id="101-autonomouscontroller-fsm">10.1 AutonomousController FSM</h3>
+<pre><code>Durumlar: Active → SafeMode → Halt → Recovery → Active
+
+Active:    Normal işlem
+SafeMode:  Kademeli azaltma (consecutive_failures &gt;= safe_mode_threshold)
+Halt:      İşlem durduruldu (consecutive_failures &gt;= halt_threshold)
+Recovery:  Manuel veya otomatik kurtarma bekleniyor
+
+Varsayılan: max_failures_before_safe_mode=3, max_failures_before_halt=5
+</code></pre>
+<h3 id="102-riskgate">10.2 RiskGate</h3>
+<pre><code>Girdi:
+  account_equity, day_start_equity, peak_equity,
+  requested_notional_usd, model_confidence
+
+Kurallar:
+  DENY eğer notional &gt; max_notional_usd
+  DENY eğer (equity - day_start_equity) / day_start_equity &lt; -max_daily_loss_pct
+  DENY eğer drawdown_pct &gt; max_drawdown_pct
+  DENY eğer model_confidence &lt; min_model_confidence
+</code></pre>
+<p>Varsayılan policy:</p>
+<pre><code>max_notional_usd     = 10_000
+max_daily_loss_pct   = 5.0%
+max_drawdown_pct     = 15.0%
+min_model_confidence = 0.5
+</code></pre>
+<h3 id="103-circuitbreaker">10.3 CircuitBreaker</h3>
+<pre><code>Durumlar: Closed (normal) → Open (devre kesik) → HalfOpen (deneme)
+
+Open: API çağrısı başarısız → n saniye bekle → HalfOpen
+HalfOpen: Başarısızsa → Open | Başarılıysa → Closed
+</code></pre>
+<h3 id="104-drawdownmonitor">10.4 DrawdownMonitor</h3>
+<pre><code>current_dd = (peak - current) / peak × 100
+
+Status:
+  Normal   : dd &lt; warning_threshold (varsayılan: %10)
+  Warning  : %10 ≤ dd &lt; %20
+  Critical : dd ≥ %20  → işleme ara ver
+</code></pre>
+<h3 id="105-sl-cooldown">10.5 SL Cooldown</h3>
+<pre><code>SL tetiklenince: sl_cooldown_map[symbol] = now()
+Sonraki giriş denemesinde:
+  elapsed = now() - sl_time
+  elapsed &lt; sl_cooldown_secs (1800 = 30dk) → ENGEL
+</code></pre>
+<p><strong>Neden?</strong> SL sonrası piyasa genellikle aynı yönde devam eder. 30 dakika beklemek aynı hatanın tekrarını önler.</p>
+<hr />
+<h2 id="11-backtest-motoru-ve-performans-metrikleri">11. Backtest Motoru ve Performans Metrikleri</h2>
+<h3 id="111-backtest-simulasyonu">11.1 Backtest Simülasyonu</h3>
+<pre><code>for candle in sorted_candles:
+    signal = strategy.generate_signal(candles[0..i])
+
+    if signal == BUY and no position:
+        entry_price = candle.close
+        fee = position_size × entry_price × commission_pct
+        balance -= fee
+
+    if position:
+        if candle.low  &lt;= SL → çıkış (SL)
+        if candle.high &gt;= TP → çıkış (TP)
+
+    if signal == SELL and has position:
+        exit_price = candle.close
+        gross_pnl = (exit - entry) × size
+        fee = size × (entry + exit) × commission_pct
+        net_pnl = gross_pnl - fee
+        balance += net_pnl
+
+Açık pozisyon kalırsa son fiyattan kapat.
+</code></pre>
+<h3 id="112-performans-metrikleri-formulleri">11.2 Performans Metrikleri Formülleri</h3>
+<p><strong>Win Rate:</strong></p>
+<pre><code>WR = winning_trades / total_trades × 100
+</code></pre>
+<p><strong>Profit Factor:</strong></p>
+<pre><code>PF = Σ(kazançlar) / Σ|kayıplar|
+PF &gt; 1 → kârlı | PF &gt; 1.5 → iyi | PF &gt; 2.0 → mükemmel
+</code></pre>
+<p><strong>Sharpe Ratio (trade bazlı, risk-free=0):</strong></p>
+<pre><code>mean_R = Σ(pnl_pct) / n
+σ_R    = StdDev(pnl_pct)
+Sharpe = mean_R / σ_R
+</code></pre>
+<p><strong>Sortino Ratio:</strong></p>
+<pre><code>downside_returns = [r for r in pnl_pcts if r &lt; mean_R]
+σ_down = StdDev(downside_returns)
+Sortino = mean_R / σ_down
+</code></pre>
+<p><strong>Calmar Ratio:</strong></p>
+<pre><code>Calmar = total_pnl_pct / max_drawdown_pct
+</code></pre>
+<p><strong>Max Drawdown:</strong></p>
+<pre><code>peak = 0; max_dd = 0
+for r in pnl_pcts:
+    cumulative += r
+    peak = max(peak, cumulative)
+    max_dd = max(max_dd, peak - cumulative)
+</code></pre>
+<h3 id="113-trade-profilleri">11.3 Trade Profilleri</h3>
+<table>
+<thead>
+<tr>
+<th>Profil</th>
+<th>TP%</th>
+<th>SL%</th>
+<th>Max Pozisyon</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Conservative</td>
+<td>5.0</td>
+<td>1.0</td>
+<td>%5 sermaye</td>
+</tr>
+<tr>
+<td>Balanced</td>
+<td>8.0</td>
+<td>2.0</td>
+<td>%10 sermaye</td>
+</tr>
+<tr>
+<td>Aggressive</td>
+<td>15.0</td>
+<td>3.0</td>
+<td>%20 sermaye</td>
+</tr>
+<tr>
+<td>Scalper</td>
+<td>2.0</td>
+<td>0.5</td>
+<td>%15 sermaye</td>
+</tr>
+<tr>
+<td>SwingTrading</td>
+<td>20.0</td>
+<td>5.0</td>
+<td>%8 sermaye</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="12-evrimsel-optimizasyon-genetik-algoritma">12. Evrimsel Optimizasyon (Genetik Algoritma)</h2>
+<h3 id="121-strategygenome">12.1 StrategyGenome</h3>
+<p>Her birey (genome) bir strateji parametresi kümesidir:</p>
+<pre><code>{
+  strategy_name,
+  fast_period, slow_period,
+  rsi_period, rsi_ob, rsi_os,
+  stop_loss_pct, take_profit_pct,
+  fitness: FitnessScore
+}
+</code></pre>
+<h3 id="122-fitness-fonksiyonu">12.2 Fitness Fonksiyonu</h3>
+<pre><code>FitnessScore = profit_component    (max: 50)
+             + risk_component      (max: 30)
+             + consistency_component (max: 20)
+             + sharpe_component    (max: 30)
+             + survival_bonus      (max: 20)
+             ─────────────────────────────────
+             Toplam range: 0–150
+</code></pre>
+<p><strong>Profit component (0-50):</strong></p>
+<pre><code>PF_normalized = min(profit_factor / 3.0, 1.0) × 30
+WR_normalized = max(0, win_rate - 50) / 50 × 20
+profit_component = PF_normalized + WR_normalized
+</code></pre>
+<p><strong>Risk component (0-30):</strong></p>
+<pre><code>DD_score = max(0, 1 - max_drawdown_pct / 30) × 30
+risk_component = DD_score
+</code></pre>
+<p><strong>Consistency (0-20):</strong></p>
+<pre><code>consistency = trade_count_bonus + streak_penalty
+</code></pre>
+<h3 id="123-evrim-dongusu">12.3 Evrim Döngüsü</h3>
+<pre><code>1. Başlangıç popülasyonu: random genome × population_size
+2. Fitness değerlendirme: backtest → FitnessScore
+3. Seleksiyon: tournament selection (en iyi %top_k hayatta)
+4. Crossover: iki ebeveynin parametrelerini karıştır (nokta çaprazlaması)
+5. Mutasyon: rastgele parametre ±delta ile boz (mutasyon_rate)
+6. Yeni nesil → 2'ye dön
+
+evolve_every_n_cycles: her N trading döngüsünde bir evrim adımı
+</code></pre>
+<h3 id="124-adaptivebrain-q-learning">12.4 AdaptiveBrain Q-Learning</h3>
+<pre><code>State: MarketRegime (StrongUptrend / WeakUptrend / Ranging / HighVol / LowVol / ...)
+Action: StrategyName
+
+Q(s, a) := Q(s, a) + α × [reward - Q(s, a)]
+α = 0.1 (öğrenme hızı)
+reward = pnl_pct / 10.0
+
+Regime tespiti:
+  trend_pct = (last - first) / first × 100  [son 20 bar]
+
+  |trend_pct| &gt; 5% → Strong Trend
+  |trend_pct| &gt; 2% → Weak Trend
+  (trend önce kontrol edilir, ardından volatilite)
+  vol_pct &gt; 3% → HighVolatility
+  vol_pct &lt; 0.5% → LowVolatility
+  aksi → Ranging
+</code></pre>
+<hr />
+<h2 id="13-ml-katman-anomali-tespiti">13. ML Katmanı — Anomali Tespiti</h2>
+<h3 id="131-z-score-tabanl-anomali-tespiti">13.1 Z-Score Tabanlı Anomali Tespiti</h3>
+<p><strong>ONNX kaldırıldı</strong>, saf Rust z-score implementasyonu:</p>
+<pre><code>baseline = input[0..n-1]  // son eleman hariç
+mean = Σ(baseline) / (n-1)
+σ    = StdDev(baseline)
+z    = |input[n-1] - mean| / σ
+
+anomali = z &gt; ZSCORE_THRESHOLD (3.0)
+</code></pre>
+<p><strong>Neden baseline = son eleman hariç?</strong> Spike kendisini mean'e dahil ederse z-score seyreltilir ve tespit edilemez.</p>
+<p><strong>Minimum sample:</strong> MIN_SAMPLES = 5 (5 veri noktasından az varsa tespit yok).</p>
+<h3 id="132-feature-extractor">13.2 Feature Extractor</h3>
+<pre><code>Feature vektörü (6 özellik):
+[0] RSI normalize (0-1)
+[1] MACD histogram normalize
+[2] BB %B = (close - lower) / (upper - lower)
+[3] Stochastic %K (0-100) normalize
+[4] ATR% (volatilite)
+[5] Volume ratio = volume / avg_volume(20)
+</code></pre>
+<h3 id="133-ml-worker-dongusu">13.3 ML Worker Döngüsü</h3>
+<pre><code>elapsed := train_every_secs  // ilk çalıştırma hemen
+loop:
+  sleep(1 sn)
+  elapsed += 1
+  if elapsed &gt;= train_every_secs:
+    → DB'den son N candle çek
+    → Feature extraction
+    → Z-score anomali tespiti
+    → AppState.ml_summary güncelle
+    elapsed = 0
+</code></pre>
+<hr />
+<h2 id="14-destek-direnc-sr-dedektoru">14. Destek / Direnç (S/R) Dedektörü</h2>
+<h3 id="141-swing-nokta-tespiti">14.1 Swing Nokta Tespiti</h3>
+<pre><code>Swing High (Direnç adayı):
+  candles[i].high &gt;= tüm candles[i-lb..i+lb].high
+  (±swing_lookback komşusu)
+
+Swing Low (Destek adayı):
+  candles[i].low &lt;= tüm candles[i-lb..i+lb].low
+
+Hacim ağırlığı: vw = candle.volume / mean_volume
+</code></pre>
+<h3 id="142-kumeleme">14.2 Kümeleme</h3>
+<pre><code>Noktalara göre sırala (fiyat)
+Eğer |price - ref_price| / ref_price × 100 ≤ cluster_pct → aynı kümeye ekle
+
+Midpoint = Σ(price × vw) / Σ(vw)  [hacim ağırlıklı]
+price_low  = min(prices) - midpoint × 0.001
+price_high = max(prices) + midpoint × 0.001
+strength   = Σ(vw) × touch_count
+</code></pre>
+<h3 id="143-kalite-puan-buy-quality">14.3 Kalite Puanı (Buy Quality)</h3>
+<pre><code>Birincil kriter: destekten uzaklık
+  dist_support_pct &gt; 3.0% → q = 0.15  (destekten uzak → kötü alım)
+  dist_support_pct &gt; 1.5% → q = 0.30
+  dist_support_pct ≤ 1.5% → ikincil kritere geç
+
+İkincil kriter: direnç mesafesi
+  dist_resistance_pct &lt; 0.5% → q = 0.10  (neredeyse dirençte)
+  dist_resistance_pct &lt; 1.5% → q = 0.40
+  dist_resistance_pct &lt; 3.0% → q = 0.60
+  dist_resistance_pct ≥ 3.0% → q = 0.75  (geniş hareket alanı)
+
+Özel durumlar:
+  in_resistance_zone → q = 0.05  (kesinlikle alma)
+  in_support_zone    → q = 0.90  (ideal giriş)
+  dist_support &lt; 0   → q = 0.15  (destek altına düştü)
+</code></pre>
+<hr />
+<h2 id="15-tespit-edilen-sorunlar-ve-gelistirme-tavsiyeleri">15. Tespit Edilen Sorunlar ve Geliştirme Tavsiyeleri</h2>
+<h3 id="151-ema-cift-saym-sorunu-oncelik-orta">15.1 EMA Çift Sayım Sorunu [ÖNCELİK: ORTA]</h3>
+<p><strong>Mevcut kod</strong> (<code>indicators.rs:14-21</code>):</p>
+<pre><code class="language-rust">let mut ema = candles[len-n..].iter().map(|c| c.close).sum::&lt;f64&gt;() / n as f64;
+for c in &amp;candles[len-n..] {  // Aynı pencere!
+    ema = c.close * k + ema * (1.0 - k);
+}
+</code></pre>
+<p><strong>Sorun:</strong> Seed için kullanılan N bar, iterasyonda da işleniyor. EMA ilk N bar üzerinde zaten oluşmuş, onları tekrar işlemek değeri öne çekiyor.</p>
+<p><strong>Düzeltme:</strong></p>
+<pre><code class="language-rust">let mut ema = candles[0..n].iter().map(|c| c.close).sum::&lt;f64&gt;() / n as f64;
+for c in &amp;candles[n..] {  // N+1'den devam
+    ema = c.close * k + ema * (1.0 - k);
+}
+</code></pre>
+<p><strong>Etki:</strong> EMA ve EMA tabanlı tüm stratejiler (MACD, EMA Crossover, Supertrend) farklı değer üretir. Backtest vs live tutarsızlığına yol açar.</p>
+<hr />
+<h3 id="152-rsi-wilder-smoothing-eksikligi-oncelik-orta">15.2 RSI Wilder Smoothing Eksikliği [ÖNCELİK: ORTA]</h3>
+<p><strong>Mevcut:</strong> Basit ortalama (SMA of gains/losses)</p>
+<p><strong>Standart Wilder RSI:</strong> Her adım için <code>SMMA(n) = (prev_SMMA × (n-1) + current) / n</code></p>
+<p><strong>Sonuç:</strong> Mevcut RSI standart platform değerlerinden (TradingView, Binance) %5-10 sapabilir. Backtest ile canlı işlem arasında sinyal farklılığına yol açar.</p>
+<p><strong>Öneri:</strong></p>
+<pre><code class="language-rust">// Wilder smoothing için:
+let mut avg_gain = gains[0..period].iter().sum::&lt;f64&gt;() / period as f64;
+let mut avg_loss = losses[0..period].iter().sum::&lt;f64&gt;() / period as f64;
+for i in period..closes.len() {
+    avg_gain = (avg_gain * (period - 1) as f64 + gains[i]) / period as f64;
+    avg_loss = (avg_loss * (period - 1) as f64 + losses[i]) / period as f64;
+}
+</code></pre>
+<hr />
+<h3 id="153-macd-signal-seed-sorunu-oncelik-dusuk">15.3 MACD Signal Seed Sorunu [ÖNCELİK: DÜŞÜK]</h3>
+<p><strong>Mevcut:</strong> Signal EMA <code>macd_series[0]</code> (≈0) ile seed ediliyor.</p>
+<p><strong>Standart:</strong> İlk <code>signal_period</code> bar MACD değerlerinin SMA'sı ile seed edilmeli.</p>
+<p><strong>Etki:</strong> İlk birkaç bar için signal line yanlış; büyük veri setlerinde (200+ bar) ihmal edilebilir.</p>
+<hr />
+<h3 id="154-adx-rma-yerine-basit-ortalama-oncelik-dusuk">15.4 ADX RMA Yerine Basit Ortalama [ÖNCELİK: DÜŞÜK]</h3>
+<p><strong>Mevcut:</strong> <code>ADX ≈ son periyodun DX değeri</code></p>
+<p><strong>Standart:</strong> <code>ADX = RMA(DX, period)</code> — Wilder Moving Average</p>
+<p><strong>Etki:</strong> ADX değerleri gerçek trend gücünü daha kaba ölçer, gecikme artar.</p>
+<hr />
+<h3 id="155-sharpesortino-zaman-normalizasyonu-eksik-oncelik-orta">15.5 Sharpe/Sortino Zaman Normalizasyonu Eksik [ÖNCELİK: ORTA]</h3>
+<p><strong>Mevcut:</strong> Trade bazlı hesaplama (zaman boyutu yok).</p>
+<p><strong>Sorun:</strong>
+- 1m interval'de 100 trade vs 1d interval'de 100 trade aynı Sharpe çıkarsa karşılaştırılamaz.
+- Standart yıllık Sharpe: <code>Sharpe_annual = Sharpe_trade × √(trades_per_year)</code></p>
+<p><strong>Öneri:</strong></p>
+<pre><code>trades_per_year = (365 × 24 × 60) / interval_minutes
+annualized_sharpe = trade_sharpe × sqrt(trades_per_year)
+</code></pre>
+<hr />
+<h3 id="156-calmar-recovery-factor-tekrar-oncelik-dusuk">15.6 Calmar = Recovery Factor Tekrarı [ÖNCELİK: DÜŞÜK]</h3>
+<p><strong>Mevcut:</strong> Her ikisi de <code>total_pnl / max_drawdown</code> kullanıyor.</p>
+<p><strong>Standart Calmar:</strong> <code>annualized_return / max_drawdown</code> (3 yıllık periyot)</p>
+<p>Bu iki metrik birbirinden farklı olmalı; şu an birbirinin kopyası.</p>
+<hr />
+<h3 id="157-kelly-kriteri-binary-varsaym-oncelik-orta">15.7 Kelly Kriteri Binary Varsayım [ÖNCELİK: ORTA]</h3>
+<p><strong>Mevcut formül:</strong> <code>f* = (b×p - q) / b</code></p>
+<p>Bu formül yalnızca sabit kazanç/kayıp oranı (binary outcome) için doğru.</p>
+<p><strong>Gerçekçi trading için:</strong> <code>f* = μ / σ²</code> (continuous Kelly) veya fraksiyonel Kelly:</p>
+<pre><code>f* = E[R] / E[R²]  →  pratik uygulamada f/2 veya f/4 kullanılır
+</code></pre>
+<p><strong>Risk:</strong> Tam Kelly çok agresiftir; %50 Kelly (f*/2) önerilir.</p>
+<hr />
+<h3 id="158-drawdown-koruma-islem-durdurma-yok-oncelik-yuksek">15.8 Drawdown Koruma — İşlem Durdurma Yok [ÖNCELİK: YÜKSEK]</h3>
+<p><strong>Mevcut:</strong> <code>dd_pct &gt; 10% → lev = base</code> (kaldıraç düşürür ama işlem devam eder)</p>
+<p><strong>Eksik:</strong> Drawdown kritik seviyeye ulaştığında (örn. %20) işlemlerin tamamen durdurulması gerekir.</p>
+<p><strong>Öneri:</strong></p>
+<pre><code>dd &gt; 10% → leverage = base
+dd &gt; 15% → tüm pozisyon boyutlarını %50 azalt
+dd &gt; 20% → SafeMode: sadece mevcut pozisyonları kapat, yeni giriş yok
+dd &gt; 25% → Halt: tüm işlemleri durdur, manuel onay bekle
+</code></pre>
+<hr />
+<h3 id="159-konsensus-esigi-sabit-oncelik-orta">15.9 Konsensüs Eşiği Sabit [ÖNCELİK: ORTA]</h3>
+<p><strong>Mevcut:</strong> <code>threshold = 0.50</code> (sabit)</p>
+<p><strong>Sorun:</strong> HighVolatility rejiminde %50 eşiği çok düşük olabilir; yanlış sinyaller artar.</p>
+<p><strong>Öneri:</strong> Piyasa rejimine göre adaptif eşik:</p>
+<pre><code>Ranging       → threshold = 0.60  (daha sıkı)
+HighVolatility→ threshold = 0.65  (çok sıkı)
+StrongTrend   → threshold = 0.45  (biraz gevşek; trend sinyaller net)
+</code></pre>
+<hr />
+<h3 id="1510-pattern-gate-varsaylan-kapal-oncelik-orta">15.10 Pattern Gate Varsayılan Kapalı [ÖNCELİK: ORTA]</h3>
+<p>Pattern Gate (<code>pattern_gate_enabled = false</code> varsayılan) açıldığında güçlü bir süzgeç. Ancak yeterli DB verisi birikene kadar çok az sinyal üretir.</p>
+<p><strong>Öneri:</strong> <code>min_trade_count = 30</code> yerine <code>10</code> ile başlayıp kademeli olarak artır. Veri birikimini hızlandırmak için backtester çıktısını pattern_library'ye besle.</p>
+<hr />
+<h3 id="1511-orphan-pozisyon-slippage-yok-oncelik-dusuk">15.11 Orphan Pozisyon Slippage Yok [ÖNCELİK: DÜŞÜK]</h3>
+<p><code>process_orphans()</code> içinde slippage hesabı yapılmıyor:</p>
+<pre><code class="language-rust">let pnl = pos.realized_pnl_with_commission(exit_price, self.config.commission_pct);
+</code></pre>
+<p><code>adjusted_price()</code> çağrılmıyor. Orphan pozisyonlar için PnL hafif overestimate edilir.</p>
+<hr />
+<h3 id="1512-htf-candle-yoksa-filtre-atlanyor-oncelik-orta">15.12 HTF Candle Yoksa Filtre Atlanıyor [ÖNCELİK: ORTA]</h3>
+<p>HTF candle DB'de yoksa <code>htf_bias = None</code> döner ve HTF filtresi <strong>geçilmiş sayılır</strong>. Bu, henüz veri birikmeyen semboller için büyük trende karşı giriş yapılmasına izin verir.</p>
+<p><strong>Öneri:</strong> HTF verisi yoksa HOLD döndür veya giriş boyutunu %50 küçült.</p>
+<hr />
+<h3 id="1513-genel-tavsiyeler">15.13 Genel Tavsiyeler</h3>
+<h4 id="a-volume-confirmation">A. Volume Confirmation</h4>
+<p>Tüm kırılım stratejileri (Donchian, BB kırılımı) <strong>hacim onayı olmadan</strong> tetikleniyor. Sahte kırılım oranını düşürmek için:</p>
+<pre><code>BUY sinyalinde: current_volume &gt; avg_volume(20) × 1.5 (hacim artışı onayı)
+</code></pre>
+<h4 id="b-multi-timeframe-konfirmasyon-genisletme">B. Multi-Timeframe Konfirmasyon Genişletme</h4>
+<p>Şu an sadece 1 üst TF (HTF) kullanılıyor. Daha güçlü filtre için:</p>
+<pre><code>LTF: giriş sinyali
+MTF: trend teyit
+HTF: büyük resim bias
+(tümü aynı yönde olursa giriş güçlü)
+</code></pre>
+<h4 id="c-bollinger-band-squeeze-tespiti">C. Bollinger Band Squeeze Tespiti</h4>
+<p>BB genişliği daralıyorsa (squeeze) kırılım yaklaşmaktadır. Mevcut BB stratejisi bunu kullanmıyor.</p>
+<h4 id="d-trailing-stop-iyilestirmesi">D. Trailing Stop İyileştirmesi</h4>
+<p>Şu anki trailing sadece fiyat tabanlı. ATR tabanlı trailing:</p>
+<pre><code>trailing_distance = k × ATR  (örn. k=2)
+</code></pre>
+<p>Bu, düşük volatilite döneminde daha dar, yüksek volatilitede daha geniş stop sağlar.</p>
+<h4 id="e-position-sizing-volatilite-uyarlamal">E. Position Sizing — Volatilite Uyarlamalı</h4>
+<p>Kelly veya sabit % yerine:</p>
+<pre><code>position_size = risk_amount / (ATR × entry_price)
+</code></pre>
+<p>Bu yöntem (Van Tharp'ın "Position Sizing by Volatility") tüm piyasalarda eşit risk alınmasını sağlar.</p>
+<h4 id="f-funding-rate-stratejisi-futures">F. Funding Rate Stratejisi (Futures)</h4>
+<p><code>FundingRateContrarian</code> stratejisi mevcuttur ancak ana döngüde aktif değil. Aşırı funding (±0.1%+) piyasa tersine dönüş sinyalidir; bu sinyal ML/filtre katmanına entegre edilebilir.</p>
+<hr />
+<h2 id="ekler">Ekler</h2>
+<h3 id="ek-a-konfigurasyon-dosyalar">Ek A — Konfigürasyon Dosyaları</h3>
+<table>
+<thead>
+<tr>
+<th>Dosya</th>
+<th>İçerik</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>config/rtc_config.json</code></td>
+<td>Exchange, symbol, interval, SL/TP</td>
+</tr>
+<tr>
+<td><code>config/trade_quality.json</code></td>
+<td>TradeQualityConfig (min_rr, vol band, trend filtre)</td>
+</tr>
+<tr>
+<td><code>config/robotic_profiles.json</code></td>
+<td>Position/security profilleri</td>
+</tr>
+<tr>
+<td><code>config/evolution_state.json</code></td>
+<td>AdaptiveBrain Q-table + PopulationManager (otomatik yazılır)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ek-b-environment-degiskenleri">Ek B — Environment Değişkenleri</h3>
+<table>
+<thead>
+<tr>
+<th>Değişken</th>
+<th>Varsayılan</th>
+<th>Açıklama</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BINANCE_API_KEY</code></td>
+<td>-</td>
+<td>API anahtarı</td>
+</tr>
+<tr>
+<td><code>BINANCE_API_SECRET</code></td>
+<td>-</td>
+<td>API gizli anahtarı</td>
+</tr>
+<tr>
+<td><code>BINANCE_PAPER_MODE</code></td>
+<td><code>true</code></td>
+<td><code>false</code> = canlı emir</td>
+</tr>
+<tr>
+<td><code>TRADE_SYMBOL</code></td>
+<td><code>BTCUSDT</code></td>
+<td>İşlem sembolü</td>
+</tr>
+<tr>
+<td><code>TRADE_MARKET</code></td>
+<td><code>spot</code></td>
+<td><code>spot</code> / <code>futures</code> / <code>coinm</code></td>
+</tr>
+<tr>
+<td><code>AUTONOMOUS_ENABLED</code></td>
+<td><code>false</code></td>
+<td>RiskGate + FSM aktif</td>
+</tr>
+<tr>
+<td><code>USE_ML_SIGNAL</code></td>
+<td><code>false</code></td>
+<td>ML sinyali sinyal kanalına dahil et</td>
+</tr>
+<tr>
+<td><code>TRADE_CAPITAL</code></td>
+<td><code>10000</code></td>
+<td>Başlangıç sermayesi (USDT)</td>
+</tr>
+<tr>
+<td><code>TRADE_AMOUNT</code></td>
+<td><code>0.01</code></td>
+<td>Sabit lot miktarı (qty override)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ek-c-onaylanan-iyi-parametre-degerleri">Ek C — Onaylanan İyi Parametre Değerleri</h3>
+<p>Backtest ve canlı performansa dayanarak DB'de kanıtlanmış:</p>
+<table>
+<thead>
+<tr>
+<th>Strateji</th>
+<th>Parametre</th>
+<th>Değer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Stochastic</td>
+<td>K period</td>
+<td>6</td>
+</tr>
+<tr>
+<td>Stochastic</td>
+<td>Oversold</td>
+<td>20</td>
+</tr>
+<tr>
+<td>Stochastic</td>
+<td>Overbought</td>
+<td>80</td>
+</tr>
+<tr>
+<td>RSI</td>
+<td>Period</td>
+<td>14</td>
+</tr>
+<tr>
+<td>MA Crossover</td>
+<td>Fast</td>
+<td>5</td>
+</tr>
+<tr>
+<td>MA Crossover</td>
+<td>Slow</td>
+<td>20</td>
+</tr>
+<tr>
+<td>MACD</td>
+<td>Fast/Slow/Signal</td>
+<td>12/26/9</td>
+</tr>
+<tr>
+<td>BB</td>
+<td>Period / StdDev</td>
+<td>20 / 2.0</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<p><em>Bu döküman kaynak koddan otomatik analiz edilerek hazırlanmıştır.</em>
+<em>Referans dosyalar: <code>robot/robotic_loop.rs</code>, <code>robot/indicators.rs</code>, <code>robot/signal_evaluator.rs</code>,</em>
+<em><code>robot/sr_detector.rs</code>, <code>robot/backtester/engine.rs</code>, <code>evolution/fitness_evaluator.rs</code>,</em>
+<em><code>evolution/adaptive_brain.rs</code>, <code>ml_anomaly.rs</code></em></p>
+</body>
+</html>

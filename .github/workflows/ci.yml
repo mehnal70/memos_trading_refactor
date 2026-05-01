@@ -1,0 +1,70 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: actions/setup-rust@v1
+        with:
+          rust-version: stable
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev libsofthsm2
+      - name: Build
+        run: cargo build --workspace --all-features --release
+      - name: Run tests
+        run: cargo test --workspace --all-features --release
+      - name: Lint (clippy)
+        run: cargo clippy --workspace --all-features -- -D warnings
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Dependency audit
+        run: cargo audit || true
+      - name: Secret scanning
+        uses: trufflesecurity/trufflehog@main
+        with:
+          scanArguments: --regex --entropy=False .
+      - name: HSM integration test (SoftHSM)
+        run: |
+          export SOFTHSM2_CONF=$GITHUB_WORKSPACE/softhsm2.conf
+          echo "directories.tokendir = $GITHUB_WORKSPACE/tokens" > $SOFTHSM2_CONF
+          mkdir -p $GITHUB_WORKSPACE/tokens
+          softhsm2-util --init-token --slot 0 --label "test" --pin 1234 --so-pin 1234
+          cargo test --test hsm_integration -- --nocapture || true
+      - name: SIEM forwarder test (mock)
+        run: cargo test --test siem_forwarder_integration -- --nocapture || true
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: target/debug/deps/*.d
+  release:
+    needs: build-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: actions/setup-rust@v1
+        with:
+          rust-version: stable
+      - name: Build (release)
+        run: cargo build --workspace --all-features --release
+      - name: Create release artifact
+        run: |
+          mkdir -p dist
+          cp target/release/* dist/ || true
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifact
+          path: dist/
