@@ -44,7 +44,7 @@ path = "src/main_robotic.rs"
 
 [[bin]]
 name = "rtc_cli"
-path = "src/bin/rtc_cli.rs"
+path = "src/bin/rtc_cli/main.rs"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1.36", features = ["macros", "rt-multi-thread", "time", "signal", "sync"] }
