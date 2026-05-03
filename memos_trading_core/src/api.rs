@@ -1,41 +1,44 @@
-// API Sağlık ve Anomali İzleme Modülü
-// Türkçe açıklamalar ile temel HealthCheck ve AnomalyDetector örneği
-
 use crate::health_monitor::{HealthCheck, AnomalyDetector, HealthStatus, AnomalyType};
 
 pub struct APIHealthMonitor {
-	pub last_status_code: Option<u16>,
-	pub last_error: Option<String>,
+    pub last_status_code: Option<u16>,
+    pub last_error: Option<String>,
 }
 
 impl HealthCheck for APIHealthMonitor {
-	fn check_health(&self) -> HealthStatus {
-		if let Some(code) = self.last_status_code {
-			if code >= 500 {
-				HealthStatus::Critical(format!("API sunucu hatası: {}", code))
-			} else if code >= 400 {
-				HealthStatus::Warning(format!("API istemci hatası: {}", code))
-			} else {
-				HealthStatus::Healthy
-			}
-		} else {
-			HealthStatus::Warning("API yanıtı yok".to_string())
-		}
-	}
+    fn check_health(&self) -> HealthStatus {
+        match (self.last_status_code, &self.last_error) {
+            // 5xx Hataları: Kritik
+            (Some(code @ 500..=599), _) => {
+                HealthStatus::Critical(format!("API sunucu hatası: {}", code))
+            }
+            // 4xx Hataları veya Yanıt Yokken Gelen Hata Mesajı: Uyarı
+            (Some(code @ 400..=499), _) => {
+                HealthStatus::Warning(format!("API istemci hatası: {}", code))
+            }
+            (None, _) => {
+                HealthStatus::Warning("API yanıtı yok".to_string())
+            }
+            // Diğer durumlar (2xx, 3xx vb.)
+            _ => HealthStatus::Healthy,
+        }
+    }
 }
 
 impl AnomalyDetector for APIHealthMonitor {
-	fn detect_anomaly(&self) -> Option<AnomalyType> {
-		if let Some(code) = self.last_status_code {
-			if code >= 500 {
-				return Some(AnomalyType::ApiError(format!("Sunucu hatası: {}", code)));
-			} else if code >= 400 {
-				return Some(AnomalyType::ApiError(format!("İstemci hatası: {}", code)));
-			}
-		}
-		if let Some(err) = &self.last_error {
-			return Some(AnomalyType::ApiError(err.clone()));
-		}
-		None
-	}
+    fn detect_anomaly(&self) -> Option<AnomalyType> {
+        match (self.last_status_code, &self.last_error) {
+            // Durum kodu hatası varsa öncelikli olarak onu dön
+            (Some(code @ 400..=599), _) => {
+                let prefix = if code >= 500 { "Sunucu" } else { "İstemci" };
+                Some(AnomalyType::ApiError(format!("{} hatası: {}", prefix, code)))
+            }
+            // Durum kodu hatası yok ama spesifik bir hata metni varsa onu dön
+            (_, Some(err)) => {
+                Some(AnomalyType::ApiError(err.clone()))
+            }
+            // Her şey normal
+            _ => None,
+        }
+    }
 }
