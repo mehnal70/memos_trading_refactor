@@ -80,12 +80,20 @@ pub mod mfa;
 pub mod config;
 pub mod types;
 
+// ── Persistence katmanı — DB CRUD + in-memory cache ──────────────────────────
+// Eski `database`, `database_reader`, `database_writer` modülleri `persistence/`
+// altına taşındı (Madde 5 refactor). Geriye uyumluluk için aşağıda alias'lar
+// tanımlanır; mevcut `crate::database*::*` çağrıları değişmeden çalışır.
 #[cfg(not(target_arch = "wasm32"))]
-pub mod database;
+pub mod persistence;
+
+// Geriye uyumluluk alias'ları — yeni kod doğrudan `persistence::*` kullanmalı
 #[cfg(not(target_arch = "wasm32"))]
-pub mod database_reader;
+pub use persistence::memory as database;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod database_writer;
+pub use persistence::reader as database_reader;
+#[cfg(not(target_arch = "wasm32"))]
+pub use persistence::writer as database_writer;
 pub mod strategies;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod risk;
