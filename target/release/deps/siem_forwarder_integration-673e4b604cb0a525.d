@@ -1,5 +1,0 @@
-/home/ulas/PyCharmMiscProject/memos_trading_refactor/target/release/deps/siem_forwarder_integration-673e4b604cb0a525.d: memos_trading_core/tests/siem_forwarder_integration.rs
-
-/home/ulas/PyCharmMiscProject/memos_trading_refactor/target/release/deps/siem_forwarder_integration-673e4b604cb0a525: memos_trading_core/tests/siem_forwarder_integration.rs
-
-memos_trading_core/tests/siem_forwarder_integration.rs:

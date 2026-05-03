@@ -1,0 +1,25 @@
+# Build artifacts
+target/
+**/target/
+
+# Logs
+logs/
+*.log
+
+# Local data (DB, cache)
+data/trader.db
+data/trader.db-wal
+data/trader.db-shm
+data/*.tmp
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tar yedekler
+*.tar.gz
