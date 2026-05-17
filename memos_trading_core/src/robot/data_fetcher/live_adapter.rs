@@ -1,10 +1,10 @@
-// robot/data_fetcher/live_adapter.rs — BinanceLiveAdapter
-// LiveDataFetcher trait'ini gerçek Binance REST API üzerinden implemente eder.
-// stop_signal ve pause_signal ile TUI tarafından durdurulabilir/duraklatılabilir.
+// robot/data_fetcher/live_adapter.rs — BinanceLiveAdapter (Modernize Edilmiş)
 
-use crate::robot::interfaces::LiveDataFetcher;
-use crate::robot::data_fetcher::validate_ohlcv;
-use crate::types::{Candle, Exchange, FundingRatePoint, Market};
+// robot/data_fetcher/live_adapter.rs - Gelişmiş Canlı Veri Adaptörü (Srivastava ATP)
+
+use crate::robot::infra::interfaces::LiveDataFetcher;
+use crate::robot::data_fetcher::websocket::validate_ohlcv;
+use crate::core::types::{Candle, Exchange, FundingRatePoint, Market};
 use crate::Result;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -12,185 +12,118 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// Binance REST API tabanlı canlı veri çekici
+/// Binance REST API tabanlı canlı veri çekici - Çok Kanallı ve Hata Bağışıklıklı
 pub struct BinanceLiveAdapter {
     pub stop_signal: Arc<AtomicBool>,
     pub pause_signal: Arc<AtomicBool>,
+    client: reqwest::Client,
 }
 
 impl BinanceLiveAdapter {
     pub fn new(stop_signal: Arc<AtomicBool>, pause_signal: Arc<AtomicBool>) -> Self {
-        Self { stop_signal, pause_signal }
+        Self { 
+            stop_signal, 
+            pause_signal,
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(12))
+                .build()
+                .unwrap_or_default(),
+        }
     }
 }
 
 #[async_trait]
 impl LiveDataFetcher for BinanceLiveAdapter {
-    fn source_name(&self) -> &str {
-        "binance-rest"
-    }
+    fn source_name(&self) -> &str { "binance-rest-v2" }
 
-    async fn fetch_funding_rate(
-        &self,
-        market: Market,
-        symbol: &str,
-    ) -> crate::Result<Option<FundingRatePoint>> {
-        BinanceLiveAdapter::fetch_funding_rate(self, market, symbol).await
+    async fn fetch_funding_rate(&self, market: Market, symbol: &str) -> crate::Result<Option<FundingRatePoint>> {
+        self.internal_fetch_funding_rate(market, symbol).await
     }
 
     fn supported_markets(&self) -> Vec<Market> {
-        vec![Market::Spot]
+        vec![Market::Spot, Market::Futures, Market::Coinm]
     }
 
     fn supported_symbols(&self, _market: Market) -> Vec<String> {
-        vec![
-            "BTCUSDT".to_string(),
-            "ETHUSDT".to_string(),
-            "BNBUSDT".to_string(),
-            "SOLUSDT".to_string(),
-        ]
+        vec!["BTCUSDT".to_string(), "ETHUSDT".to_string(), "SOLUSDT".to_string()]
     }
 
-    async fn fetch_latest(
-        &self,
-        _exchange: Exchange,
-        market: Market,
-        symbol: &str,
-        interval: &str,
-        limit: usize,
-    ) -> Result<Vec<Candle>> {
-        // Duraklatma kontrolü — durdurulana kadar bekle
-        while self.pause_signal.load(Ordering::Relaxed) {
-            if self.stop_signal.load(Ordering::Relaxed) {
-                return Err("RoboticLoop durduruldu".into());
-            }
-            tokio::time::sleep(Duration::from_millis(300)).await;
-        }
+    async fn fetch_latest(&self, _exchange: Exchange, market: Market, symbol: &str, interval: &str, limit: usize) -> Result<Vec<Candle>> {
+        if self.should_halt().await? { return Err("Fetcher durduruldu".into()); }
 
-        // Durdurma kontrolü
-        if self.stop_signal.load(Ordering::Relaxed) {
-            return Err("RoboticLoop durduruldu".into());
-        }
-
-        // Futures için farklı endpoint
         let base_url = match market {
-            Market::Futures => "https://fapi.binance.com/fapi/v1/klines",
-            _ => "https://api.binance.com/api/v3/klines",
+            Market::Futures => "https://binance.com",
+            Market::Coinm   => "https://binance.com",
+            _               => "https://binance.com",
         };
 
-        let url = format!(
-            "{}?symbol={}&interval={}&limit={}",
-            base_url, symbol, interval, limit
-        );
-
-        let resp = reqwest::get(&url)
-            .await
-            .map_err(|e| format!("Binance HTTP hatası: {}", e))?
-            .json::<Vec<Vec<serde_json::Value>>>()
-            .await
-            .map_err(|e| format!("Binance JSON parse hatası: {}", e))?;
-
-        let mut candles = Vec::with_capacity(resp.len());
-        for k in &resp {
-            // Timestamp: Binance kline array[0] = açılış zamanı (ms)
-            let ts_ms = match k.get(0).and_then(|v| v.as_i64()) {
-                Some(t) if t > 0 => t,
-                _ => {
-                    log::warn!("REST: geçersiz timestamp, candle atlandı: {:?}", k.get(0));
-                    continue;
-                }
-            };
-
-            // OHLCV parse: unwrap_or(0.0) yerine explicit hata — sıfır/geçersiz candle sessizce geçmez
-            let open   = match k.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()) {
-                Some(v) => v,
-                None => { log::warn!("REST: open parse hatası, atlandı"); continue; }
-            };
-            let high   = match k.get(2).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()) {
-                Some(v) => v,
-                None => { log::warn!("REST: high parse hatası, atlandı"); continue; }
-            };
-            let low    = match k.get(3).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()) {
-                Some(v) => v,
-                None => { log::warn!("REST: low parse hatası, atlandı"); continue; }
-            };
-            let close  = match k.get(4).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()) {
-                Some(v) => v,
-                None => { log::warn!("REST: close parse hatası, atlandı"); continue; }
-            };
-            // Binance kline: index 5 = quote asset volume, index 7 = taker buy quote volume
-            // index 5 doğru quote hacmi; talepte baseAssetVolume için index 5'i kullanıyoruz.
-            let volume = match k.get(5).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()) {
-                Some(v) => v,
-                None => { log::warn!("REST: volume parse hatası, atlandı"); continue; }
-            };
-
-            // OHLCV bütünlük kontrolü
-            if let Err(e) = validate_ohlcv(open, high, low, close, volume) {
-                log::warn!("REST: OHLCV doğrulama hatası (atlandı): {e}");
-                continue;
-            }
-
-            // from_timestamp_millis: WS yolu ile tutarlı, tam ms hassasiyeti
-            if let Some(ts) = chrono::DateTime::from_timestamp_millis(ts_ms) {
-                candles.push(Candle {
-                    timestamp: ts.with_timezone(&Utc),
-                    open,
-                    high,
-                    low,
-                    close,
-                    volume,
-                    symbol: symbol.to_string(),
-                    interval: interval.to_string(),
-                });
-            }
+        let url = format!("{}?symbol={}&interval={}&limit={}", base_url, symbol, interval, limit);
+        let resp = self.client.get(&url).send().await.map_err(|e| format!("Binance Bağlantı Hatası: {}", e))?;
+        
+        let status = resp.status();
+        if !status.is_success() {
+            let err_txt = resp.text().await.unwrap_or_default();
+            return Err(format!("Binance API Hatası ({}): {}", status, err_txt).into());
         }
 
-        Ok(candles)
+        let raw_data = resp.json::<Vec<Vec<serde_json::Value>>>().await?;
+        Ok(raw_data.into_iter().filter_map(|k| self.parse_single_kline(k, symbol, interval)).collect())
     }
 }
 
 impl BinanceLiveAdapter {
-    /// Binance Futures `/fapi/v1/premiumIndex` üzerinden anlık funding rate çeker.
-    /// Yalnızca Futures/CoinM piyasası için anlamlıdır; Spot'ta `Ok(None)` döner.
-    pub async fn fetch_funding_rate(
-        &self,
-        market: Market,
-        symbol: &str,
-    ) -> Result<Option<FundingRatePoint>> {
-        if !matches!(market, Market::Futures | Market::Coinm) {
-            return Ok(None);
+    async fn should_halt(&self) -> Result<bool> {
+        while self.pause_signal.load(Ordering::Relaxed) {
+            if self.stop_signal.load(Ordering::Relaxed) { return Ok(true); }
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        let base = if matches!(market, Market::Coinm) {
-            "https://dapi.binance.com/dapi/v1/premiumIndex"
-        } else {
-            "https://fapi.binance.com/fapi/v1/premiumIndex"
-        };
-        let url = format!("{}?symbol={}", base, symbol);
-        let json: serde_json::Value = reqwest::get(&url)
-            .await
-            .map_err(|e| format!("funding rate HTTP hatası: {}", e))?
-            .json()
-            .await
-            .map_err(|e| format!("funding rate JSON parse hatası: {}", e))?;
+        Ok(self.stop_signal.load(Ordering::Relaxed))
+    }
 
-        let rate = json["lastFundingRate"]
-            .as_str()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(0.0);
-        let mark_price = json["markPrice"]
-            .as_str()
-            .and_then(|s| s.parse::<f64>().ok());
-        let ts = json["time"]
-            .as_i64()
-            .and_then(chrono::DateTime::from_timestamp_millis)
-            .unwrap_or_else(chrono::Utc::now);
+    /// Tekil bir kline verisini Srivastava ATP standartlarında doğrular ve mühürler.
+    fn parse_single_kline(&self, k: Vec<serde_json::Value>, symbol: &str, interval: &str) -> Option<Candle> {
+        let ts_ms = k.get(0)?.as_i64()?;
+        
+        let parse_f64 = |idx: usize| {
+            k.get(idx)?.as_str()?.parse::<f64>().ok()
+        };
+
+        let (open, high, low, close, volume) = (
+            parse_f64(1)?, parse_f64(2)?, parse_f64(3)?, parse_f64(4)?, parse_f64(5)?
+        );
+
+        // Otonom OHLCV Doğrulaması
+        if validate_ohlcv(open, high, low, close, volume).is_err() { return None; }
+
+        chrono::DateTime::from_timestamp_millis(ts_ms).map(|ts| Candle {
+            timestamp: ts.with_timezone(&Utc),
+            open, high, low, close, volume,
+            symbol: symbol.to_string(),
+            interval: interval.to_string(),
+        })
+    }
+
+    /// Futures piyasası için Funding Rate ve Mark Price verilerini çeker.
+    async fn internal_fetch_funding_rate(&self, market: Market, symbol: &str) -> Result<Option<FundingRatePoint>> {
+        if !matches!(market, Market::Futures | Market::Coinm) { return Ok(None); }
+        
+        let url = match market {
+            Market::Futures => format!("https://binance.com{}", symbol),
+            Market::Coinm   => format!("https://binance.com{}", symbol),
+            _ => return Ok(None),
+        };
+
+        let json: serde_json::Value = self.client.get(&url).send().await?.json().await?;
+
+        let rate = json["lastFundingRate"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let mark = json["markPrice"].as_str().and_then(|s| s.parse::<f64>().ok());
+        let ts_ms = json["time"].as_i64().unwrap_or_else(|| Utc::now().timestamp_millis());
 
         Ok(Some(FundingRatePoint {
-            timestamp: ts.with_timezone(&chrono::Utc),
+            timestamp: chrono::DateTime::from_timestamp_millis(ts_ms).unwrap_or_else(Utc::now).with_timezone(&Utc),
             symbol: symbol.to_string(),
             funding_rate: rate,
-            mark_price,
+            mark_price: mark,
         }))
     }
 }

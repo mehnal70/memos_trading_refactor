@@ -23,3 +23,8 @@ Thumbs.db
 
 # Tar yedekler
 *.tar.gz
+
+# Geçici / yedek envanter dosyaları
+liste.txt
+src_rs_files.txt
+Cargo_v1.toml

@@ -1,221 +1,89 @@
-// robot/data_pipeline/cache.rs - Veri caching sistemi
+// robot/data_pipeline/cache.rs - Yüksek Performanslı Mum Önbellek Sistemi
+use crate::prelude::*;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, RwLock}; // Mutex yerine RwLock (Çoklu okuma desteği için)
+use chrono::{DateTime, Utc};
+use crate::core::types::Candle;
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use chrono::{DateTime, Utc, Duration};
-use crate::types::Candle;
-
-/// Cache entry
-struct CacheEntry {
-    data: Vec<Candle>,
-    timestamp: DateTime<Utc>,
-    ttl_seconds: u64,
+/// Mum Önbelleği: robotic_loop içindeki REST/DB yükünü sıfıra indirir.
+pub struct CandleCache {
+    /// Key: "symbol_interval" (Örn: "BTCUSDT_1h")
+    data: Arc<RwLock<HashMap<String, VecDeque<Candle>>>>,
+    max_size: usize,
 }
 
-impl CacheEntry {
-    fn is_expired(&self) -> bool {
-        Utc::now() > self.timestamp + Duration::seconds(self.ttl_seconds as i64)
+impl CandleCache {
+    /// Yeni bir önbellek oluşturur. limit: Per-interval tutulacak maks mum sayısı.
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            data: Arc::new(RwLock::new(HashMap::new())),
+            max_size,
+        }
     }
-}
 
-/// Veri cache sistemi
-pub struct DataCache {
-    storage: Arc<Mutex<HashMap<String, CacheEntry>>>,
-    ttl_seconds: u64,
-    max_entries: usize,
-}
-
-impl DataCache {
-    pub fn new() -> Self {
-        Self {
-            storage: Arc::new(Mutex::new(HashMap::new())),
-            ttl_seconds: 3600, // 1 saat
-            max_entries: 100,
-        }
-    }
-    
-    pub fn with_ttl(ttl_seconds: u64) -> Self {
-        Self {
-            storage: Arc::new(Mutex::new(HashMap::new())),
-            ttl_seconds,
-            max_entries: 100,
-        }
-    }
-    
-    pub fn with_max_entries(max_entries: usize) -> Self {
-        Self {
-            storage: Arc::new(Mutex::new(HashMap::new())),
-            ttl_seconds: 3600,
-            max_entries,
-        }
-    }
-    
-    /// Cache'e veri kaydet
-    pub fn set(&self, key: &str, data: Vec<Candle>) {
-        if let Ok(mut storage) = self.storage.lock() {
-            // Eğer cache dolu ise, en eski entry'i sil
-            if storage.len() >= self.max_entries {
-                // En eski entry'i bul
-                if let Some(oldest_key) = storage
-                    .iter()
-                    .min_by_key(|(_, entry)| entry.timestamp)
-                    .map(|(k, _)| k.clone())
-                {
-                    storage.remove(&oldest_key);
+    /// Yeni mumları önbelleğe ekler. 
+    /// Eğer aynı timestamp varsa o mumu günceller (Canlı/Kapanmamış mum desteği).
+    pub fn push_bulk(&self, candles: Vec<Candle>) {
+        if candles.is_empty() { return; }
+        let mut storage = self.data.write().unwrap();
+        
+        for c in candles {
+            let key = format!("{}_{}", c.symbol, c.interval);
+            let entry = storage.entry(key).or_insert_with(|| VecDeque::with_capacity(self.max_size));
+            
+            // Son mumu kontrol et: Eğer TS aynıysa güncelle, değilse yeni ekle
+            if let Some(last) = entry.back_mut() {
+                if last.timestamp == c.timestamp {
+                    *last = c;
+                    continue;
                 }
             }
             
-            storage.insert(
-                key.to_string(),
-                CacheEntry {
-                    data,
-                    timestamp: Utc::now(),
-                    ttl_seconds: self.ttl_seconds,
-                },
-            );
-        }
-    }
-    
-    /// Cache'den veri al
-    pub fn get(&self, key: &str) -> Option<Vec<Candle>> {
-        if let Ok(mut storage) = self.storage.lock() {
-            if let Some(entry) = storage.get(key) {
-                if entry.is_expired() {
-                    // Süresi dolmuş, sil
-                    storage.remove(key);
-                    None
-                } else {
-                    Some(entry.data.clone())
-                }
-            } else {
-                None
+            entry.push_back(c);
+            if entry.len() > self.max_size {
+                entry.pop_front();
             }
-        } else {
-            None
         }
     }
-    
-    /// Cache'i temizle
+
+    /// Belirli bir sembol ve aralık için son 'limit' mumu döner.
+    /// robotic_loop içindeki indikatör hesaplamaları için veriyi hazır eder.
+    pub fn get_latest(&self, symbol: &str, interval: &str, limit: usize) -> Vec<Candle> {
+        let storage = self.data.read().unwrap();
+        let key = format!("{}_{}", symbol, interval);
+        
+        storage.get(&key)
+            .map(|deq| {
+                let skip = deq.len().saturating_sub(limit);
+                deq.iter().skip(skip).cloned().collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Veri tazeliği kontrolü: Son mum kaç saniye önce geldi?
+    pub fn last_update_age(&self, symbol: &str, interval: &str) -> u64 {
+        let storage = self.data.read().unwrap();
+        let key = format!("{}_{}", symbol, interval);
+        
+        storage.get(&key)
+            .and_then(|deq| deq.back())
+            .map(|c| (Utc::now() - c.timestamp).num_seconds().max(0) as u64)
+            .unwrap_or(999_999)
+    }
+
     pub fn clear(&self) {
-        if let Ok(mut storage) = self.storage.lock() {
-            storage.clear();
-        }
+        self.data.write().unwrap().clear();
     }
-    
-    /// Süresi dolmuş entry'leri temizle
-    pub fn cleanup_expired(&self) {
-        if let Ok(mut storage) = self.storage.lock() {
-            storage.retain(|_, entry| !entry.is_expired());
-        }
-    }
-    
-    /// Cache istatistikleri
-    pub fn stats(&self) -> CacheStats {
-        if let Ok(storage) = self.storage.lock() {
-            let total_entries = storage.len();
-            let expired_entries = storage.iter().filter(|(_, entry)| entry.is_expired()).count();
-            let active_entries = total_entries - expired_entries;
-            
-            CacheStats {
-                total_entries,
-                active_entries,
-                expired_entries,
-                max_capacity: self.max_entries,
-            }
-        } else {
-            CacheStats {
-                total_entries: 0,
-                active_entries: 0,
-                expired_entries: 0,
-                max_capacity: self.max_entries,
-            }
-        }
+
+    /// Belirtilen anahtar için kaç mum olduğunu döner.
+    pub fn len(&self, symbol: &str, interval: &str) -> usize {
+        let key = format!("{}_{}", symbol, interval);
+        self.data.read().unwrap().get(&key).map(|d| d.len()).unwrap_or(0)
     }
 }
 
-impl Default for DataCache {
+impl Default for CandleCache {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Cache istatistikleri
-#[derive(Debug)]
-pub struct CacheStats {
-    pub total_entries: usize,
-    pub active_entries: usize,
-    pub expired_entries: usize,
-    pub max_capacity: usize,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_cache_set_and_get() {
-        let cache = DataCache::new();
-        let candle = vec![Candle {
-            symbol: "TEST".to_string(),
-            timestamp: Utc::now(),
-            open: 100.0,
-            high: 102.0,
-            low: 99.0,
-            close: 101.0,
-            volume: 1000.0,
-            interval: "1h".to_string(),
-        }];
-        
-        cache.set("test_key", candle.clone());
-        let retrieved = cache.get("test_key");
-        assert!(retrieved.is_some());
-    }
-    
-    #[test]
-    fn test_cache_expiry() {
-        let cache = DataCache::with_ttl(1); // 1 saniye TTL
-        let candle = vec![Candle {
-            symbol: "TEST".to_string(),
-            timestamp: Utc::now(),
-            open: 100.0,
-            high: 102.0,
-            low: 99.0,
-            close: 101.0,
-            volume: 1000.0,
-            interval: "1h".to_string(),
-        }];
-        
-        cache.set("test_key", candle);
-        
-        // Hemen al - başarılı olmalı
-        assert!(cache.get("test_key").is_some());
-        
-        // 2 saniye bekle
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        
-        // Şimdi süresi dolmuş olmalı
-        assert!(cache.get("test_key").is_none());
-    }
-    
-    #[test]
-    fn test_cache_cleanup() {
-        let cache = DataCache::new();
-        let candle = vec![Candle {
-            symbol: "TEST".to_string(),
-            timestamp: Utc::now(),
-            open: 100.0,
-            high: 102.0,
-            low: 99.0,
-            close: 101.0,
-            volume: 1000.0,
-            interval: "1h".to_string(),
-        }];
-        
-        cache.set("key1", candle.clone());
-        cache.set("key2", candle);
-        
-        cache.cleanup_expired();
-        let stats = cache.stats();
-        assert_eq!(stats.total_entries, 2);
+        Self::new(500) // Endüstri standardı 500 bar
     }
 }

@@ -1,6 +1,9 @@
 [workspace]
-members = ["memos_trading_core"]
-exclude = ["memos_trading_desktop/src-tauri", "trading_cli"]
+members = [
+    "memos_trading_core",
+    "interfaces/rtc_tui",
+    "interfaces/rtc_headless",
+]
 resolver = "2"
 
 [workspace.package]
@@ -10,27 +13,10 @@ authors = ["Memos Trading"]
 license = "MIT"
 
 [workspace.dependencies]
-tokio = { version = "1.36", features = ["macros", "rt-multi-thread", "time", "signal", "sync"] }
+# Ortak bağımlılıkları buradan yöneterek sürüm karmaşasını bitiriyoruz
+tokio = { version = "1.36", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"] }
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1.0"
-thiserror = "1.0"
-tokio-util = "0.7"
-async-trait = "0.1"
-getrandom = { version = "0.2", features = ["js"] }
-hmac = "0.12"
-sha2 = "0.10"
-
-
-[workspace.metadata.docs.rs]
-all-features = true
-
-[profile.dev]
-opt-level = 0
-
-[profile.release]
-opt-level = 3
-
-
+memos_trading_core = { path = "./memos_trading_core" }

@@ -1,4 +1,4 @@
-use crate::types::Trade;
+use crate::core::types::Trade;
 use crate::robot::safety::{SafetyMetrics, TradingMetrics};
 use chrono::{DateTime, Utc};
 

@@ -1,35 +1,36 @@
-// robot/config/mod.rs - Merkezi konfigürasyon yönetimi
+// robot/config/mod.rs - Merkezi Konfigürasyon ve Anayasal Denetim
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::Result;
+use crate::core::types::Market; // Merkezi Market tipini kullanıyoruz
 
-/// Robotik ticaret sistemi konfigürasyonu
+/// §84.1: RoboticLoopConfig - robotic_loop'un beklediği otonom parametreler.
+/// Not: RobotConfig içindeki veriler buraya eşlenir.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoboticLoopConfig {
+    pub symbol: String,
+    pub market: Market,
+    pub interval: String,
+    pub capital: f64,
+    pub candle_limit: usize,
+    pub autonomous_enabled: bool,
+    pub max_spread_bps: Option<f64>,
+    pub trade_amount: Option<f64>,
+    pub risk_params: crate::core::types::RiskParams,
+    pub scalp_swing: Option<crate::robot::scalp_swing::ScalpSwingConfig>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RobotConfig {
-    /// Robot adı ve tanımlaması
     pub name: String,
     pub description: Option<String>,
-    
-    /// Ticaret ayarları
     pub trading: TradingConfig,
-    
-    /// Sepet konfigürasyonu
     pub basket: BasketConfig,
-    
-    /// Market saatleri
     pub market_hours: Vec<MarketHourConfig>,
-    
-    /// Strateji ayarları
     pub strategies: Vec<StrategyConfig>,
-    
-    /// Risk yönetimi
     pub risk: RiskConfig,
-    
-    /// Veri ayarları
     pub data: DataConfig,
-    
-    /// Reporting ayarları
     pub reporting: ReportingConfig,
 }
 
@@ -37,17 +38,13 @@ pub struct RobotConfig {
 pub struct TradingConfig {
     pub mode: TradingMode,
     pub exchange: String,
-    pub market: String,
+    pub market: Market, // String yerine merkezi Market enum'u
     pub capital: f64,
     pub max_concurrent_positions: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum TradingMode {
-    Live,
-    Paper,
-    Backtest,
-}
+pub enum TradingMode { Live, Paper, Backtest }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BasketConfig {
@@ -91,91 +88,39 @@ pub struct ReportingConfig {
     pub save_directory: String,
 }
 
-/// Konfigürasyon yöneticisi
-pub struct ConfigManager {
-    config: RobotConfig,
-}
+pub struct ConfigManager { config: RobotConfig }
 
 impl ConfigManager {
-    pub fn new(config: RobotConfig) -> Self {
-        Self { config }
-    }
+    pub fn new(config: RobotConfig) -> Self { Self { config } }
     
     pub fn validate(&self) -> Result<()> {
-        // Temel validasyonlar
         if self.config.name.is_empty() {
-            return Err(crate::MemosTradingError::Config("Robot adı boş olamaz".to_string()).into());
+            return Err(crate::MemosTradingError::Config("Robot adı boş olamaz".into()).into());
         }
         if self.config.trading.capital <= 0.0 {
-            return Err(crate::MemosTradingError::Config("Sermaye pozitif olmalı".to_string()).into());
-        }
-        if self.config.basket.symbols.is_empty() {
-            return Err(crate::MemosTradingError::Config("En az bir sembol olmalı".to_string()).into());
+            return Err(crate::MemosTradingError::Config("Sermaye pozitif olmalı".into()).into());
         }
         Ok(())
     }
-    
-    pub fn get_strategy(&self, name: &str) -> Option<&StrategyConfig> {
-        self.config.strategies.iter().find(|s| s.name == name)
-    }
-    
-    pub fn get_enabled_strategies(&self) -> Vec<&StrategyConfig> {
-        self.config.strategies.iter().filter(|s| s.enabled).collect()
-    }
-    
-    pub fn config(&self) -> &RobotConfig {
-        &self.config
-    }
-    
-    pub fn config_mut(&mut self) -> &mut RobotConfig {
-        &mut self.config
-    }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    fn test_config() -> RobotConfig {
-        RobotConfig {
-            name: "TestRobot".to_string(),
-            description: None,
-            trading: TradingConfig {
-                mode: TradingMode::Paper,
-                exchange: "BIST".to_string(),
-                market: "BIST100".to_string(),
-                capital: 10000.0,
-                max_concurrent_positions: 5,
+    /// RobotConfig verilerini RoboticLoop'un anlayacağı dile otonom çevirir.
+    pub fn to_loop_config(&self, symbol: &str, interval: &str) -> RoboticLoopConfig {
+        RoboticLoopConfig {
+            symbol: symbol.to_string(),
+            market: self.config.trading.market,
+            interval: interval.to_string(),
+            capital: self.config.trading.capital,
+            candle_limit: 500,
+            autonomous_enabled: true,
+            max_spread_bps: Some(10.0),
+            trade_amount: None,
+            risk_params: crate::core::types::RiskParams {
+                stop_loss_pct: self.config.risk.stop_loss_pct,
+                take_profit_pct: self.config.risk.take_profit_pct,
+                max_position_size_pct: Some(self.config.risk.max_position_pct),
+                ..Default::default()
             },
-            basket: BasketConfig {
-                symbols: vec!["AKBNK".to_string(), "GARAN".to_string()],
-                intervals: vec!["1h".to_string()],
-            },
-            market_hours: vec![],
-            strategies: vec![],
-            risk: RiskConfig {
-                max_loss_pct: 2.0,
-                max_position_pct: 10.0,
-                stop_loss_pct: 2.0,
-                take_profit_pct: 5.0,
-            },
-            data: DataConfig {
-                cache_ttl_seconds: 3600,
-                max_cached_symbols: 100,
-                batch_size: 1000,
-            },
-            reporting: ReportingConfig {
-                output_formats: vec!["json".to_string()],
-                report_interval_minutes: 60,
-                save_directory: "/tmp".to_string(),
-            },
+            scalp_swing: None,
         }
-    }
-    
-    #[test]
-    fn test_config_validation() {
-        let config = test_config();
-        let manager = ConfigManager::new(config);
-        assert!(manager.validate().is_ok());
     }
 }

@@ -21,7 +21,7 @@
 //! Tüm fonksiyonlar pure (yan etki yok) — `SrDetector::context()` çağrısıyla
 //! robotic_loop.rs'e entegre edilir.
 
-use crate::types::Candle;
+use crate::core::types::Candle;
 use serde::{Deserialize, Serialize};
 
 // ─── Bölge tipi ──────────────────────────────────────────────────────────────
@@ -236,7 +236,7 @@ impl SrContext {
         buffer_pct:  f64,
         min_rr:      f64,
     ) -> (f64, f64, f64, String) {
-        use crate::robot::indicators::{calculate_atr, calculate_adx, calculate_bollinger};
+        use crate::core::indicators::{calculate_atr, calculate_adx, calculate_bollinger};
 
         // 1. Temel S/R SL/TP
         let (mut sl, mut tp, _rr, sr_note) =
@@ -244,8 +244,8 @@ impl SrContext {
 
         let mut notes: Vec<String> = vec![sr_note];
 
-        // 2. ATR — volatilite uyumu
-        if let Some(atr) = calculate_atr(candles, 14) {
+        // 2. ATR — volatilite uyumu (yeni API: Vec<f64>, son değeri kullan)
+        if let Some(&atr) = calculate_atr(candles, 14).last() {
             let sl_dist = if is_long { entry - sl } else { sl - entry };
 
             // SL çok dar → genişlet
@@ -259,10 +259,9 @@ impl SrContext {
                 notes.push(format!("atr_sl_ceil({:.4})", sl));
             }
 
-            // 3. ADX — ranging piyasada TP daralt (extension kaldırıldı: büyük TP ulaşılamaz)
-            if let Some((adx, _, _)) = calculate_adx(candles, 14) {
+            // 3. ADX — ranging piyasada TP daralt
+            if let Some(&adx) = calculate_adx(candles, 14).last() {
                 if adx < 20.0 {
-                    // Ranging: TP max 1.5×ATR mesafede (önceki 2×ATR → 1.5×ATR)
                     let max_tp_dist = atr * 1.5;
                     let tp_dist = if is_long { tp - entry } else { entry - tp };
                     if tp_dist > max_tp_dist {
@@ -273,12 +272,12 @@ impl SrContext {
             }
 
             // 4. BB genişliği — yüksek volatilitede SL'ye buffer
-            if let Some((upper, _, lower)) = calculate_bollinger(candles, 20, 2.0) {
+            let bands = calculate_bollinger(candles, 20, 2.0);
+            if let (Some(&upper), Some(&lower)) = (bands.upper.last(), bands.lower.last()) {
                 let mid = (upper + lower) / 2.0;
                 if mid > 0.0 {
                     let bb_width_pct = (upper - lower) / mid * 100.0;
                     if bb_width_pct > 4.0 {
-                        // Yüksek vol: SL'ye 0.3×ATR ekstra boşluk
                         sl = if is_long { sl - atr * 0.3 } else { sl + atr * 0.3 };
                         notes.push(format!("bb_sl_buf(bb_w={:.1}%)", bb_width_pct));
                     }
@@ -619,7 +618,7 @@ fn compute_sell_quality(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Candle;
+    use crate::core::types::Candle;
     use chrono::Utc;
 
     fn c(high: f64, low: f64, vol: f64) -> Candle {

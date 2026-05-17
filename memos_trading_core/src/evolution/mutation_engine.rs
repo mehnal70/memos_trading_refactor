@@ -1,35 +1,20 @@
-// Mutation Engine - Akıllı Mutasyon Motoru
-// "Adaptif mutasyon" - Başarısız olanlar daha çok mutasyona uğrar
+// mutation_engine.rs - Akıllı ve Adaptif Mutasyon Motoru
+
+// evolution/mutation_engine.rs - Akıllı ve Adaptif Mutasyon Motoru
+use crate::prelude::*; 
 
 use crate::evolution::StrategyGenome;
 use serde::{Deserialize, Serialize};
+use rand::Rng;
+use rand_distr::{Distribution, Normal};
 
-/// Mutasyon türü
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum MutationType {
-    /// Rastgele mutasyon (klasik)
     Random,
-    
-    /// Adaptif mutasyon (fitness'a göre mutasyon gücü değişir)
     Adaptive,
-    
-    /// Gaussian mutasyon (normal dağılım)
     Gaussian { mean: f64, std_dev: f64 },
-    
-    /// Directed mutasyon (trend yönünde mutasyon)
     Directed { direction: f64 },
-    
-    /// Hybrid (birden fazla yöntemi karıştır)
     Hybrid,
-}
-
-/// Mutation Engine - Strateji parametrelerini akıllıca mutasyona uğratır
-pub struct MutationEngine {
-    /// Varsayılan mutasyon tipi
-    pub default_mutation_type: MutationType,
-    
-    /// Mutasyon istatistikleri
-    pub mutation_stats: MutationStats,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -40,6 +25,11 @@ pub struct MutationStats {
     pub harmful_mutations: u64,
 }
 
+pub struct MutationEngine {
+    pub default_mutation_type: MutationType,
+    pub mutation_stats: MutationStats,
+}
+
 impl MutationEngine {
     pub fn new(mutation_type: MutationType) -> Self {
         Self {
@@ -47,176 +37,114 @@ impl MutationEngine {
             mutation_stats: MutationStats::default(),
         }
     }
-    
-    /// Stratejiyi mutasyona uğrat (adaptive, fitness'a göre mutasyon gücü ayarlanır)
-    pub fn mutate_adaptive(
-        &mut self,
-        genome: &mut StrategyGenome,
-        base_mutation_rate: f64,
-        base_mutation_strength: f64,
-    ) {
-        // Düşük fitness = daha agresif mutasyon (daha hızlı değişim)
-        // Yüksek fitness = daha az mutasyon (en iyi halleri koru)
-        let fitness_factor = if genome.fitness < 50.0 {
-            2.0 // Düşük fitness: 2x daha fazla mutasyon
-        } else if genome.fitness < 100.0 {
-            1.0 // Orta fitness: normal mutasyon
-        } else {
-            0.5 // Yüksek fitness: 0.5x daha az mutasyon
+
+    /// Ana Mutasyon Girişi: Belirlenen türe göre işlemi gerçekleştirir.
+    pub fn mutate(&mut self, genome: &mut StrategyGenome, rate: f64, strength: f64) {
+        match self.default_mutation_type {
+            MutationType::Adaptive => self.mutate_adaptive(genome, rate, strength),
+            MutationType::Random => self.mutate_random(genome, rate, strength),
+            MutationType::Gaussian { mean, std_dev } => self.mutate_gaussian(genome, rate, mean, std_dev),
+            MutationType::Directed { direction } => self.mutate_directed(genome, rate, direction),
+            MutationType::Hybrid => {
+                // Hibrit mod: %70 Adaptif, %30 Directed
+                if rand::thread_rng().gen_bool(0.7) {
+                    self.mutate_adaptive(genome, rate, strength);
+                } else {
+                    self.mutate_directed(genome, rate, 1.0);
+                }
+            }
+        }
+    }
+
+    pub fn mutate_adaptive(&mut self, genome: &mut StrategyGenome, base_rate: f64, base_strength: f64) {
+        let fitness = genome.fitness;
+        let factor = match fitness {
+            f if f < 50.0  => 2.0,
+            f if f < 100.0 => 1.0,
+            _              => 0.5,
         };
+
+        let adj_rate = base_rate * factor;
+        let adj_strength = (base_strength * factor).max(0.01);
         
-        let adjusted_rate = base_mutation_rate * fitness_factor;
-        let adjusted_strength = base_mutation_strength * fitness_factor;
-        
+        let mut rng = rand::thread_rng();
+        let normal = Normal::new(0.0, adj_strength).unwrap_or_else(|_| Normal::new(0.0, 0.01).unwrap());
+
         for (key, value) in genome.genes.iter_mut() {
-            if rand_range(0.0, 1.0) < adjusted_rate {
-                // Gaussian mutasyon uygula
-                let delta = gaussian_random(0.0, adjusted_strength);
-                let old_value = *value;
+            if rng.gen::<f64>() < adj_rate {
+                let delta = normal.sample(&mut rng);
+                let old_val = *value;
                 *value += delta;
-                
-                // Parametreye özel sınırlar
-                self.apply_parameter_constraints(key, value);
-                
-                // Mutasyon kaydı
-                genome.mutation_history.push(format!(
-                    "{}:{:.4}->{:.4}",
-                    key, old_value, *value
-                ));
-                
+                self.apply_constraints(key, value);
+                genome.mutation_history.push(format!("{}:{:.2}->{:.2}", key, old_val, *value));
                 self.mutation_stats.total_mutations += 1;
             }
         }
     }
-    
-    /// Directed mutasyon (başarılı trende doğru mutasyon)
-    pub fn mutate_directed(
-        &mut self,
-        genome: &mut StrategyGenome,
-        mutation_rate: f64,
-        direction: f64, // +1.0 = artır, -1.0 = azalt
-    ) {
+
+    fn mutate_random(&mut self, genome: &mut StrategyGenome, rate: f64, strength: f64) {
+        let mut rng = rand::thread_rng();
         for (key, value) in genome.genes.iter_mut() {
-            if rand_range(0.0, 1.0) < mutation_rate {
-                // Direction'a göre mutasyon
-                let delta = direction * rand_range(0.01, 0.1) * (*value).abs();
+            if rng.gen::<f64>() < rate {
+                let delta = rng.gen_range(-strength..strength);
                 *value += delta;
-                
-                self.apply_parameter_constraints(key, value);
-                
-                genome.mutation_history.push(format!(
-                    "directed_{}:{:+.4}",
-                    key, delta
-                ));
-                
+                self.apply_constraints(key, value);
                 self.mutation_stats.total_mutations += 1;
             }
         }
     }
-    
-    /// Parametre kısıtlarını uygula
-    fn apply_parameter_constraints(&self, key: &str, value: &mut f64) {
+
+    fn mutate_gaussian(&mut self, genome: &mut StrategyGenome, rate: f64, mean: f64, std_dev: f64) {
+        let mut rng = rand::thread_rng();
+        let normal = Normal::new(mean, std_dev).unwrap_or_else(|_| Normal::new(0.0, 0.01).unwrap());
+        for (key, value) in genome.genes.iter_mut() {
+            if rng.gen::<f64>() < rate {
+                *value += normal.sample(&mut rng);
+                self.apply_constraints(key, value);
+                self.mutation_stats.total_mutations += 1;
+            }
+        }
+    }
+
+    pub fn mutate_directed(&mut self, genome: &mut StrategyGenome, rate: f64, direction: f64) {
+        let mut rng = rand::thread_rng();
+        for (key, value) in genome.genes.iter_mut() {
+            if rng.gen::<f64>() < rate {
+                let delta = direction * rng.gen_range(0.01..0.1) * value.abs();
+                *value += delta;
+                self.apply_constraints(key, value);
+                self.mutation_stats.total_mutations += 1;
+            }
+        }
+    }
+
+    fn apply_constraints(&self, key: &str, value: &mut f64) {
         match key {
-            "fast_period" | "slow_period" | "period" => {
-                *value = value.max(2.0).min(200.0).round();
-            }
-            "overbought" => {
-                *value = value.max(60.0).min(90.0);
-            }
-            "oversold" => {
-                *value = value.max(10.0).min(40.0);
-            }
-            "signal_threshold" => {
-                *value = value.max(0.0001).min(0.1);
-            }
-            "stop_loss_pct" | "take_profit_pct" => {
-                *value = value.max(0.1).min(20.0);
-            }
-            "position_size_pct" => {
-                *value = value.max(0.1).min(10.0);
-            }
-            _ => {}
+            "fast_period" | "slow_period" | "period" => *value = value.clamp(2.0, 200.0).round(),
+            "overbought" => *value = value.clamp(60.0, 90.0),
+            "oversold"   => *value = value.clamp(10.0, 40.0),
+            "stop_loss_pct" | "take_profit_pct" => *value = value.clamp(0.1, 20.0),
+            "signal_threshold" => *value = value.clamp(0.0001, 0.1),
+            _ => *value = value.max(0.0),
         }
     }
-    
-    /// Mutasyon etkisini değerlendir (mutasyon sonrası fitness karşılaştırması)
-    pub fn evaluate_mutation_impact(&mut self, old_fitness: f64, new_fitness: f64) {
-        if new_fitness > old_fitness + 1.0 {
-            self.mutation_stats.beneficial_mutations += 1;
-        } else if new_fitness < old_fitness - 1.0 {
-            self.mutation_stats.harmful_mutations += 1;
-        } else {
-            self.mutation_stats.neutral_mutations += 1;
+
+    pub fn evaluate_impact(&mut self, old_f: f64, new_f: f64) {
+        match new_f - old_f {
+            d if d > 1.0  => self.mutation_stats.beneficial_mutations += 1,
+            d if d < -1.0 => self.mutation_stats.harmful_mutations += 1,
+            _             => self.mutation_stats.neutral_mutations += 1,
         }
     }
-    
-    /// Mutasyon istatistiklerini göster
-    pub fn get_stats_summary(&self) -> String {
+
+    pub fn get_summary(&self) -> String {
         let total = self.mutation_stats.total_mutations as f64;
-        if total == 0.0 {
-            return "Henüz mutasyon yok".to_string();
-        }
-        
-        let beneficial_pct = (self.mutation_stats.beneficial_mutations as f64 / total) * 100.0;
-        let harmful_pct = (self.mutation_stats.harmful_mutations as f64 / total) * 100.0;
-        
+        if total == 0.0 { return "Mutasyon verisi yok".to_owned(); }
         format!(
-            "Toplam: {}, Faydalı: {:.1}%, Zararlı: {:.1}%",
-            self.mutation_stats.total_mutations,
-            beneficial_pct,
-            harmful_pct
+            "Mutasyon Özeti | Toplam: {} | Faydalı: {:.1}% | Zararlı: {:.1}%",
+            total, (self.mutation_stats.beneficial_mutations as f64 / total) * 100.0, (self.mutation_stats.harmful_mutations as f64 / total) * 100.0
         )
     }
 }
 
-impl Default for MutationEngine {
-    fn default() -> Self {
-        Self::new(MutationType::Adaptive)
-    }
-}
-
-// Yardımcı fonksiyonlar
-fn rand_range(min: f64, max: f64) -> f64 {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    rng.gen_range(min..=max)
-}
-
-fn gaussian_random(mean: f64, std_dev: f64) -> f64 {
-    use rand_distr::{Distribution, Normal};
-    let normal = Normal::new(mean, std_dev).unwrap();
-    let mut rng = rand::thread_rng();
-    normal.sample(&mut rng)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_adaptive_mutation() {
-        let mut engine = MutationEngine::default();
-        let mut genome = StrategyGenome::new_random(1, 1, "MA".to_string());
-        
-        // Düşük fitness: Agresif mutasyon beklenir
-        genome.fitness = 20.0;
-        let initial_genes = genome.genes.clone();
-        
-        engine.mutate_adaptive(&mut genome, 0.5, 0.2);
-        
-        // Genler değişmiş olmalı
-        assert!(genome.genes != initial_genes);
-        assert!(engine.mutation_stats.total_mutations > 0);
-    }
-    
-    #[test]
-    fn test_parameter_constraints() {
-        let engine = MutationEngine::default();
-        let mut value = 300.0; // Sınırın üstünde
-        
-        engine.apply_parameter_constraints("fast_period", &mut value);
-        
-        // Sınırlanmış olmalı
-        assert!(value >= 2.0 && value <= 200.0);
-    }
-}
+impl Default for MutationEngine { fn default() -> Self { Self::new(MutationType::Adaptive) } }

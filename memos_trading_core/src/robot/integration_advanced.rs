@@ -4,7 +4,7 @@
 use crate::robot::portfolio_manager::DynamicPosition;
 use crate::robot::security::{SecurityManager, AuditEvent};
 use crate::MemosTradingError;
-use crate::robot::error::ErrorLogger;
+use crate::robot::infra::error::ErrorLogger;
 use std::collections::HashMap;
 use std::sync::Arc;
 

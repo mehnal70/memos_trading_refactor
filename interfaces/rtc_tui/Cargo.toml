@@ -1,0 +1,16 @@
+[package]
+name = "rtc_tui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rtc_tui"
+path = "src/main.rs"
+
+[dependencies]
+memos_trading_core = { workspace = true }
+tokio.workspace = true
+ratatui = "0.26"
+crossterm = "0.27"
+dotenvy = "0.15"
+# Görselleştirme için gereken ek bağımlılıklar

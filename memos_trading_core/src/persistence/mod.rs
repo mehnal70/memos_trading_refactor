@@ -22,8 +22,10 @@
 pub mod memory;
 pub mod reader;
 pub mod writer;
+pub mod config;
 
 // ── Yaygın kullanılan tipleri kolay erişim için re-export ────────────────────
 pub use memory::{DatabaseError, DatabaseEngine, MemoryDatabase};
-pub use reader::{SymbolInfo, PaperTradingResult, PortfolioPosition};
+pub use crate::core::model::PositionModel as PortfolioPosition;
+pub use crate::core::model::{SymbolInfo, PaperTradingResult};
 pub use writer::DBWriter;

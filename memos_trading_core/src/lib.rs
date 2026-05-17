@@ -1,216 +1,119 @@
-pub mod candle_synth;
-#[allow(dead_code, unused_imports, unused_variables, unused_mut, non_snake_case, non_camel_case_types, non_upper_case_globals, clippy::all)]
-pub mod auto_test_and_logging;
-pub mod pipeline_supervisor;
-pub mod symbol_watch_manager;
-#[allow(dead_code, unused_imports, unused_variables, unused_mut, non_snake_case, non_camel_case_types, non_upper_case_globals, clippy::all)]
-// Yukarıdaki attribute ile tüm uyarılar (dead_code, unused, vs.) crate genelinde bastırılır.
-pub mod secure_store;
-pub mod bybit_connector;
-pub mod kucoin_connector;
-pub mod coinbase_connector;
-pub mod binance_connector;
-pub mod exchange_connector;
-impl From<String> for MemosTradingError {
-    fn from(s: String) -> Self {
-        MemosTradingError::Unknown(s)
-    }
-}
-/// Audit trail modülü (tüm ortamlarda aktif)
-pub mod audit_trail;
-/// ML tabanlı anomali tespit modülü
-pub mod ml_anomaly;
-/// GDPR ve veri gizliliği modülü
-pub mod gdpr;
+// lib.rs - Memos Trading Core Library (Srivastava ATP Nihai Sürüm)
+// Merkezi modül yönetimi, agnostik veri hatları ve adli hata kontrol katmanı.
 
-// ── Enterprise modülleri (varsayılan olarak kapalı) ─────────────────────────
-// Etkinleştirmek için: cargo build --features enterprise
-/// RBAC ve SSO/LDAP modülleri
-#[cfg(feature = "enterprise")]
-pub mod rbac;
-#[cfg(feature = "enterprise")]
-pub mod sso_ldap;
-/// SLA ve uptime modülü
-#[cfg(feature = "enterprise")]
-pub mod sla;
-/// Prometheus metrics modülü
-#[cfg(feature = "enterprise")]
-pub mod metrics;
-/// Mobil push notification modülü
-#[cfg(feature = "enterprise")]
-pub mod fcm_push;
-/// SIEM entegrasyonu
-#[cfg(feature = "enterprise")]
-pub mod siem_forwarder;
-/// HSM (Donanım Güvenlik Modülü) entegrasyonu — pkcs11 feature gerektirir
-#[cfg(feature = "enterprise")]
-pub mod hsm;
-pub mod batch_config;
-pub mod auto_trading_engine;
-pub mod market_regime;
-pub mod strategy_lifecycle;
-pub mod risk_limits;
-pub mod anomaly_analysis;
-pub mod health_dashboard;
-pub mod sim_data;
-pub mod bist;
-// Error conversion: From<&str> and From<reqwest::Error> for MemosTradingError
-impl From<&str> for MemosTradingError {
-    fn from(s: &str) -> Self {
-        MemosTradingError::Unknown(s.to_string())
-    }
-}
+// --- 1. GLOBAL ATTRIBUTES ---
+#![allow(dead_code, unused_imports)]
 
-#[cfg(not(target_arch = "wasm32"))]
-pub mod exchanges;
-impl From<reqwest::Error> for MemosTradingError {
-    fn from(err: reqwest::Error) -> Self {
-        MemosTradingError::Api(err.to_string())
-    }
-}
+// --- 2. CORE & MATH (Agnostik Zeka Birimi) ---
+// Bu modüller hiçbir UI bağımlılığı taşımaz, Android/Web için doğrudan taşınabilirdir.
+pub mod core;
+pub mod evolution;
+// handlers/ TUI binary'sine taşındı (interfaces/rtc_tui/src/handlers/).
 
-/// Memos Trading Core Library
-/// 
-/// Bu kütüphane, ticaret stratejileri, risk yönetimi, veri analizi
-/// ve backtesting fonksiyonlarını sağlayan modüler bir yapı sunmaktadır.
-///
-/// MFA (Çok Faktörlü Kimlik Doğrulama) modülü entegre edilmiştir.
-pub mod mfa;
-
-pub mod config;
-pub mod types;
-
-// ── Persistence katmanı — DB CRUD + in-memory cache ──────────────────────────
-// Eski `database`, `database_reader`, `database_writer` modülleri `persistence/`
-// altına taşındı (Madde 5 refactor). Geriye uyumluluk için aşağıda alias'lar
-// tanımlanır; mevcut `crate::database*::*` çağrıları değişmeden çalışır.
+// --- 3. PERSISTENCE (Adli Hafıza Katmanı) ---
 #[cfg(not(target_arch = "wasm32"))]
 pub mod persistence;
 
-// Geriye uyumluluk alias'ları — yeni kod doğrudan `persistence::*` kullanmalı
-#[cfg(not(target_arch = "wasm32"))]
-pub use persistence::memory as database;
-#[cfg(not(target_arch = "wasm32"))]
-pub use persistence::reader as database_reader;
-#[cfg(not(target_arch = "wasm32"))]
-pub use persistence::writer as database_writer;
-pub mod strategies;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod risk;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod engine;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod api;
-pub mod indicators;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod portfolio;
-pub mod advanced;
-
-// YENİ: Robotik Trading Sistemi (v2.0)
+// --- 4. ROBOTİK & ENGINE (Harekât Merkezi) ---
 pub mod robot;
 
-// YENİ: Evrimsel AI - Self-Evolving Trading System
-pub mod evolution;
-
-// Otomatik Sağlık ve Anomali İzleme Modülü
-pub mod health_monitor;
-
-// Re-export ana tipler
-pub use config::{Config, TradingMode};
-pub use robot::{
-    data_pipeline::DataPipeline,
-    calculations::CalculationEngine,
-    config::{RobotConfig, ConfigManager},
-    state::{RobotState, StateManager},
-    test_orchestrator::{StrategyTestOrchestrator, PipelineConfig, PipelineResult, StageResult, StageStatus},
-    // Yeni: Dinamik Pozisyon Yönetimi ve Güvenlik Modülleri
-    portfolio_manager::{DynamicPosition, TrailingStopConfig, ScaleInConfig, ScaleOutConfig, PartialFill},
-    security::{SecurityManager, User, UserRole, AuditEvent, RateLimitRule, ApiKeyManager},
-    integration_advanced::AdvancedRoboticTrader,
-    config_helpers::{PositionManagementProfile, SecurityProfile, PositionConfigBuilder},
-};
-pub use types::{Trade, Signal, Candle, RiskParams, PositionId};
-#[cfg(not(target_arch = "wasm32"))]
-pub use database::DatabaseError;
-pub use advanced::{
-    indicators::Candle as AdvancedCandle,
-    risk::{RiskParams as AdvancedRiskParams, TradeAction, TradeSignal},
-    strategies::{StrategyEngine, StrategyResult},
-};
-
-// Sağlık ve anomali modülünü dışa aktar
-pub use health_monitor::{
-    HealthStatus, AnomalyType, HealthCheck, AnomalyDetector, HealthReport, LatencyHealthChecker
-};
-
-/// Kütüphane sürümü
-pub const VERSION: &str = "0.1.0";
-
-/// Hata tipi
+// --- 6. HATA YÖNETİMİ (Adli Süzgeç) ---
 #[derive(Debug, thiserror::Error)]
 pub enum MemosTradingError {
+    #[error("Veritabanı Hatası: {0}")]
+    Database(String),
 
-    #[cfg(not(target_arch = "wasm32"))]
-    #[error("Database error: {0}")]
-    Database(#[from] DatabaseError),
+    #[error("Rusqlite Hatası: {0}")]
+    Rusqlite(#[from] rusqlite::Error),
 
-    #[cfg(not(target_arch = "wasm32"))]
-    #[error("Rusqlite error: {0}")]
-    RusqliteError(rusqlite::Error),
-
-    #[error("Serde error: {0}")]
-    SerdeError(serde_json::Error),
-
-    #[error("IO error: {0}")]
-    IoError(std::io::Error),
-
-    #[error("Configuration error: {0}")]
-    Config(String),
-
-    #[error("Strategy error: {0}")]
-    Strategy(String),
-
-    #[error("Risk management error: {0}")]
-    Risk(String),
-
-    #[error("API error: {0}")]
+    #[error("API Bağlantı Hatası: {0}")]
     Api(String),
 
-    #[error("Unknown error: {0}")]
+    #[error("Veri Çözümleme (Serde) Hatası: {0}")]
+    Serde(#[from] serde_json::Error),
+
+    #[error("Giriş/Çıkış (IO) Hatası: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Ağ (Reqwest) Hatası: {0}")]
+    Reqwest(#[from] reqwest::Error),
+
+    #[error("Konfigürasyon Hatası: {0}")]
+    Config(String),
+
+    #[error("Strateji/Backtest Hatası: {0}")]
+    Strategy(String),
+
+    #[error("Risk Yönetimi Hatası: {0}")]
+    Risk(String),
+
+    #[error("Bilinmeyen Adli Hata: {0}")]
     Unknown(String),
-
-    #[cfg(target_arch = "wasm32")]
-    #[error("Other error: {0}")]
-    Other(&'static str),
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl From<rusqlite::Error> for MemosTradingError {
-    fn from(err: rusqlite::Error) -> Self {
-        MemosTradingError::RusqliteError(err)
-    }
-}
-
-impl From<serde_json::Error> for MemosTradingError {
-    fn from(err: serde_json::Error) -> Self {
-        MemosTradingError::SerdeError(err)
-    }
-}
-
-impl From<std::io::Error> for MemosTradingError {
-    fn from(err: std::io::Error) -> Self {
-        MemosTradingError::IoError(err)
-    }
 }
 
 pub type Result<T> = std::result::Result<T, MemosTradingError>;
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// --- 8. CONVERSIONS (Hata Tip Dönüşümleri) ---
+impl From<String> for MemosTradingError {
+    fn from(s: String) -> Self { Self::Unknown(s) }
+}
 
-    #[test]
-    fn test_version() {
-        assert_eq!(VERSION, "0.1.0");
+impl From<&str> for MemosTradingError {
+    fn from(s: &str) -> Self { Self::Unknown(s.to_string()) }
+}
+
+impl From<crate::persistence::memory::DatabaseError> for MemosTradingError {
+    fn from(e: crate::persistence::memory::DatabaseError) -> Self {
+        Self::Database(e.to_string())
     }
+}
+
+// =============================================================================
+// 9. EVRENSEL REAKTİF PRELUDE (Zeki Adresleme Odası)
+// =============================================================================
+/// 🧬 Srivastava ATP - İç Giriş Köprüsü (Prelude)
+/// Yalnızca kütüphane içi (crate) görünürlüğe sahiptir. Şişmeyi derleme zamanında engeller.
+/// Harekât hattındaki ağır dosyalar (engine, loop vb.) en üstte 'use crate::prelude::*;' ile her şeye erişir.
+pub(crate) mod prelude {
+    pub use crate::core::model::{MissionControl, PositionModel, Order, ClosedTradeModel, RoboticLoopConfig};
+    pub use crate::core::metrics::PerformanceScorecard;
+    pub use crate::core::types::{Candle, Signal, StrategyParams, Market, RiskParams};
+    pub use crate::robot::robotic_loop::{AppState, BrainBox, FinanceVault, FleetCommand, GuardianShield};
+    pub use crate::robot::engines::Engine;
+    pub use crate::robot::ml_engine::MLModel;
+    pub use crate::robot::infra::monitoring::health_monitor;
+    pub use crate::core::security;
+    pub use crate::core::commands::RobotCommand;
+    pub use crate::robot::robotic_loop::AdaptiveThresholds;
+    // Geriye uyumluluk ve hızlı erişim alias'ları
+    pub mod database_reader { pub use crate::persistence::reader::*; }
+    pub mod database_writer { pub use crate::persistence::writer::*; }
+
+     // YENİ EKLEME: Hata yönetimi topyekün kütüphane içi araçlara sızıyor
+    pub use crate::{MemosTradingError, Result as AtpResult}; 
+    pub use crate::robot::logic::config_helpers::{PositionManagementProfile, SecurityProfile, PositionConfigBuilder};
+    // Tüm stratejiler robot::strategies altında tek source-of-truth ile organize.
+    pub use crate::robot::strategies::{
+        Strategy,
+        // standart bank (trend + osilatör + price action + SMC ailesi)
+        RsiStrategy, MacdStrategy, SupertrendStrategy, PriceActionStrategy,
+        IctFvgStrategy, SmcStrategy, IctOrderBlockStrategy, IctCompositeStrategy,
+        MaCrossoverStrategy,
+        // volatilite kanalları
+        BollingerBandsStrategy, DonchianChannelStrategy,
+        // funding rate (perpetual)
+        FundingRateContrarianStrategy,
+        // trend (EMA bazlı)
+        EmaCrossoverStrategy,
+        // osilatörler
+        StochasticRsiStrategy, CciStrategy,
+        // konsensüs motoru
+        StrategyEnsemble, StrategyResult,
+        // yardımcılar
+        htf_trend_filter, grid_search_optimization,
+    };
+    pub use crate::core::indicators::*;
+
+
 }

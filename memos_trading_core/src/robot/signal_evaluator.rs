@@ -6,7 +6,7 @@
 //
 // Dışa bağımlılıklar: crate::types::Candle, crate::strategies::calculate_sma
 
-use crate::types::Candle;
+use crate::core::types::Candle;
 use serde::{Deserialize, Serialize};
 
 // ── Yapılar ─────────────────────────────────────────────────────────────────
@@ -121,10 +121,10 @@ pub fn trend_bias(
     long_period: usize,
     margin_pct: f64,
 ) -> Option<TrendBias> {
-    use crate::strategies::calculate_sma;
+    use crate::core::indicators::CoreIndicatorEngine;
     if candles.len() < long_period + 1 { return None; }
-    let short_sma = calculate_sma(candles, short_period).ok()?;
-    let long_sma  = calculate_sma(candles, long_period).ok()?;
+    let short_sma = CoreIndicatorEngine::sma(candles, short_period);
+    let long_sma  = CoreIndicatorEngine::sma(candles, long_period);
     if long_sma <= 0.0 { return None; }
     let diff_pct = (short_sma - long_sma).abs() / long_sma * 100.0;
     if diff_pct < margin_pct {
@@ -236,7 +236,7 @@ pub fn check_trend_filter(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Candle;
+    use crate::core::types::Candle;
     use chrono::Utc;
 
     fn make_candle(close: f64, high: f64, low: f64) -> Candle {

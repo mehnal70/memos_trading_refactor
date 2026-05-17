@@ -1,4 +1,4 @@
-use crate::types::Trade;
+use crate::core::types::Trade;
 use chrono::{DateTime, Utc, Duration};
 use std::collections::VecDeque;
 

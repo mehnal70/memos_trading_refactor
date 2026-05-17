@@ -1,5 +1,5 @@
 // Ortak fetcher arayüzü (trait)
-use crate::types::Candle;
+use crate::core::types::Candle;
 use async_trait::async_trait;
 
 #[async_trait]

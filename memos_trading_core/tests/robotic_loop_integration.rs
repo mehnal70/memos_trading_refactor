@@ -1,6 +1,6 @@
 use memos_trading_core::robot::StateManager;
 // Entegrasyon Testi: RoboticLoop
-use memos_trading_core::robot::robotic_loop::{RoboticLoop, RoboticLoopConfig, RunMode};
+use memos_trading_core::robot::robotic_loop_legacy::{RoboticLoop, RoboticLoopConfig, RunMode};
 use memos_trading_core::robot::{RoboticTradeExecutor, InMemoryStateManager, UniversalReporter, FileLogger};
 use memos_trading_core::types::{StrategyParams, RiskParams};
 
@@ -60,7 +60,7 @@ fn make_config(position_profile: &str) -> RoboticLoopConfig {
         capital: 10000.0,
         mode: RunMode::Live,
         autonomous_enabled: false,
-        quality: memos_trading_core::robot::robotic_loop::TradeQualityConfig {
+        quality: memos_trading_core::robot::robotic_loop_legacy::TradeQualityConfig {
             min_rr: 1.5,
             volatility_min_pct: 0.1,
             volatility_max_pct: 5.0,

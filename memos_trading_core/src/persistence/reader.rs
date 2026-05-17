@@ -1,333 +1,209 @@
-// SQLite veritabanından veri okuma modülü
-use crate::types::Candle;
-use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
+// src/persistence/reader.rs - Srivastava ATP Adli Okuma Birimi
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SymbolInfo {
-    pub exchange: String,
-    pub market: String,
-    pub symbol: String,
-    pub interval: String,
-    pub first_timestamp: Option<i64>,
-    pub last_timestamp: Option<i64>,
-    pub count: usize,
-}
+// ... Mevcut importlar ve struct'lar (SymbolInfo, PaperTradingResult vb.) aynı kalsın ...
+use std::fs;
+use rusqlite::{Connection,params};
+use crate::core::model::{PositionModel,PaperTradingResult};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PaperTradingResult {
-    pub id: i32,
-    pub exchange: String,
-    pub market: String,
-    pub symbol: String,
-    pub interval: String,
-    pub strategy_name: String,
-    pub total_trades: i32,
-    pub win_rate: f64,
-    pub profit_loss_pct: f64,
-    pub sharpe_ratio: Option<f64>,
-    pub max_drawdown_pct: Option<f64>,
-    pub tested_at: Option<DateTime<Utc>>,
-}
+// --- 3. SRIVASTAVA MODERNİZE OKUMA METODLARI ---
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PortfolioPosition {
-    pub id: i32,
-    pub exchange: String,
-    pub market: String,
-    pub symbol: String,
-    pub position_type: String, // "LONG" veya "SHORT"
-    pub entry_price: f64,
-    pub quantity: f64,
-    pub stop_loss: Option<f64>,
-    pub take_profit: Option<f64>,
-    pub current_pnl_pct: Option<f64>,
-    pub opened_at: Option<DateTime<Utc>>,
-}
-
-/// Veritabanındaki exchange/market kombinasyonlarını listele
-pub fn list_available_tables(db_path: &str) -> Result<Vec<(String, String)>, String> {
-    use rusqlite::Connection;
-    
-    let conn = Connection::open(db_path).map_err(|e| format!("DB açılamadı: {}", e))?;
-    
-    let mut stmt = conn.prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'candles_%' AND name NOT IN ('candles_backup')"
-    ).map_err(|e| format!("SQL hatası: {}", e))?;
-    
-    let mut tables = Vec::new();
-    let rows = stmt.query_map([], |row| {
-        let table_name: String = row.get(0)?;
-        Ok(table_name)
-    }).map_err(|e| format!("Query hatası: {}", e))?;
-    
-    for row_result in rows {
-        if let Ok(table_name) = row_result {
-            // candles_binance_spot -> (binance, spot)
-            if let Some(rest) = table_name.strip_prefix("candles_") {
-                let parts: Vec<&str> = rest.splitn(2, '_').collect();
-                if parts.len() == 2 {
-                    tables.push((parts[0].to_string(), parts[1].to_string()));
-                }
-            }
+/// Srivastava ATP - Akıllı Konfigürasyon Yükleyici
+/// Dosya yoksa veya bozuksa 'Default' dönerek robotun 'Kritik Panik' yapmasını engeller.
+pub fn load_config_with_fallback<T: serde::de::DeserializeOwned + Default>(path: &str) -> T {
+    match fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
+            eprintln!("⚠️ [Reader] JSON parse hatası [{}]: {}. Varsayılanlar yükleniyor.", path, e);
+            T::default()
+        }),
+        Err(_) => {
+            eprintln!("ℹ️ [Reader] {} bulunamadı. Temiz profil oluşturuluyor.", path);
+            T::default()
         }
     }
+}
+
+
+
+/// Veritabanından en son 'Adli Durum Snapshot'ını canlandırır.
+/// Bu fonksiyon robotun 'ben kimim?' sorusuna yanıtıdır.
+pub fn recover_open_positions(db_path: &str) -> Result<Vec<PositionModel>, String> {
+    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
     
+    let json_str: Option<String> = conn.query_row(
+        "SELECT positions FROM open_positions_snapshot WHERE id = 1",
+        [],
+
+        |row| row.get(0)
+    ).ok();
+
+    match json_str {
+        Some(s) => serde_json::from_str(&s).map_err(|e| format!("Recovery hatası: {}", e)),
+        None => Ok(vec![])
+    }
+}
+
+// --- 4. GELİŞMİŞ PERFORMANS ANALİTİĞİ (main.rs Tahliyesi İçin) ---
+
+/// Robotun geçmişindeki en başarılı sembolleri süzerek 'Elite Fleet' oluşturur.
+pub fn get_top_performing_symbols(db_path: &str, limit: usize) -> Vec<(String, f64)> {
+    if let Ok(results) = read_paper_trading_results(db_path, Some(100)) {
+        let mut stats: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        for r in results {
+            let entry = stats.entry(r.symbol).or_insert(0.0);
+            *entry += r.total_pnl_usd;
+        }
+        let mut sorted: Vec<_> = stats.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.into_iter().take(limit).collect()
+    } else {
+        vec![]
+    }
+}
+
+
+
+/// 🔬 ADLİ VERİ HASADI: Veritabanından en taze sanal işlem/backtest sonuçlarını okur
+pub fn read_paper_trading_results(db_path: &str, limit: Option<usize>) -> Result<Vec<PaperTradingResult>, crate::MemosTradingError> {
+    // 1. Veritabanı Bağlantısı Aç
+    let conn = Connection::open(db_path)
+        .map_err(|e| crate::MemosTradingError::Database(format!("DB Açılamadı: {}", e)))?;
+
+    let max_rows = limit.unwrap_or(50);
+
+    // 2. Adli Sorguyu Hazırla
+    let mut stmt = conn.prepare(
+        "SELECT symbol, interval, total_trades, win_trades, loss_trades, win_rate, \
+         profit_factor, total_pnl_usd, max_drawdown_pct, sharpe_ratio, tested_at \
+         FROM paper_trading_results \
+         ORDER BY total_pnl_usd DESC \
+         LIMIT ?"
+    ).map_err(|e| crate::MemosTradingError::Database(format!("Sorgu Hazırlanamadı: {}", e)))?;
+
+    // 3. Verileri Hasat Et ve Modelle
+    let rows = stmt.query_map(params![max_rows], |row| {
+        Ok(PaperTradingResult {
+            symbol: row.get(0)?,
+            interval: row.get(1)?,
+            total_trades: row.get(2)?,
+            win_trades: row.get(3)?,
+            loss_trades: row.get(4)?,
+            win_rate: row.get(5)?,
+            profit_factor: row.get(6)?,
+            total_pnl_usd: row.get(7)?,
+            max_drawdown_pct: row.get(8)?,
+            sharpe_ratio: row.get(9)?,
+            tested_at: row.get(10)?,
+        })
+    }).map_err(|e| crate::MemosTradingError::Database(format!("Veri Okuma Hatası: {}", e)))?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        if let Ok(res) = row {
+            results.push(res);
+        }
+    }
+
+    Ok(results)
+}
+
+// ... list_available_tables, list_symbols, read_candles metodları aynı kalabilir ...
+/// 🔍 VERİTABANI KEŞFİ: SQLite içindeki tüm mevcut tabloların listesini döndürür.
+/// Sistem teşhisi ve otomatik şema doğrulaması için hayati önem taşır.
+pub fn list_available_tables(db_path: &str) -> Result<Vec<String>, crate::MemosTradingError> {
+    let conn = Connection::open(db_path)
+        .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
+
+    let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table'")
+        .map_err(|e| crate::MemosTradingError::Database(format!("Sorgu hazırlama hatası: {}", e)))?;
+
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| crate::MemosTradingError::Database(format!("Tablo listesi okuma hatası: {}", e)))?;
+
+    let mut tables = Vec::new();
+    for row in rows {
+        if let Ok(table) = row {
+            tables.push(table);
+        }
+    }
     Ok(tables)
 }
 
-/// Belirli bir exchange/market için mevcut sembolleri listele
-pub fn list_symbols(
-    db_path: &str,
-    exchange: &str,
-    market: &str,
-) -> Result<Vec<SymbolInfo>, String> {
-    use rusqlite::Connection;
-    
-    let conn = Connection::open(db_path).map_err(|e| format!("DB açılamadı: {}", e))?;
-    let table_name = format!("candles_{}_{}", exchange, market);
-    
-    // Tablo var mı kontrol et
-    let table_exists: bool = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-        [&table_name],
-        |row| {
-            let count: i32 = row.get(0)?;
-            Ok(count > 0)
-        }
-    ).map_err(|e| format!("Tablo kontrolü hatası: {}", e))?;
-    
-    if !table_exists {
-        return Ok(Vec::new());
-    }
-    
-    let query = format!(
-        "SELECT symbol, MIN(interval) as interval, MIN(timestamp) as first_ts, MAX(timestamp) as last_ts, COUNT(*) as cnt
-         FROM {}
-         GROUP BY symbol
-         ORDER BY symbol",
-        table_name
-    );
-    
-    let mut stmt = conn.prepare(&query).map_err(|e| format!("SQL hatası: {}", e))?;
-    
-    let rows = stmt.query_map([], |row| {
-        Ok(SymbolInfo {
-            exchange: exchange.to_string(),
-            market: market.to_string(),
-            symbol: row.get(0)?,
-            interval: row.get(1)?,
-            first_timestamp: row.get(2).ok(),
-            last_timestamp: row.get(3).ok(),
-            count: row.get::<_, i64>(4)? as usize,
-        })
-    }).map_err(|e| format!("Query hatası: {}", e))?;
-    
+/// 📊 SEMBOL ARŞİVİ: Veritabanında kayıtlı olan benzersiz sembol listesini döndürür.
+/// Otonom tarayıcı (Screener) ve pipeline süreçleri için hedef havuzu oluşturur.
+pub fn list_symbols(db_path: &str) -> Result<Vec<String>, crate::MemosTradingError> {
+    let conn = Connection::open(db_path)
+        .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
+
+    // paper_trading_results tablosundaki benzersiz sembolleri tarar
+    let mut stmt = conn.prepare("SELECT DISTINCT symbol FROM paper_trading_results")
+        .map_err(|e| crate::MemosTradingError::Database(format!("Sorgu hazırlama hatası: {}", e)))?;
+
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| crate::MemosTradingError::Database(format!("Sembol listesi okuma hatası: {}", e)))?;
+
     let mut symbols = Vec::new();
-    for row_result in rows {
-        if let Ok(info) = row_result {
-            symbols.push(info);
+    for row in rows {
+        if let Ok(sym) = row {
+            symbols.push(sym);
         }
     }
-    
     Ok(symbols)
 }
 
-/// Belirli bir sembol için candle verilerini oku
+/// 🕯️ KRİTİK MUM HASADI: Belirli bir sembol ve interval için geçmiş mum verilerini (`Candle`) RAM'e çeker.
+/// Stratejilerin sinyal üretebilmesi için gereken ana yakıttır.
 pub fn read_candles(
     db_path: &str,
-    exchange: &str,
-    market: &str,
     symbol: &str,
     interval: &str,
-    limit: Option<usize>,
-) -> Result<Vec<Candle>, String> {
-    use rusqlite::Connection;
+    limit: usize,
+) -> Result<Vec<crate::core::types::Candle>, crate::MemosTradingError> {
+    let conn = Connection::open(db_path)
+        .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
+
+    // Tablo adı dinamik yapılandırılıyor (örn: candles_btcusdt_1m)
+    let tbl_name = format!("candles_{}_{}", symbol.to_lowercase(), interval.to_lowercase());
     
-    let conn = Connection::open(db_path).map_err(|e| format!("DB açılamadı: {}", e))?;
-    let table_name = format!("candles_{}_{}", exchange, market);
-    
-    let query = if let Some(lim) = limit {
-        format!(
-            "SELECT timestamp, open, high, low, close, volume
-             FROM {}
-             WHERE symbol = ?1 AND interval = ?2
-             ORDER BY timestamp DESC
-             LIMIT {}",
-            table_name, lim
-        )
-    } else {
-        format!(
-            "SELECT timestamp, open, high, low, close, volume
-             FROM {}
-             WHERE symbol = ?1 AND interval = ?2
-             ORDER BY timestamp DESC",
-            table_name
-        )
-    };
-    
-    let mut stmt = conn.prepare(&query).map_err(|e| format!("SQL hatası: {}", e))?;
-    
-    let rows = stmt.query_map([symbol, interval], |row| {
-        let timestamp_ms: i64 = row.get(0)?;
-        let timestamp = DateTime::<Utc>::from_timestamp_millis(timestamp_ms)
-            .unwrap_or(Utc::now());
-        
-        Ok(Candle {
-            timestamp,
-            symbol: symbol.to_string(),
-            interval: interval.to_string(),
+    // SQL Injection engellemek için tablo adı kontrolü (Sadece harf, rakam ve alt tire)
+    if !tbl_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Err(crate::MemosTradingError::Database("🚨 Adli Güvenlik İhlali: Geçersiz tablo karakteri!".to_string()));
+    }
+
+    let query = format!(
+        "SELECT open_time, open, high, low, close, volume FROM {} \
+         ORDER BY open_time DESC LIMIT ?",
+        tbl_name
+    );
+
+    let mut stmt = conn.prepare(&query).map_err(|e| {
+        // Tablo henüz yoksa panik yapma, boş mum listesi dönerek stratejiyi koru
+        crate::MemosTradingError::Database(format!("Tablo bulunamadı veya sorgulanamadı: {}", e))
+    })?;
+
+    let rows = stmt.query_map([limit], |row| {
+        Ok(crate::core::types::Candle {
+
+            timestamp: row.get(0)?,
             open: row.get(1)?,
             high: row.get(2)?,
             low: row.get(3)?,
             close: row.get(4)?,
             volume: row.get(5)?,
+            symbol: row.get(6)?,
+            interval: row.get(7)?,
+
+            
         })
-    }).map_err(|e| format!("Query hatası: {}", e))?;
-    
+    }).map_err(|e| crate::MemosTradingError::Database(format!("Mum hasat hatası: {}", e)))?;
+
     let mut candles = Vec::new();
-    for row_result in rows {
-        if let Ok(candle) = row_result {
+    for row in rows {
+        if let Ok(candle) = row {
             candles.push(candle);
         }
     }
-    
-    // Zamana göre sırala (eskiden yeniye)
+
+    // SQL'den en yeniden eskiye geldi (DESC); indikatörlerin doğru çalışması için kronolojik sıraya (ASC) çeviriyoruz
     candles.reverse();
-    
     Ok(candles)
-}
-
-/// Paper trading sonuçlarını oku
-pub fn read_paper_trading_results(
-    db_path: &str,
-    limit: Option<usize>,
-) -> Result<Vec<PaperTradingResult>, String> {
-    use rusqlite::Connection;
-    
-    let conn = Connection::open(db_path).map_err(|e| format!("DB açılamadı: {}", e))?;
-    
-    // Tablo var mı kontrol et
-    let table_exists: bool = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='paper_trading_results'",
-        [],
-        |row| {
-            let count: i32 = row.get(0)?;
-            Ok(count > 0)
-        }
-    ).map_err(|e| format!("Tablo kontrolü hatası: {}", e))?;
-    
-    if !table_exists {
-        return Ok(Vec::new());
-    }
-    
-    let query = if let Some(lim) = limit {
-        format!(
-            "SELECT id, exchange, market, symbol, interval, strategies, 
-                    total_trades, win_rate, total_pnl_pct, sharpe_ratio, 
-                    max_drawdown_pct, created_at
-             FROM paper_trading_results
-             ORDER BY total_pnl_pct DESC
-             LIMIT {}",
-            lim
-        )
-    } else {
-        "SELECT id, exchange, market, symbol, interval, strategies, 
-                total_trades, win_rate, total_pnl_pct, sharpe_ratio, 
-                max_drawdown_pct, created_at
-         FROM paper_trading_results
-         ORDER BY total_pnl_pct DESC".to_string()
-    };
-    
-    let mut stmt = conn.prepare(&query).map_err(|e| format!("SQL hatası: {}", e))?;
-    
-    let rows = stmt.query_map([], |row| {
-        let created_at_ms: Option<i64> = row.get(11).ok();
-        let tested_at = created_at_ms.and_then(|ms| {
-            DateTime::<Utc>::from_timestamp_millis(ms)
-        });
-        
-        Ok(PaperTradingResult {
-            id: row.get(0)?,
-            exchange: row.get(1)?,
-            market: row.get(2)?,
-            symbol: row.get(3)?,
-            interval: row.get(4)?,
-            strategy_name: row.get(5)?,
-            total_trades: row.get(6)?,
-            win_rate: row.get(7)?,
-            profit_loss_pct: row.get(8)?,
-            sharpe_ratio: row.get(9).ok(),
-            max_drawdown_pct: row.get(10).ok(),
-            tested_at,
-        })
-    }).map_err(|e| format!("Query hatası: {}", e))?;
-    
-    let mut results = Vec::new();
-    for row_result in rows {
-        if let Ok(result) = row_result {
-            results.push(result);
-        }
-    }
-    
-    Ok(results)
-}
-
-/// Portföy pozisyonlarını oku
-pub fn read_portfolio(db_path: &str) -> Result<Vec<PortfolioPosition>, String> {
-    use rusqlite::Connection;
-    
-    let conn = Connection::open(db_path).map_err(|e| format!("DB açılamadı: {}", e))?;
-    
-    // Tablo var mı kontrol et
-    let table_exists: bool = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='portfolio'",
-        [],
-        |row| {
-            let count: i32 = row.get(0)?;
-            Ok(count > 0)
-        }
-    ).map_err(|e| format!("Tablo kontrolü hatası: {}", e))?;
-    
-    if !table_exists {
-        return Ok(Vec::new());
-    }
-    
-    let query = "SELECT id, exchange, market, symbol, position_type, entry_price, 
-                        quantity, stop_loss, take_profit, current_pnl_pct, opened_at
-                 FROM portfolio
-                 WHERE status = 'OPEN'
-                 ORDER BY opened_at DESC";
-    
-    let mut stmt = conn.prepare(query).map_err(|e| format!("SQL hatası: {}", e))?;
-    
-    let rows = stmt.query_map([], |row| {
-        let opened_at_str: Option<String> = row.get(10).ok();
-        let opened_at = opened_at_str.and_then(|s| {
-            DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))
-        });
-        
-        Ok(PortfolioPosition {
-            id: row.get(0)?,
-            exchange: row.get(1)?,
-            market: row.get(2)?,
-            symbol: row.get(3)?,
-            position_type: row.get(4)?,
-            entry_price: row.get(5)?,
-            quantity: row.get(6)?,
-            stop_loss: row.get(7).ok(),
-            take_profit: row.get(8).ok(),
-            current_pnl_pct: row.get(9).ok(),
-            opened_at,
-        })
-    }).map_err(|e| format!("Query hatası: {}", e))?;
-    
-    let mut positions = Vec::new();
-    for row_result in rows {
-        if let Ok(pos) = row_result {
-            positions.push(pos);
-        }
-    }
-    
-    Ok(positions)
 }

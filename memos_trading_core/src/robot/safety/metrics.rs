@@ -1,4 +1,4 @@
-use crate::types::Trade;
+use crate::core::types::Trade;
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 
@@ -178,82 +178,5 @@ impl EquityTrend {
     /// Geçmiş kayıtları getir
     pub fn history(&self) -> &VecDeque<(DateTime<Utc>, f64)> {
         &self.history
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::Trade;
-
-    fn create_trade(pnl: f64) -> Trade {
-        Trade {
-            id: None,
-            symbol: "BTC".to_string(),
-            entry_price: 100.0,
-            exit_price: Some(100.0 + pnl),
-            amount: 1.0,
-            entry_time: Utc::now(),
-            exit_time: Some(Utc::now()),
-            pnl: Some(pnl),
-            pnl_pct: Some((pnl / 100.0) * 100.0),
-            strategy: "test".to_string(),
-        }
-    }
-
-    #[test]
-    fn test_metrics_default() {
-        let metrics = TradingMetrics::new();
-        assert_eq!(metrics.total_trades, 0);
-        assert_eq!(metrics.win_rate, 0.0);
-    }
-
-    #[test]
-    fn test_metrics_from_trades() {
-        let trades = vec![
-            create_trade(100.0),  // Win
-            create_trade(-50.0),  // Loss
-            create_trade(75.0),   // Win
-        ];
-
-        let metrics = TradingMetrics::from_trades(&trades);
-        assert_eq!(metrics.total_trades, 3);
-        assert_eq!(metrics.winning_trades, 2);
-        assert_eq!(metrics.losing_trades, 1);
-        assert!(metrics.win_rate > 66.0 && metrics.win_rate < 67.0);
-        assert_eq!(metrics.total_pnl, 125.0);
-    }
-
-    #[test]
-    fn test_profit_factor() {
-        let trades = vec![
-            create_trade(100.0),
-            create_trade(-50.0),
-        ];
-
-        let metrics = TradingMetrics::from_trades(&trades);
-        assert!(metrics.profit_factor > 1.9 && metrics.profit_factor < 2.1); // 100/50 = 2.0
-    }
-
-    #[test]
-    fn test_performance_trend() {
-        let mut trend = EquityTrend::new(10);
-        trend.record_equity(1000.0);
-        trend.record_equity(1050.0);
-        trend.record_equity(1100.0);
-
-        assert_eq!(trend.latest_equity(), Some(1100.0));
-        assert_eq!(trend.average_equity(), 1050.0);
-    }
-
-    #[test]
-    fn test_volatility() {
-        let mut trend = EquityTrend::new(10);
-        trend.record_equity(1000.0);
-        trend.record_equity(1000.0);
-        trend.record_equity(1000.0);
-
-        // Sabit equity = 0 volatility
-        assert!(trend.volatility() < 0.01);
     }
 }

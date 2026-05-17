@@ -1,140 +1,88 @@
-// robot/data_pipeline/normalizer.rs - Veri normalizasyonu
+// robot/data_pipeline/normalizer.rs - Birleştirilmiş Veri Normalizasyon Ünitesi
+// 
+// Görev: Ham veriyi temizler, spike'ları stabilize eder ve decimal hassasiyetini standartlaştırır.
 
-use crate::{types::Candle, Result};
-use super::FetchParams;
+use crate::core::types::Candle;
 
-/// Veri normalizasyon işlemleri
 pub struct DataNormalizer;
 
 impl DataNormalizer {
-    pub fn new() -> Self {
-        Self
-    }
-    
-    /// Ana normalizasyon işlemi
-    pub fn normalize(&self, mut candles: Vec<Candle>, params: &FetchParams) -> Result<Vec<Candle>> {
-        // 1. Symbol standardı
-        for candle in &mut candles {
-            candle.symbol = Self::normalize_symbol(&params.symbol);
-        }
-        
-        // 2. Interval standardı
-        let interval_seconds = Self::parse_interval(&params.interval)?;
-        for candle in &mut candles {
-            // Interval saniye olarak ayarla (isimlendirme için)
-            candle.interval = format!("{}s", interval_seconds);
-        }
-        
-        // 3. Zaman dilimi standardı (UTC)
-        // TODO: Implement timezone normalization
-        
-        // 4. Veri aralığı kontrolü
-        if let (Some(_start), Some(_end)) = (&params.start_time, &params.end_time) {
-            // TODO: Implement date range filtering
-        }
-        
-        // 5. Sıralama (chronological)
+    /// Otonom Temizlik, Stabilizasyon ve Standartlaştırma:
+    /// 1. Kronolojik sıralama ve mükerrer silme yapar.
+    /// 2. %20+ fiyat spike'larını törpüler.
+    /// 3. Decimal hassasiyeti (6 hane) ve NaN/Inf denetimi yapar.
+    pub fn process_and_standardize(mut candles: Vec<Candle>) -> Vec<Candle> {
+        if candles.is_empty() { return candles; }
+
+        // 1. Sıralama ve Tekilleştirme
         candles.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-        
-        // 6. Duplicate'i kaldır (aynı timestamp'e sahip olanlar)
         candles.dedup_by(|a, b| a.timestamp == b.timestamp);
-        
-        Ok(candles)
-    }
-    
-    /// Symbol normalizasyon
-    pub fn normalize_symbol(symbol: &str) -> String {
-        symbol
-            .to_uppercase()
-            .replace("-", "")
-            .replace("_", "")
-            .replace("/", "")
-    }
-    
-    /// Interval'i saniyeye çevir
-    pub fn parse_interval(interval: &str) -> Result<u64> {
-        let interval = interval.to_lowercase();
-        
-        match interval.as_str() {
-            "1m" => Ok(60),
-            "5m" => Ok(300),
-            "15m" => Ok(900),
-            "30m" => Ok(1800),
-            "1h" => Ok(3600),
-            "4h" => Ok(14400),
-            "1d" | "24h" => Ok(86400),
-            "1w" => Ok(604800),
-            "1mo" => Ok(2592000),
-            _ => {
-                // Sayısal olarak saniye cinsinden mi?
-                if let Ok(seconds) = interval.parse::<u64>() {
-                    Ok(seconds)
-                } else {
-                    return Err(crate::MemosTradingError::Config(format!("Bilinmeyen interval: {}", interval)).into());
+
+        let mut cleaned: Vec<crate::core::types::Candle> = Vec::with_capacity(candles.len());
+        for i in 0..candles.len() {
+            let mut current = candles[i].clone();
+
+            // 2. Geçersiz Veri (NaN/Inf) Guard
+            if Self::is_invalid_float(current.close) || current.close <= 0.0 {
+                if i > 0 {
+                    current.close = cleaned[i-1].close;
+                    current.open = current.close;
+                    current.high = current.close;
+                    current.low = current.close;
+                } else { continue; } // İlk mum bozuksa atla
+            }
+
+            // 3. Spike (Sıçrama) Kontrolü
+            if i > 0 {
+                let prev_close = cleaned[i-1].close;
+                let change = (current.close - prev_close).abs() / prev_close;
+                
+                if change > 0.20 { // %20 sapma eşiği
+                    let limit = if current.close > prev_close { 1.20 } else { 0.80 };
+                    current.close = prev_close * limit;
+                    current.high = current.high.max(current.close);
+                    current.low = current.low.min(current.close);
                 }
             }
-        }
-    }
-    
-    /// Interval'i string'e çevir
-    pub fn format_interval(seconds: u64) -> String {
-        match seconds {
-            60 => "1m".to_string(),
-            300 => "5m".to_string(),
-            900 => "15m".to_string(),
-            1800 => "30m".to_string(),
-            3600 => "1h".to_string(),
-            14400 => "4h".to_string(),
-            86400 => "1d".to_string(),
-            604800 => "1w".to_string(),
-            2592000 => "1mo".to_string(),
-            _ => format!("{}s", seconds),
-        }
-    }
-    
-    /// Fiyatları normalize et (belirli ondalak basamağa)
-    pub fn normalize_price(price: f64, decimals: usize) -> f64 {
-        let multiplier = 10_f64.powi(decimals as i32);
-        (price * multiplier).round() / multiplier
-    }
-    
-    /// Hacmi normalize et
-    pub fn normalize_volume(volume: f64) -> f64 {
-        if volume < 0.0 {
-            0.0
-        } else {
-            volume.round()
-        }
-    }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_normalize_symbol() {
-        assert_eq!(DataNormalizer::normalize_symbol("btc-usd"), "BTCUSD");
-        assert_eq!(DataNormalizer::normalize_symbol("BTC/USD"), "BTCUSD");
+            // 4. Standartlaştırma (Format & Hassasiyet)
+            current.symbol = current.symbol.to_uppercase().replace(&['-', '_', '/', ':'][..], "");
+            current.interval = current.interval.to_lowercase();
+            
+            current.open  = Self::round_price(current.open);
+            current.high  = Self::round_price(current.high);
+            current.low   = Self::round_price(current.low);
+            current.close = Self::round_price(current.close);
+            current.volume = Self::round_volume(current.volume);
+
+            cleaned.push(current);
+        }
+        cleaned
     }
-    
-    #[test]
-    fn test_parse_interval() {
-        assert_eq!(DataNormalizer::parse_interval("1h").unwrap(), 3600);
-        assert_eq!(DataNormalizer::parse_interval("1d").unwrap(), 86400);
-        assert_eq!(DataNormalizer::parse_interval("3600").unwrap(), 3600);
+
+    /// Fiyatı 6 hane hassasiyete mühürler
+    pub fn round_price(price: f64) -> f64 {
+        (price * 1_000_000.0).round() / 1_000_000.0
     }
-    
-    #[test]
-    fn test_format_interval() {
-        assert_eq!(DataNormalizer::format_interval(3600), "1h");
-        assert_eq!(DataNormalizer::format_interval(86400), "1d");
-        assert_eq!(DataNormalizer::format_interval(1234), "1234s");
+
+    /// Hacmi 2 hane hassasiyete mühürler
+    pub fn round_volume(volume: f64) -> f64 {
+        (volume * 100.0).round() / (100.0_f64).max(0.0)
     }
-    
-    #[test]
-    fn test_normalize_price() {
-        assert_eq!(DataNormalizer::normalize_price(100.123456, 2), 100.12);
-        assert_eq!(DataNormalizer::normalize_price(100.5, 0), 101.0);
+
+    /// Birim Dönüşümleri (Crypto specific)
+    pub fn satoshi_to_btc(s: f64) -> f64 { s / 100_000_000.0 }
+    pub fn wei_to_eth(w: f64) -> f64 { w / 1_000_000_000_000_000_000.0 }
+
+    /// Interval'ı saniyeye otonom çevirir
+    pub fn parse_interval(interval: &str) -> u64 {
+        match interval.to_lowercase().as_str() {
+            "1m" => 60, "5m" => 300, "15m" => 900, "30m" => 1800,
+            "1h" => 3600, "4h" => 14400, "1d" => 86400,
+            _ => interval.parse::<u64>().unwrap_or(60),
+        }
     }
+
+    #[inline]
+    fn is_invalid_float(f: f64) -> bool { f.is_nan() || f.is_infinite() }
 }

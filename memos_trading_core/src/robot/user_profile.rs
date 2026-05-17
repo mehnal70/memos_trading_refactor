@@ -2,7 +2,7 @@
 // Her kullanıcı için ayrı model, parametre ve geçmiş yönetimi
 
 use crate::robot::ml_engine::{MLModel, FeatureVector};
-use crate::types::StrategyParams;
+use crate::core::types::StrategyParams;
 
 pub struct UserProfile {
     pub user_id: String,
