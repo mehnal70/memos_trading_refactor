@@ -854,41 +854,98 @@ impl Engine {
         });
     }
 
-    /// userDataStream'den gelen JSON event'i parse et: FILLED ve PARTIALLY_FILLED
-    /// durumlarını ayrıştırıp ilgili işleyiciyi çağırır.
-    async fn handle_user_data_event(state: &Arc<Mutex<AppState>>, raw: &str) {
+    /// userDataStream'den gelen JSON event'i parse et: FILLED, PARTIALLY_FILLED,
+    /// REJECTED, EXPIRED durumlarını ayrıştırıp ilgili işleyiciyi çağırır.
+    /// NEW ve CANCELED sessizce yutulur (normal yaşam döngüsü).
+    /// `pub` çünkü entegrasyon testlerinde gerçek JSON'la uçtan uca doğrulanır.
+    pub async fn handle_user_data_event(state: &Arc<Mutex<AppState>>, raw: &str) {
         let v: serde_json::Value = match serde_json::from_str(raw) {
             Ok(v) => v, Err(_) => return,
         };
 
-        // Spot: executionReport     → X=status, s=symbol, q=orig_qty, z=cum_qty, l=last_qty
-        // Futures: ORDER_TRADE_UPDATE → o.X=status, o.s=symbol, o.q=orig_qty, o.z=cum_qty, o.l=last_qty
+        // Spot: executionReport     → X=status, s=symbol, q=orig_qty, z=cum_qty, l=last_qty,
+        //                             S=side, i=orderId, r=rejection reason ("NONE" yok ise)
+        // Futures: ORDER_TRADE_UPDATE → o.X=status, o.s=symbol, o.q=orig_qty, o.z=cum_qty,
+        //                             o.l=last_qty, o.S=side, o.i=orderId
         let event_type = v.get("e").and_then(|x| x.as_str()).unwrap_or("").to_owned();
         let parse_f = |o: &serde_json::Value, k: &str| -> f64 {
             o.get(k).and_then(|x| x.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0)
         };
-        let (status, symbol, orig_qty, cum_qty, last_qty) = match event_type.as_str() {
-            "executionReport" => (
-                v.get("X").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
-                v.get("s").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
-                parse_f(&v, "q"), parse_f(&v, "z"), parse_f(&v, "l"),
-            ),
-            "ORDER_TRADE_UPDATE" => {
-                let o = v.get("o").cloned().unwrap_or_default();
-                (
-                    o.get("X").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
-                    o.get("s").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
-                    parse_f(&o, "q"), parse_f(&o, "z"), parse_f(&o, "l"),
-                )
-            }
-            _ => return, // diğer event'ler ignored (account update vb.)
+        let parse_s = |o: &serde_json::Value, k: &str| -> String {
+            o.get(k).and_then(|x| x.as_str()).unwrap_or("").to_owned()
         };
+        let parse_id = |o: &serde_json::Value, k: &str| -> String {
+            // orderId tipik olarak sayı; bazen string de gelir. İkisini de yakalayalım.
+            o.get(k).map(|x| match x {
+                serde_json::Value::String(s) => s.clone(),
+                _ => x.to_string(),
+            }).unwrap_or_default()
+        };
+        let (status, symbol, orig_qty, cum_qty, last_qty, side, order_id, reject_reason) =
+            match event_type.as_str() {
+                "executionReport" => (
+                    parse_s(&v, "X"), parse_s(&v, "s"),
+                    parse_f(&v, "q"), parse_f(&v, "z"), parse_f(&v, "l"),
+                    parse_s(&v, "S"), parse_id(&v, "i"), parse_s(&v, "r"),
+                ),
+                "ORDER_TRADE_UPDATE" => {
+                    let o = v.get("o").cloned().unwrap_or_default();
+                    (
+                        parse_s(&o, "X"), parse_s(&o, "s"),
+                        parse_f(&o, "q"), parse_f(&o, "z"), parse_f(&o, "l"),
+                        parse_s(&o, "S"), parse_id(&o, "i"), parse_s(&o, "r"),
+                    )
+                }
+                _ => return, // diğer event'ler ignored (account update vb.)
+            };
 
         match status.as_str() {
             "FILLED" => Self::process_user_fill_status(state, &status, &symbol).await,
             "PARTIALLY_FILLED" =>
                 Self::process_partial_fill(state, &symbol, orig_qty, cum_qty, last_qty).await,
-            _ => {} // NEW, CANCELED, REJECTED → ignored
+            "REJECTED" | "EXPIRED" =>
+                Self::process_order_anomaly(
+                    state, &status, &symbol, &side, &order_id, orig_qty, &reject_reason,
+                ).await,
+            _ => {} // NEW, CANCELED, TRADE → sessiz (normal yaşam döngüsü)
+        }
+    }
+
+    /// 🛑 REJECTED / EXPIRED — emir borsada açılamadı/iptal oldu.
+    /// Sebep çoğunlukla LOT_SIZE / MIN_NOTIONAL / INSUFFICIENT_BALANCE / GTX-as-taker.
+    /// `apply_filters` ön kontrolüyle önlenmesi gerekiyordu; yine de düşerse hem
+    /// push_log hem repair_log'a yazılır (kullanıcı görsün ve operatör doğrulasın).
+    async fn process_order_anomaly(
+        state: &Arc<Mutex<AppState>>,
+        status: &str,
+        symbol: &str,
+        side: &str,
+        order_id: &str,
+        orig_qty: f64,
+        reject_reason: &str,
+    ) {
+        if symbol.is_empty() { return; }
+        let emoji = if status == "REJECTED" { "🛑" } else { "⏰" };
+        // Spot'ta `r="NONE"` gelirse sebep yok demektir. Boş veya NONE olan değeri gizle.
+        let reason_part = if reject_reason.is_empty() || reject_reason == "NONE" {
+            String::new()
+        } else {
+            format!(" · sebep={}", reject_reason)
+        };
+        let side_part = if side.is_empty() { String::new() } else { format!(" {}", side) };
+        let id_part = if order_id.is_empty() { String::new() } else { format!(" order={}", order_id) };
+
+        if let Ok(mut st) = state.lock() {
+            st.push_log(format!(
+                "{} [WS-{}] {}{} qty={:.4}{}{}",
+                emoji, status, symbol, side_part, orig_qty, id_part, reason_part,
+            ));
+            st.guardian.repair_log.push_back(format!(
+                "[{}] {}: {}{} qty={:.4}{}{}",
+                chrono::Local::now().format("%H:%M:%S"),
+                status, symbol, side_part, orig_qty, id_part, reason_part,
+            ));
+            while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
         }
     }
 
