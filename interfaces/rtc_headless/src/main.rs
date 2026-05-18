@@ -55,11 +55,28 @@ async fn main() -> Result<()> {
 
     let symbol      = env::var("TRADE_SYMBOL").unwrap_or_else(|_| "BTCUSDT".to_owned());
     let market      = env::var("TRADE_MARKET").unwrap_or_else(|_| "spot".to_owned());
-    let is_paper    = env::var("BINANCE_PAPER_MODE").map(|v| v == "true").unwrap_or(true);
     let db_path     = env::var("DB_PATH").unwrap_or_else(|_| "data/memos_trading.db".to_owned());
 
+    // Trading mode env önceliği:
+    //   1. TRADING_MODE=Live|Paper|Backtest (case-insensitive, doğru kaynak)
+    //   2. Legacy BINANCE_PAPER_MODE=false (geriye uyum) → Live
+    //   3. Default: Paper (güvenli)
+    let trading_mode = if let Ok(v) = env::var("TRADING_MODE") {
+        memos_trading_core::core::model::TradingMode::from_env_str(&v)
+    } else if env::var("BINANCE_PAPER_MODE").map(|v| v == "false").unwrap_or(false) {
+        memos_trading_core::core::model::TradingMode::Live
+    } else {
+        memos_trading_core::core::model::TradingMode::Paper
+    };
+    let api_key = env::var("BINANCE_API_KEY").ok();
+    let secret_key = env::var("BINANCE_API_SECRET").ok();
+
     println!("⚡ [INIT] rtc_headless | sembol={} | borsa={} | mod={}",
-        symbol, market, if is_paper { "PAPER" } else { "LIVE" });
+        symbol, market, trading_mode.as_str());
+    if matches!(trading_mode, memos_trading_core::core::model::TradingMode::Live)
+       && (api_key.is_none() || secret_key.is_none()) {
+        eprintln!("⚠️ TRADING_MODE=Live ama BINANCE_API_KEY/SECRET yok → Paper-fallback");
+    }
 
     // 2. Klasörlerin varlığı
     fs::create_dir_all("logs").ok();
@@ -73,6 +90,9 @@ async fn main() -> Result<()> {
         symbol: symbol.clone(),
         market: market.clone(),
         db_path: db_path.clone(),
+        trading_mode,
+        api_key,
+        secret_key,
         ..Default::default()
     };
 

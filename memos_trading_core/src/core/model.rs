@@ -13,6 +13,24 @@ use crate::prelude::*;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TradingMode { Backtest, Paper, Live }
 
+impl TradingMode {
+    /// Env değerinden parse — case-insensitive. Bilinmeyen değer Paper'a düşer (güvenli default).
+    pub fn from_env_str(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "live"     => TradingMode::Live,
+            "backtest" => TradingMode::Backtest,
+            _          => TradingMode::Paper, // "paper", "", "anything" → Paper
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TradingMode::Live     => "Live",
+            TradingMode::Paper    => "Paper",
+            TradingMode::Backtest => "Backtest",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptimizedParamsCache {
     pub ma_fast: usize,
