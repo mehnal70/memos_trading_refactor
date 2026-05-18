@@ -854,32 +854,82 @@ impl Engine {
         });
     }
 
-    /// userDataStream'den gelen JSON event'i parse et: fill (FILLED) yakalandığında
-    /// orphan koruma emrini cancel + local pozisyonu arşivle.
+    /// userDataStream'den gelen JSON event'i parse et: FILLED ve PARTIALLY_FILLED
+    /// durumlarını ayrıştırıp ilgili işleyiciyi çağırır.
     async fn handle_user_data_event(state: &Arc<Mutex<AppState>>, raw: &str) {
         let v: serde_json::Value = match serde_json::from_str(raw) {
             Ok(v) => v, Err(_) => return,
         };
 
-        // Spot: executionReport (e=executionReport, X=order status, s=symbol)
-        // Futures: ORDER_TRADE_UPDATE → o.X = status, o.s = symbol
+        // Spot: executionReport     → X=status, s=symbol, q=orig_qty, z=cum_qty, l=last_qty
+        // Futures: ORDER_TRADE_UPDATE → o.X=status, o.s=symbol, o.q=orig_qty, o.z=cum_qty, o.l=last_qty
         let event_type = v.get("e").and_then(|x| x.as_str()).unwrap_or("").to_owned();
-        let (status, symbol) = match event_type.as_str() {
+        let parse_f = |o: &serde_json::Value, k: &str| -> f64 {
+            o.get(k).and_then(|x| x.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0)
+        };
+        let (status, symbol, orig_qty, cum_qty, last_qty) = match event_type.as_str() {
             "executionReport" => (
                 v.get("X").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
                 v.get("s").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
+                parse_f(&v, "q"), parse_f(&v, "z"), parse_f(&v, "l"),
             ),
             "ORDER_TRADE_UPDATE" => {
                 let o = v.get("o").cloned().unwrap_or_default();
                 (
                     o.get("X").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
                     o.get("s").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
+                    parse_f(&o, "q"), parse_f(&o, "z"), parse_f(&o, "l"),
                 )
             }
             _ => return, // diğer event'ler ignored (account update vb.)
         };
 
-        Self::process_user_fill_status(state, &status, &symbol).await;
+        match status.as_str() {
+            "FILLED" => Self::process_user_fill_status(state, &status, &symbol).await,
+            "PARTIALLY_FILLED" =>
+                Self::process_partial_fill(state, &symbol, orig_qty, cum_qty, last_qty).await,
+            _ => {} // NEW, CANCELED, REJECTED → ignored
+        }
+    }
+
+    /// 🌓 PARTIAL fill — pozisyon kısmi tetiklendi, kalan miktar borsada açık.
+    /// Local pozisyonun qty'sini kalan = (orig_qty − cum_qty) ile güncelleriz.
+    /// SL/TP emirleri Binance'te orijinal qty ile durur (reduceOnly), bu sebeple
+    /// borsada qty otomatik azalır; bizim local hafızamız da hizalanmalı.
+    async fn process_partial_fill(
+        state: &Arc<Mutex<AppState>>,
+        symbol: &str,
+        orig_qty: f64,
+        cum_qty: f64,
+        last_qty: f64,
+    ) {
+        if symbol.is_empty() || orig_qty <= 0.0 { return; }
+        let remaining = (orig_qty - cum_qty).max(0.0);
+        let fill_pct = (cum_qty / orig_qty * 100.0).clamp(0.0, 100.0);
+
+        // Local pozisyonu güncelle: qty -> remaining (eğer pozisyon hâlâ varsa)
+        let mut updated = false;
+        let mut local_qty_before: f64 = 0.0;
+        if let Ok(st) = state.lock() {
+            if let Ok(mut positions) = st.finance.live_positions.write() {
+                if let Some(pos) = positions.get_mut(symbol) {
+                    local_qty_before = pos.qty;
+                    // SL/TP qty'sini hizala (remaining > 0 ise hâlâ açık)
+                    pos.qty = remaining;
+                    updated = true;
+                }
+            }
+        }
+
+        if updated {
+            if let Ok(mut st) = state.lock() {
+                st.push_log(format!(
+                    "🌓 [WS-PARTIAL] {} %{:.1} dolu (last={:.4}, cum={:.4}/{:.4}, kalan={:.4}) · local qty: {:.4} → {:.4}",
+                    symbol, fill_pct, last_qty, cum_qty, orig_qty, remaining,
+                    local_qty_before, remaining,
+                ));
+            }
+        }
     }
 
     /// FILLED event'inin tek/uniform işleyicisi (spot + futures için ortak).
