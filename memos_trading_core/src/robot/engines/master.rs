@@ -144,7 +144,7 @@ impl Engine {
     async fn spawn_infrastructure_fleet(state: Arc<Mutex<AppState>>) {
         log::info!("⚡ Srivastava Altyapı Filosu sevk ediliyor...");
         if let Ok(mut st) = state.lock() {
-            st.push_log("⚡ Altyapı filosu sevk edildi: heartbeat(1s) · phase(2s) · price-poll(5s) · trigger(250ms) · scheduler(60s) · psync(30s) · ws-user-data".into());
+            st.push_log("⚡ Altyapı filosu sevk edildi: heartbeat(1s) · phase(2s) · price-poll(5s) · trigger(250ms) · scheduler(60s) · psync(30s) · ws-user-data · balance-sync(5dk)".into());
         }
 
         // ── Task 1: Heartbeat — her saniye main_loop step'ini canlı tut, overdue'ya bak.
@@ -606,6 +606,83 @@ impl Engine {
         // anında arşivlenir. Bağlantı hatası olursa exponential backoff ile yeniden
         // dener; reconnect başarısız olsa bile psync task hâlâ yedek olarak çalışır.
         Self::spawn_user_data_stream(Arc::clone(&state));
+
+        // ── Task 8: Hesap bakiye senkronu (Live mode + non-dry-run).
+        //
+        // Her 5 dk borsa bakiyesini çeker ve AppState'in equity'siyle karşılaştırır.
+        // %1+ fark → repair_log + uyarı (bot ↔ borsa para sayımı ayrışmış).
+        // Senkron için BALANCE_SYNC_EVERY_SECS env'i ile aralık ayarlanabilir.
+        Self::spawn_balance_sync(Arc::clone(&state));
+    }
+
+    /// 💰 Periyodik hesap bakiye senkronu — Live mode için.
+    fn spawn_balance_sync(state: Arc<Mutex<AppState>>) {
+        tokio::spawn(async move {
+            let interval_secs: u64 = std::env::var("BALANCE_SYNC_EVERY_SECS")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+            let mismatch_pct_threshold: f64 = std::env::var("BALANCE_MISMATCH_PCT")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+
+            // Sadece Live + non-dry-run modunda çalış
+            let (executor, dry_run) = {
+                let st = match state.lock() { Ok(s) => s, Err(_) => return };
+                (st.live_executor.clone(), st.live_dry_run)
+            };
+            let executor = match executor {
+                Some(e) if !dry_run => e,
+                _ => {
+                    if let Ok(mut st) = state.lock() {
+                        st.push_log("💰 Balance sync: Paper/DryRun mod, task pasif".into());
+                    }
+                    return;
+                }
+            };
+
+            // İlk turda 30 sn warmup (boot anomalilerinden kaçınmak için)
+            sleep(Duration::from_secs(30)).await;
+
+            loop {
+                let stop = state.lock().map(|s| s.app_stop_signal.load(Ordering::Relaxed)).unwrap_or(true);
+                if stop { break; }
+
+                match executor.get_balance().await {
+                    Ok(exchange_balance) => {
+                        let local_equity = state.lock().map(|s| s.finance.equity).unwrap_or(0.0);
+                        let diff = (exchange_balance - local_equity).abs();
+                        let pct = if local_equity.abs() > f64::EPSILON {
+                            (diff / local_equity) * 100.0
+                        } else { 0.0 };
+
+                        if let Ok(mut st) = state.lock() {
+                            if pct > mismatch_pct_threshold {
+                                st.push_log(format!(
+                                    "⚠️ [BALANCE-MISMATCH] borsa=${:.2} local=${:.2} fark=${:.2} ({:.2}%) > {:.2}% eşiği",
+                                    exchange_balance, local_equity, diff, pct, mismatch_pct_threshold,
+                                ));
+                                st.guardian.repair_log.push_back(format!(
+                                    "[{}] balance mismatch: exchange=${:.2} local=${:.2} ({:.2}%)",
+                                    chrono::Local::now().format("%H:%M:%S"),
+                                    exchange_balance, local_equity, pct,
+                                ));
+                                while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
+                            } else {
+                                st.push_log(format!(
+                                    "💰 [BALANCE-SYNC] borsa=${:.2} ≈ local=${:.2} (fark {:.2}%, eşik altı)",
+                                    exchange_balance, local_equity, pct,
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if let Ok(mut st) = state.lock() {
+                            st.push_log(format!("⚠️ [BALANCE-SYNC] get_balance hatası: {:?}", e));
+                        }
+                    }
+                }
+
+                sleep(Duration::from_secs(interval_secs)).await;
+            }
+        });
     }
 
     /// 🛰️ WebSocket userDataStream task'ı — Live mode fill event'leri için.
