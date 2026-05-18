@@ -144,7 +144,7 @@ impl Engine {
     async fn spawn_infrastructure_fleet(state: Arc<Mutex<AppState>>) {
         log::info!("⚡ Srivastava Altyapı Filosu sevk ediliyor...");
         if let Ok(mut st) = state.lock() {
-            st.push_log("⚡ Altyapı filosu sevk edildi: heartbeat(1s) · phase(2s) · price-poll(5s) · trigger(250ms) · scheduler(60s) · psync(30s)".into());
+            st.push_log("⚡ Altyapı filosu sevk edildi: heartbeat(1s) · phase(2s) · price-poll(5s) · trigger(250ms) · scheduler(60s) · psync(30s) · ws-user-data".into());
         }
 
         // ── Task 1: Heartbeat — her saniye main_loop step'ini canlı tut, overdue'ya bak.
@@ -598,6 +598,187 @@ impl Engine {
                 sleep(Duration::from_secs(SYNC_EVERY_SECS)).await;
             }
         });
+
+        // ── Task 7: WebSocket userDataStream (Live mode + non-dry-run).
+        //
+        // psync (30s polling) çok yavaş. WS sayesinde fill event'i milisaniye
+        // mertebesinde yakalanır → diğer koruma emri anında cancel, local pozisyon
+        // anında arşivlenir. Bağlantı hatası olursa exponential backoff ile yeniden
+        // dener; reconnect başarısız olsa bile psync task hâlâ yedek olarak çalışır.
+        Self::spawn_user_data_stream(Arc::clone(&state));
+    }
+
+    /// 🛰️ WebSocket userDataStream task'ı — Live mode fill event'leri için.
+    fn spawn_user_data_stream(state: Arc<Mutex<AppState>>) {
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+            // Sadece Live + non-dry-run modunda çalış
+            let (executor, dry_run) = {
+                let st = match state.lock() { Ok(s) => s, Err(_) => return };
+                (st.live_executor.clone(), st.live_dry_run)
+            };
+            let executor = match executor {
+                Some(e) if !dry_run => e,
+                _ => {
+                    if let Ok(mut st) = state.lock() {
+                        st.push_log("🛰️ WS userDataStream: Paper/DryRun mod, task pasif".into());
+                    }
+                    return;
+                }
+            };
+
+            // Reconnect döngüsü
+            let mut backoff_secs: u64 = 5;
+            loop {
+                let stop = state.lock().map(|s| s.app_stop_signal.load(Ordering::Relaxed)).unwrap_or(true);
+                if stop { break; }
+
+                // 1. listenKey al
+                let listen_key = match executor.create_listen_key().await {
+                    Ok(k) => k,
+                    Err(e) => {
+                        if let Ok(mut st) = state.lock() {
+                            st.push_log(format!(
+                                "🛰️ WS listenKey hatası: {:?} (backoff={}s)", e, backoff_secs,
+                            ));
+                        }
+                        sleep(Duration::from_secs(backoff_secs)).await;
+                        backoff_secs = (backoff_secs * 2).min(60);
+                        continue;
+                    }
+                };
+                let ws_url = executor.user_data_stream_url(&listen_key);
+                if let Ok(mut st) = state.lock() {
+                    st.push_log(format!("🛰️ WS userDataStream bağlanıyor: {}", ws_url));
+                }
+
+                // 2. WS bağlan
+                let (ws_stream, _) = match connect_async(&ws_url).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        if let Ok(mut st) = state.lock() {
+                            st.push_log(format!(
+                                "🛰️ WS connect hatası: {:?} (backoff={}s)", e, backoff_secs,
+                            ));
+                        }
+                        sleep(Duration::from_secs(backoff_secs)).await;
+                        backoff_secs = (backoff_secs * 2).min(60);
+                        continue;
+                    }
+                };
+                if let Ok(mut st) = state.lock() {
+                    st.push_log("🛰️ WS userDataStream bağlı ✓ — fill event'leri dinleniyor".into());
+                }
+                backoff_secs = 5; // başarılı bağlantı, backoff reset
+
+                // 3. Keepalive timer (30 dk'da bir listenKey yenile)
+                let ka_exec = Arc::clone(&executor);
+                let ka_state = Arc::clone(&state);
+                let ka_key = listen_key.clone();
+                let keepalive_handle = tokio::spawn(async move {
+                    loop {
+                        sleep(Duration::from_secs(30 * 60)).await;
+                        let stop = ka_state.lock().map(|s| s.app_stop_signal.load(Ordering::Relaxed)).unwrap_or(true);
+                        if stop { break; }
+                        if let Err(e) = ka_exec.keepalive_listen_key(&ka_key).await {
+                            if let Ok(mut st) = ka_state.lock() {
+                                st.push_log(format!("🛰️ WS keepalive hatası: {:?}", e));
+                            }
+                            break;
+                        }
+                    }
+                });
+
+                // 4. Mesaj döngüsü
+                let (_write, mut read) = ws_stream.split();
+                while let Some(msg) = read.next().await {
+                    let stop = state.lock().map(|s| s.app_stop_signal.load(Ordering::Relaxed)).unwrap_or(true);
+                    if stop { break; }
+                    match msg {
+                        Ok(Message::Text(txt)) => {
+                            Self::handle_user_data_event(&state, &txt).await;
+                        }
+                        Ok(Message::Ping(p)) => { let _ = p; /* yanıt tungstenite tarafında otomatik */ }
+                        Ok(Message::Close(_)) => {
+                            if let Ok(mut st) = state.lock() {
+                                st.push_log("🛰️ WS sunucu Close gönderdi — yeniden bağlanılacak".into());
+                            }
+                            break;
+                        }
+                        Err(e) => {
+                            if let Ok(mut st) = state.lock() {
+                                st.push_log(format!("🛰️ WS okuma hatası: {:?} — reconnect", e));
+                            }
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+
+                keepalive_handle.abort();
+                sleep(Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(60);
+            }
+        });
+    }
+
+    /// userDataStream'den gelen JSON event'i parse et: fill (FILLED) yakalandığında
+    /// orphan koruma emrini cancel + local pozisyonu arşivle.
+    async fn handle_user_data_event(state: &Arc<Mutex<AppState>>, raw: &str) {
+        let v: serde_json::Value = match serde_json::from_str(raw) {
+            Ok(v) => v, Err(_) => return,
+        };
+
+        // Spot: executionReport (e=executionReport, X=order status, s=symbol)
+        // Futures: ORDER_TRADE_UPDATE → o.X = status, o.s = symbol
+        let event_type = v.get("e").and_then(|x| x.as_str()).unwrap_or("").to_owned();
+        let (status, symbol) = match event_type.as_str() {
+            "executionReport" => (
+                v.get("X").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
+                v.get("s").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
+            ),
+            "ORDER_TRADE_UPDATE" => {
+                let o = v.get("o").cloned().unwrap_or_default();
+                (
+                    o.get("X").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
+                    o.get("s").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
+                )
+            }
+            _ => return, // diğer event'ler ignored (account update vb.)
+        };
+
+        Self::process_user_fill_status(state, &status, &symbol).await;
+    }
+
+    /// FILLED event'inin tek/uniform işleyicisi (spot + futures için ortak).
+    async fn process_user_fill_status(state: &Arc<Mutex<AppState>>, status: &str, symbol: &str) {
+        if status != "FILLED" || symbol.is_empty() { return; }
+
+        let (executor, db_path, interval, has_local) = {
+            let st = match state.lock() { Ok(s) => s, Err(_) => return };
+            let has = st.finance.live_positions.read().map(|p| p.contains_key(symbol)).unwrap_or(false);
+            (st.live_executor.clone(), st.config.db_path.clone(),
+             st.config.interval.clone(), has)
+        };
+        if !has_local { return; } // bot bilmediği bir sembol için event aldı
+
+        if let Some(exec) = executor {
+            let _ = exec.cancel_all_orders(symbol).await;
+            if let Ok(mut st) = state.lock() {
+                st.push_log(format!(
+                    "🛰️ [WS-FILL] {} FILLED yakalandı → orphan emirler temizlendi, local pozisyon kapatılıyor",
+                    symbol,
+                ));
+            }
+        }
+
+        if let Ok(candles) = crate::persistence::reader::read_candles(&db_path, symbol, &interval, 5) {
+            if !candles.is_empty() {
+                Self::close_paper_position(state, symbol, &candles, ExitReason::TrailingStop).await;
+            }
+        }
     }
 
     /// ⚔️ STRATEJİK İNFAZ: Pozisyonların güncel fiyatla PnL'ini günceller ve sinyal avı yapar.

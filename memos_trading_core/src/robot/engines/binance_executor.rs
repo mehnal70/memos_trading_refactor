@@ -161,6 +161,55 @@ impl BinanceFuturesExecutor {
         Ok(resp.as_array().cloned().unwrap_or_default())
     }
 
+    // === User Data Stream (WebSocket fill event'leri için) ===
+
+    /// listenKey al — userDataStream WS endpoint'inin anahtarı.
+    /// İmzalı değil; sadece X-MBX-APIKEY header'ı gerektirir. Anahtar 60 dk sonra
+    /// expire olur, keepalive_listen_key ile yenilenmeli.
+    pub async fn create_listen_key(&self) -> Result<String> {
+        let path = if self.is_spot { "/api/v3/userDataStream" } else { "/fapi/v1/listenKey" };
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self.client.post(&url).header("X-MBX-APIKEY", &self.api_key).send().await?;
+        if !resp.status().is_success() {
+            return Err(MemosTradingError::Api(format!("listenKey hatası: {}", resp.text().await?)));
+        }
+        let v: Value = resp.json().await?;
+        v.get("listenKey").and_then(|k| k.as_str()).map(|s| s.to_owned())
+            .ok_or_else(|| MemosTradingError::Api("listenKey alanı yok".into()))
+    }
+
+    /// listenKey'i 60 dk daha uzat. WS task'ı bunu her 30 dk'da çağırmalı.
+    pub async fn keepalive_listen_key(&self, listen_key: &str) -> Result<()> {
+        let (path, body) = if self.is_spot {
+            (format!("/api/v3/userDataStream?listenKey={}", listen_key), None)
+        } else {
+            // Futures keepalive POST ile listen_key'siz çalışır; aktif anahtarı yeniler.
+            ("/fapi/v1/listenKey".to_string(), Some(()))
+        };
+        let _ = body;
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self.client.put(&url).header("X-MBX-APIKEY", &self.api_key).send().await?;
+        if !resp.status().is_success() {
+            return Err(MemosTradingError::Api(format!("listenKey keepalive: {}", resp.text().await?)));
+        }
+        Ok(())
+    }
+
+    /// WebSocket URL'si — listenKey ile.
+    pub fn user_data_stream_url(&self, listen_key: &str) -> String {
+        if self.is_spot {
+            format!("wss://stream.binance.com:9443/ws/{}", listen_key)
+        } else {
+            // Futures testnet: wss://stream.binancefuture.com/ws/{listenKey}
+            // Production:     wss://fstream.binance.com/ws/{listenKey}
+            if self.is_paper {
+                format!("wss://stream.binancefuture.com/ws/{}", listen_key)
+            } else {
+                format!("wss://fstream.binance.com/ws/{}", listen_key)
+            }
+        }
+    }
+
     pub async fn get_balance(&self) -> Result<f64> {
         let path = if self.is_spot { "/api/v3/account" } else { "/fapi/v2/account" };
         let resp = self.signed_request(Method::GET, path, vec![]).await?;
