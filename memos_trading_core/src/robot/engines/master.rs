@@ -625,7 +625,7 @@ impl Engine {
                         reason.emoji(), symbol, reason.as_str(), live_price,
                     ));
                 }
-                Self::close_paper_position(state, symbol, &candles, reason);
+                Self::close_paper_position(state, symbol, &candles, reason).await;
                 return; // bu sembolde tur bitti, yeniden açılış aynı turda denenmesin
             }
 
@@ -694,7 +694,7 @@ impl Engine {
                             symbol, signal_label, edge, strategy_name,
                         ));
                     }
-                    Self::open_paper_position(state, symbol, &signal, &candles);
+                    Self::open_paper_position(state, symbol, &signal, &candles).await;
                 }
                 // Pozisyon varken ters sinyal → kapanış (edge filtresi gevşek).
                 (crate::core::types::Signal::Sell, true) | (crate::core::types::Signal::Buy, true) => {
@@ -704,7 +704,7 @@ impl Engine {
                             symbol, signal_label, edge,
                         ));
                     }
-                    Self::close_paper_position(state, symbol, &candles, ExitReason::StrategySignal);
+                    Self::close_paper_position(state, symbol, &candles, ExitReason::StrategySignal).await;
                 }
                 _ => {}
             }
@@ -733,87 +733,162 @@ impl Engine {
         (dir_match * (mom.abs() * mom_w + ml * ml_w)).clamp(0.0, 1.0)
     }
 
-    /// 🧬 FAZ F3: PAPER-MODE OTONOM POZİSYON AÇILIŞ MOTORU
+    /// 🧬 FAZ F3: OTONOM POZİSYON AÇILIŞ MOTORU (Paper + Live dispatcher)
     /// Kelly oranı, brain.ml_confidence ve loss_streak ile dinamik tahsisat yapar.
-    fn open_paper_position(state: &Arc<Mutex<AppState>>, symbol: &str, signal: &Signal, candles: &[Candle]) {
+    /// Live executor bağlıysa ve dry-run değilse: gerçek market order gönderir.
+    async fn open_paper_position(state: &Arc<Mutex<AppState>>, symbol: &str, signal: &Signal, candles: &[Candle]) {
         use crate::robot::risk::kelly::KellyCriterion;
         let last_candle = match candles.last() { Some(c) => c, None => return };
-        let mut st = state.lock().unwrap();
-        // Açılış aktif olduğu turda fazı "Executing" yap (bir sonraki tur Scanning'e döner).
-        st.fleet.phase = "Executing".into();
-
-        // Kasanın iştahı (drawdown ↑ ise küçülür) × Kelly dinamik ölçek
-        let risk_appetite = st.finance.calculate_risk_appetite();
-        let ml_conf = st.brain.ml_confidence;
-        // Loss streak: son 5 kapanan işlem
-        let loss_streak = st.finance.live_closed_trades.read()
-            .map(|tr| tr.iter().rev().take(5).filter(|t| t.pnl < 0.0).count())
-            .unwrap_or(0);
-
-        // Win istatistikleri (varsayılan: 50/50, +1/-1 USD).
-        let (wins, losses, sum_win, sum_loss) = st.finance.live_closed_trades.read().map(|tr| {
-            let mut w = 0u32; let mut l = 0u32; let mut sw = 0.0f64; let mut sl = 0.0f64;
-            for t in tr.iter().rev().take(50) {
-                if t.pnl > 0.0 { w += 1; sw += t.pnl; }
-                else if t.pnl < 0.0 { l += 1; sl += -t.pnl; }
-            }
-            (w, l, sw, sl)
-        }).unwrap_or((0, 0, 0.0, 0.0));
-        let total = (wins + losses) as f64;
-        let win_prob = if total > 0.0 { wins as f64 / total } else { 0.5 };
-        let avg_win = if wins > 0 { sum_win / wins as f64 } else { 1.0 };
-        let avg_loss = if losses > 0 { sum_loss / losses as f64 } else { 1.0 };
-        let kelly = KellyCriterion::calculate(win_prob, avg_win, avg_loss);
-
-        // Temel tahsisat: equity'nin %10'u, sonra Kelly dinamik ölçek ile çarpılır.
-        let base_alloc = st.finance.equity * 0.10 * risk_appetite;
-        let alloc_capital = kelly.calculate_dynamic_scale(base_alloc, loss_streak, ml_conf)
-            .max(base_alloc * 0.25);
-        let qty_val = (alloc_capital / last_candle.close).max(0.0);
-        if qty_val <= 0.0 { return; }
 
         let is_long = matches!(signal, Signal::Buy);
         let entry = last_candle.close;
-
-        // SL/TP yüzdeleri: brain.best_params'tan oku (ML retrain bunu günceller).
-        // Yoksa muhafazakar varsayılan: TP %3, SL %1.5 (RR ≈ 2.0).
-        let tp_pct = st.brain.best_params.get("take_profit_pct").copied().unwrap_or(3.0).max(0.1);
-        let sl_pct = st.brain.best_params.get("stop_loss_pct").copied().unwrap_or(1.5).max(0.1);
-        let (stop_loss, take_profit) = if is_long {
-            (entry * (1.0 - sl_pct / 100.0), entry * (1.0 + tp_pct / 100.0))
-        } else {
-            (entry * (1.0 + sl_pct / 100.0), entry * (1.0 - tp_pct / 100.0))
-        };
-
-        // Trailing stop için ilk seviye: ATR × atr_trail_mult kadar uzakta başlat.
         let atr = Self::calc_atr(candles, 14);
-        let atr_mult = st.brain.best_params.get("pos_atr_trail_mult").copied().unwrap_or(2.0);
-        let trailing_stop = if is_long { entry - atr * atr_mult }
-                            else       { entry + atr * atr_mult };
-
-        // IntelligenceHub eşlemesi: pos_id + market regime + strateji adı.
+        let regime = Self::classify_regime(candles);
         let pos_id = crate::core::types::PositionId::new();
         let pos_id_str = pos_id.to_string();
-        let regime = Self::classify_regime(candles);
-        let strategy_name = st.brain.live_strategy.read()
-            .map(|s| s.clone()).unwrap_or_else(|_| "MA_CROSSOVER".into());
 
-        let new_pos = PositionModel {
-            pos_id: pos_id_str.clone(),
-            symbol: symbol.to_string(),
-            entry_price: entry,
-            current_price: entry,
-            qty: qty_val,
-            leverage: 1.0,
-            trade_type: if is_long { "LONG".into() } else { "SHORT".into() },
-            is_long,
-            opened_at: chrono::Utc::now().to_rfc3339(),
-            stop_loss,
-            take_profit,
-            trailing_stop,
-            max_favorable_price: entry,
-            breakeven_activated: false,
-        };
+        // Tüm sync hesap + state okumaları tek mutex skopunda — guard async sınırını geçemez.
+        struct OpenPlan {
+            new_pos: PositionModel,
+            alloc_capital: f64,
+            qty_val: f64,
+            kelly_fraction: f64,
+            risk_appetite: f64,
+            ml_conf: f64,
+            tp_pct: f64,
+            sl_pct: f64,
+            strategy_name: String,
+            live_executor: Option<Arc<crate::robot::engines::binance_executor::BinanceFuturesExecutor>>,
+            live_dry_run: bool,
+            live_max_notional: f64,
+            atr_mult: f64,
+        }
+        let plan: Option<OpenPlan> = {
+            let mut st = state.lock().unwrap();
+            st.fleet.phase = "Executing".into();
+
+            let risk_appetite = st.finance.calculate_risk_appetite();
+            let ml_conf = st.brain.ml_confidence;
+            let loss_streak = st.finance.live_closed_trades.read()
+                .map(|tr| tr.iter().rev().take(5).filter(|t| t.pnl < 0.0).count())
+                .unwrap_or(0);
+            let (wins, losses, sum_win, sum_loss) = st.finance.live_closed_trades.read().map(|tr| {
+                let mut w = 0u32; let mut l = 0u32; let mut sw = 0.0f64; let mut sl = 0.0f64;
+                for t in tr.iter().rev().take(50) {
+                    if t.pnl > 0.0 { w += 1; sw += t.pnl; }
+                    else if t.pnl < 0.0 { l += 1; sl += -t.pnl; }
+                }
+                (w, l, sw, sl)
+            }).unwrap_or((0, 0, 0.0, 0.0));
+            let total = (wins + losses) as f64;
+            let win_prob = if total > 0.0 { wins as f64 / total } else { 0.5 };
+            let avg_win = if wins > 0 { sum_win / wins as f64 } else { 1.0 };
+            let avg_loss = if losses > 0 { sum_loss / losses as f64 } else { 1.0 };
+            let kelly = KellyCriterion::calculate(win_prob, avg_win, avg_loss);
+
+            let base_alloc = st.finance.equity * 0.10 * risk_appetite;
+            let alloc_capital = kelly.calculate_dynamic_scale(base_alloc, loss_streak, ml_conf)
+                .max(base_alloc * 0.25);
+            let qty_val = (alloc_capital / entry).max(0.0);
+            if qty_val <= 0.0 { return; }
+
+            let tp_pct = st.brain.best_params.get("take_profit_pct").copied().unwrap_or(3.0).max(0.1);
+            let sl_pct = st.brain.best_params.get("stop_loss_pct").copied().unwrap_or(1.5).max(0.1);
+            let (stop_loss, take_profit) = if is_long {
+                (entry * (1.0 - sl_pct / 100.0), entry * (1.0 + tp_pct / 100.0))
+            } else {
+                (entry * (1.0 + sl_pct / 100.0), entry * (1.0 - tp_pct / 100.0))
+            };
+            let atr_mult = st.brain.best_params.get("pos_atr_trail_mult").copied().unwrap_or(2.0);
+            let trailing_stop = if is_long { entry - atr * atr_mult }
+                                else       { entry + atr * atr_mult };
+            let strategy_name = st.brain.live_strategy.read()
+                .map(|s| s.clone()).unwrap_or_else(|_| "MA_CROSSOVER".into());
+            let new_pos = PositionModel {
+                pos_id: pos_id_str.clone(),
+                symbol: symbol.to_string(),
+                entry_price: entry, current_price: entry,
+                qty: qty_val, leverage: 1.0,
+                trade_type: if is_long { "LONG".into() } else { "SHORT".into() },
+                is_long,
+                opened_at: chrono::Utc::now().to_rfc3339(),
+                stop_loss, take_profit, trailing_stop,
+                max_favorable_price: entry,
+                breakeven_activated: false,
+            };
+            Some(OpenPlan {
+                new_pos, alloc_capital, qty_val,
+                kelly_fraction: kelly.kelly_fraction, risk_appetite, ml_conf,
+                tp_pct, sl_pct, strategy_name,
+                live_executor: st.live_executor.clone(),
+                live_dry_run: st.live_dry_run,
+                live_max_notional: st.live_max_notional_usd,
+                atr_mult,
+            })
+        }; // st burada drop
+        let plan = match plan { Some(p) => p, None => return };
+
+        // 💱 LIVE Mode dispatcher (3 koşullu onay zinciri):
+        let live_executor = plan.live_executor.clone();
+        let live_dry_run = plan.live_dry_run;
+        let live_max_notional = plan.live_max_notional;
+        let alloc_capital = plan.alloc_capital;
+        let qty_val = plan.qty_val;
+        let new_pos = plan.new_pos.clone();
+        let kelly_fraction = plan.kelly_fraction;
+        let risk_appetite = plan.risk_appetite;
+        let ml_conf = plan.ml_conf;
+        let tp_pct = plan.tp_pct;
+        let sl_pct = plan.sl_pct;
+        let strategy_name = plan.strategy_name.clone();
+        let atr_mult = plan.atr_mult;
+
+        let mut live_order_id: Option<String> = None;
+        if let Some(executor) = live_executor.as_ref() {
+            let side = if is_long { "BUY" } else { "SELL" };
+            if alloc_capital > live_max_notional {
+                if let Ok(mut st2) = state.lock() {
+                    st2.push_log(format!(
+                        "🛑 LIVE veto: notional ${:.2} > tavan ${:.2} ({} {} iptal edildi)",
+                        alloc_capital, live_max_notional, symbol, side,
+                    ));
+                }
+                return;
+            }
+            if live_dry_run {
+                if let Ok(mut st2) = state.lock() {
+                    st2.push_log(format!(
+                        "🟡 [LIVE-DRY-RUN] {} {} {:.4} @ {:.2} (${:.2}) → emir gönderilmedi",
+                        symbol, side, qty_val, entry, alloc_capital,
+                    ));
+                }
+            } else {
+                match executor.place_market_order(symbol, side, qty_val).await {
+                    Ok(resp) => {
+                        live_order_id = resp.get("orderId").map(|v| v.to_string());
+                        if let Ok(mut st2) = state.lock() {
+                            st2.push_log(format!(
+                                "💱 [LIVE] {} {} {:.4} @ {:.2} (${:.2}) ✓ order={}",
+                                symbol, side, qty_val, entry, alloc_capital,
+                                live_order_id.as_deref().unwrap_or("?"),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        if let Ok(mut st2) = state.lock() {
+                            st2.push_log(format!(
+                                "❌ [LIVE] {} {} emir hatası: {:?} — pozisyon kaydedilmedi",
+                                symbol, side, e,
+                            ));
+                        }
+                        return; // Live emir başarısızsa paper'ı da çalıştırma.
+                    }
+                }
+            }
+        }
+
+        // Mutex'i geri al
+        let mut st = state.lock().unwrap();
 
         {
             if let Ok(mut positions) = st.finance.live_positions.write() {
@@ -834,17 +909,23 @@ impl Engine {
             hub.track_trade(pos_id, regime, strategy_name.clone());
         }
 
+        let mode_tag = if live_order_id.is_some() { "LIVE" }
+                       else if live_executor.is_some() && live_dry_run { "DRY-RUN" }
+                       else { "PAPER" };
+        let pos_for_log = plan.new_pos;
         st.push_log(format!(
-            "🚀 [PAPER-{}] {} açıldı @ {:.2} | Qty={:.4} ${:.2} | SL={:.2} TP={:.2} Trail={:.2} (ATR={:.4} ×{:.1})",
+            "🚀 [{}-{}] {} açıldı @ {:.2} | Qty={:.4} ${:.2} | SL={:.2} TP={:.2} Trail={:.2} (ATR={:.4} ×{:.1})",
+            mode_tag,
             if is_long { "BUY" } else { "SELL" },
             symbol, entry, qty_val, alloc_capital,
-            stop_loss, take_profit, trailing_stop, atr, atr_mult,
+            pos_for_log.stop_loss, pos_for_log.take_profit, pos_for_log.trailing_stop, atr, atr_mult,
         ));
         st.push_log(format!(
             "    └─ Kelly f*={:.3} · risk_iştah={:.2} · ML={:.2} · TP%={:.2} SL%={:.2} · Rejim={} · Strat={}",
-            kelly.kelly_fraction, risk_appetite, ml_conf, tp_pct, sl_pct,
+            kelly_fraction, risk_appetite, ml_conf, tp_pct, sl_pct,
             regime.as_str(), strategy_name,
         ));
+        let _ = live_order_id; // ileride pos_id ↔ order_id eşlemesi için saklanabilir
     }
 
     /// 🧠 IntelligenceHub periyodik tick: drift hesabı + evrim + retrain kararı.
@@ -1041,25 +1122,61 @@ impl Engine {
         None
     }
 
-    /// 🧬 FAZ F3: PAPER-MODE OTONOM POZİSYON KAPATMA MOTORU (Borrow Checker Tahkimatlı)
-    fn close_paper_position(
+    /// 🧬 FAZ F3: OTONOM POZİSYON KAPATMA MOTORU (Paper + Live dispatcher)
+    async fn close_paper_position(
         state: &Arc<Mutex<AppState>>,
         symbol: &str,
         candles: &[Candle],
         reason: ExitReason,
     ) {
         let last_candle = match candles.last() { Some(c) => c, None => return };
-        let mut st = state.lock().unwrap();
-        st.fleet.phase = "Executing".into();
 
-        // [DÜZELTME]: Pozisyon silme (remove) işlemi kendi izole skopuna alındı
-        let target_pos = {
-            if let Ok(mut positions) = st.finance.live_positions.write() {
+        // Mutex guard'ı async sınırını geçemez (MutexGuard !Send). Tüm sync iş bu skopta:
+        let (target_pos, live_executor, live_dry_run, mode_tag) = {
+            let mut st = state.lock().unwrap();
+            st.fleet.phase = "Executing".into();
+            let target_pos = if let Ok(mut positions) = st.finance.live_positions.write() {
                 positions.remove(symbol)
+            } else { None };
+            let exec = st.live_executor.clone();
+            let dry = st.live_dry_run;
+            let tag = if exec.is_some() && !dry { "LIVE" }
+                      else if exec.is_some() && dry { "DRY-RUN" }
+                      else { "PAPER" };
+            (target_pos, exec, dry, tag)
+        }; // st burada otomatik drop olur
+
+        if let Some(executor) = live_executor.as_ref() {
+            if live_dry_run {
+                if let Ok(mut st2) = state.lock() {
+                    st2.push_log(format!(
+                        "🟡 [LIVE-DRY-RUN] {} close ({:?}) → emir gönderilmedi", symbol, reason,
+                    ));
+                }
             } else {
-                None
+                match executor.close_position(symbol).await {
+                    Ok(resp) => {
+                        if let Ok(mut st2) = state.lock() {
+                            st2.push_log(format!(
+                                "💱 [LIVE] {} close ({:?}) ✓ order={}",
+                                symbol, reason,
+                                resp.get("orderId").map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        if let Ok(mut st2) = state.lock() {
+                            st2.push_log(format!(
+                                "❌ [LIVE] {} close hatası: {:?} — paper tarafı yine de kapanacak",
+                                symbol, e,
+                            ));
+                        }
+                    }
+                }
             }
-        }; // Kilit koruyucu bu satırda düşer, hafıza çiti temizlenir.
+        }
+
+        let mut st = state.lock().unwrap();
 
         if let Some(pos) = target_pos {
             // Çıkış fiyatı: SL/TP/Trailing'de kapanma seviyesi pos'taki değer; aksi son mum kapanışı.
@@ -1101,8 +1218,8 @@ impl Engine {
             }
 
             st.push_log(format!(
-                "{} [PAPER-CLOSE/{}] {} kapatıldı @ {:.2} (entry={:.2}) | Net PnL: {:.2} USDT ({:+.2}%)",
-                reason.emoji(), reason.as_str(), symbol, exit_price, pos.entry_price, pnl_val, pnl_pct_val,
+                "{} [{}-CLOSE/{}] {} kapatıldı @ {:.2} (entry={:.2}) | Net PnL: {:.2} USDT ({:+.2}%)",
+                reason.emoji(), mode_tag, reason.as_str(), symbol, exit_price, pos.entry_price, pnl_val, pnl_pct_val,
             ));
 
             // IntelligenceHub.learn_from_exit — track_trade'de açılışta hangi rejim/strateji ile

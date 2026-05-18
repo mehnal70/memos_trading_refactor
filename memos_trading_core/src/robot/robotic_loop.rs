@@ -158,12 +158,22 @@ impl GuardianShield {
 /// Srivastava ATP - Otonom Sistem Merkezi (Orkestratör)
 pub struct AppState {
     pub config: RoboticLoopConfig,
-    
+
     // Bakanlıklar
     pub finance: FinanceVault,
     pub brain: BrainBox,
     pub fleet: FleetCommand,
     pub guardian: GuardianShield,
+
+    /// 💱 LIVE Mode Köprüsü (config.trading_mode == Live + API key varsa)
+    /// None ise tüm pozisyon açış/kapanış paper-mode'da kalır.
+    pub live_executor: Option<Arc<crate::robot::engines::binance_executor::BinanceFuturesExecutor>>,
+    /// LIVE_DRY_RUN=true ise executor olsa bile gerçek emir gönderilmez,
+    /// sadece "şu emir gönderilecekti" log'u atılır. Paper akışı çalışır.
+    pub live_dry_run: bool,
+    /// Tek emir için sert notional tavan (USD). Env LIVE_MAX_NOTIONAL_USD,
+    /// default $100. RiskGate'in üstünde bir bariyer.
+    pub live_max_notional_usd: f64,
 
     // Global Durdurma Sinyalleri
     pub app_stop_signal: Arc<AtomicBool>,
@@ -264,12 +274,45 @@ impl AppState {
             "F1: Otonom filo, pinned ve SQLite geçmiş sembolleriyle donatılarak ayağa kaldırıldı. Seviye INFO"
         );
 
+        // 💱 LIVE Mode köprüsü — TradingMode::Live + API key varsa BinanceFuturesExecutor kurulur.
+        // Yoksa otomatik olarak paper-fallback (live_executor = None).
+        let live_executor = if matches!(config.trading_mode, crate::core::model::TradingMode::Live) {
+            match (config.get_api_key(), config.get_secret_key()) {
+                (Some(k), Some(s)) if !k.is_empty() && !s.is_empty() => {
+                    log::info!(target:"STATE_INIT",
+                        "💱 Live mode aktif: BinanceFuturesExecutor kuruldu (market={})", config.market);
+                    Some(Arc::new(
+                        crate::robot::engines::binance_executor::BinanceFuturesExecutor::new_for_market(
+                            k, s, /*is_paper=*/false, &config.market,
+                        )
+                    ))
+                }
+                _ => {
+                    log::warn!(target:"STATE_INIT",
+                        "⚠️ TradingMode::Live seçildi ama API key/secret yok → Paper-fallback");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // LIVE_DRY_RUN: executor olsa bile gerçek emir gönderme; sadece "gönderilecekti" log'la.
+        let live_dry_run = std::env::var("LIVE_DRY_RUN")
+            .map(|v| v == "true" || v == "1").unwrap_or(false);
+        // LIVE_MAX_NOTIONAL_USD: tek emir için sert tavan. Default $100 (test güvenli).
+        let live_max_notional_usd = std::env::var("LIVE_MAX_NOTIONAL_USD")
+            .ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(100.0).max(0.0);
+
         Self {
             config,
             finance,
             brain,
             fleet,
             guardian,
+            live_executor,
+            live_dry_run,
+            live_max_notional_usd,
             app_stop_signal: stop_sig,
             pause_signal: Arc::new(AtomicBool::new(false)),
         }
