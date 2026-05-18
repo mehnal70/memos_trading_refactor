@@ -224,6 +224,10 @@ mod tests {
                 genome_id: "test".into(), fitness: 0.0, win_rate: 0.0, trade_count: 0,
                 gbt_score: Some(0.0), exploration_rate: 0.1, drift_score: 0.0,
                 mc_ruin_prob: 0.0, is_evolution_active: false, next_evolution_secs: 0,
+                live_strategy: String::new(), controller_state: String::new(),
+                controller_cycle: 0, consecutive_failures: 0, pending_trades: 0,
+                drift_series: vec![], best_tp_pct: 0.0, best_sl_pct: 0.0,
+                best_position_size: 0.0,
             },
             market_fleet: vec![],
             logs: vec![

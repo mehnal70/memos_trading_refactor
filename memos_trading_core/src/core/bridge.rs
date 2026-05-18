@@ -157,14 +157,24 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
         .map(|t| t.len()).unwrap_or(0);
 
     // IntelligenceHub'tan canlı veriler — kullanılamıyorsa muhafazakar varsayılana düş.
-    let (hub_drift, hub_pending, hub_cycle, hub_state, hub_evolution_active) =
+    let (hub_drift, hub_pending, hub_cycle, hub_state, hub_evolution_active,
+         hub_failures, hub_drift_series) =
         st.brain.intelligence_hub.read().map(|h| (
             h.drift_detector.drift_score,
             h.pending_trades.len(),
             h.controller.cycle_id,
             h.controller.state.to_string(),
             h.controller.evolution_enabled,
-        )).unwrap_or((0.0, 0, 0, "Unknown".into(), false));
+            h.controller.consecutive_failures as u32,
+            // Drift tarihçesinin son 60 noktası (AI Center sparkline için).
+            h.drift_history.iter().rev().take(60).rev().cloned().collect::<Vec<f64>>(),
+        )).unwrap_or((0.0, 0, 0, "Unknown".into(), false, 0, vec![]));
+
+    let live_strategy_name = st.brain.live_strategy.read()
+        .map(|s| s.clone()).unwrap_or_else(|_| "—".to_string());
+    let best_tp_pct = st.brain.best_params.get("take_profit_pct").copied().unwrap_or(0.0);
+    let best_sl_pct = st.brain.best_params.get("stop_loss_pct").copied().unwrap_or(0.0);
+    let best_position_size = st.brain.best_params.get("max_position_size").copied().unwrap_or(0.0);
 
     let ai_brain = AiBrainSnapshot {
         genome_id: format!("Srivastava-Alpha-9 [cycle={} · ctrl={}]", hub_cycle, hub_state),
@@ -177,8 +187,16 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
         mc_ruin_prob: 0.01,
         is_evolution_active: hub_evolution_active,
         next_evolution_secs: 300_u64.saturating_sub((hub_cycle % 300) as u64),
+        live_strategy: live_strategy_name,
+        controller_state: hub_state,
+        controller_cycle: hub_cycle,
+        consecutive_failures: hub_failures,
+        pending_trades: hub_pending,
+        drift_series: hub_drift_series,
+        best_tp_pct,
+        best_sl_pct,
+        best_position_size,
     };
-    let _ = hub_pending; // ileride snapshot'a açık pozisyon hafıza sayacı olarak eklenebilir
 
     // 6. ÖZEL İSTATİSTİKLER (Placeholder - Lojik Engine'e taşınacak)
     let (scalp_stats, swing_stats) = (

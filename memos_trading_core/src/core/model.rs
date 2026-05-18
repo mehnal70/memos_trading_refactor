@@ -280,6 +280,33 @@ pub struct AiBrainSnapshot {
     pub mc_ruin_prob: f64,
     pub is_evolution_active: bool,
     pub next_evolution_secs: u64,
+
+    // === IntelligenceHub canlı verileri (AI Center paneli) ===
+    /// Aktif strateji adı (live_strategy). Backtest job otonom değiştirir.
+    #[serde(default)]
+    pub live_strategy: String,
+    /// AutonomousController state: Observe/Optimize/Trade/SafeMode/Halted
+    #[serde(default)]
+    pub controller_state: String,
+    /// AutonomousController cycle sayacı (her IntelligenceHub tick'inde +1)
+    #[serde(default)]
+    pub controller_cycle: u64,
+    /// Ardışık kayıp işlem sayısı (5+ ⇒ SafeMode tetikleyicisi)
+    #[serde(default)]
+    pub consecutive_failures: u32,
+    /// Hub.pending_trades — açık olup hub.learn_from_exit beklenen pozisyon sayısı
+    #[serde(default)]
+    pub pending_trades: usize,
+    /// Drift skor tarihçesi (son 60 nokta) — AI Center sparkline için
+    #[serde(default)]
+    pub drift_series: Vec<f64>,
+    /// brain.best_params'tan kritik 3'lü: TP / SL / Position Size
+    #[serde(default)]
+    pub best_tp_pct: f64,
+    #[serde(default)]
+    pub best_sl_pct: f64,
+    #[serde(default)]
+    pub best_position_size: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
