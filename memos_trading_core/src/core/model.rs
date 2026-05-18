@@ -575,6 +575,57 @@ impl Default for SymbolInfo {
     }
 }
 
+/// 🧮 Borsa-tarafı emir filtreleri (Binance exchangeInfo'dan çekilir).
+/// Live mode'da `place_market_order` öncesi qty bu filtrelerden geçer; aksi halde
+/// Binance `-1013 Filter failure: LOT_SIZE / MIN_NOTIONAL` döner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolFilters {
+    /// LOT_SIZE.stepSize — qty bu çarpana yuvarlanmalı (örn. 0.001 → qty 0.1234 → 0.123).
+    pub step_size: f64,
+    /// LOT_SIZE.minQty — qty bu değerin altındaysa emir reddedilir.
+    pub min_qty: f64,
+    /// PRICE_FILTER.tickSize — fiyat bu çarpana yuvarlanmalı (SL/TP için).
+    pub tick_size: f64,
+    /// MIN_NOTIONAL.minNotional veya NOTIONAL.notional — qty*price bu değerin altındaysa red.
+    pub min_notional: f64,
+}
+
+impl Default for SymbolFilters {
+    fn default() -> Self {
+        Self { step_size: 0.0, min_qty: 0.0, tick_size: 0.0, min_notional: 0.0 }
+    }
+}
+
+impl SymbolFilters {
+    /// Qty'yi stepSize'a aşağı yuvarlar. step_size 0 ise qty'yi aynen döndürür.
+    pub fn round_qty_down(&self, qty: f64) -> f64 {
+        if self.step_size <= 0.0 { return qty; }
+        (qty / self.step_size).floor() * self.step_size
+    }
+
+    /// Fiyatı tickSize'a yuvarlar (en yakın). tick_size 0 ise price'ı aynen döndürür.
+    pub fn round_price(&self, price: f64) -> f64 {
+        if self.tick_size <= 0.0 { return price; }
+        (price / self.tick_size).round() * self.tick_size
+    }
+
+    /// Emirin filtrelerden geçip geçmediğini sınar. Dönüş: yuvarlanmış qty veya Err(sebep).
+    pub fn validate(&self, qty: f64, price: f64) -> Result<f64, String> {
+        let rounded = self.round_qty_down(qty);
+        if rounded <= 0.0 {
+            return Err(format!("stepSize sonrası qty=0 (input={:.8}, step={:.8})", qty, self.step_size));
+        }
+        if self.min_qty > 0.0 && rounded < self.min_qty {
+            return Err(format!("qty {:.8} < minQty {:.8}", rounded, self.min_qty));
+        }
+        let notional = rounded * price;
+        if self.min_notional > 0.0 && notional < self.min_notional {
+            return Err(format!("notional ${:.4} < minNotional ${:.4}", notional, self.min_notional));
+        }
+        Ok(rounded)
+    }
+}
+
 // =============================================================================
 // 7. SİMÜLASYON VE KAĞIT TİCARETİ ÖZETİ (PAPER TRADING RESULT)
 // =============================================================================

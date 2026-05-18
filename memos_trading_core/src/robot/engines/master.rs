@@ -1277,6 +1277,10 @@ impl Engine {
         let atr_mult = plan.atr_mult;
 
         let mut live_order_id: Option<String> = None;
+        // Filtre sonrası qty ve SL/TP fiyatları burada güncellenir; local pozisyon
+        // (new_pos) borsaya gönderilen değerle birebir eşleşsin diye mutable.
+        let mut qty_val = qty_val;
+        let mut new_pos = new_pos;
         if let Some(executor) = live_executor.as_ref() {
             let side = if is_long { "BUY" } else { "SELL" };
             if alloc_capital > live_max_notional {
@@ -1288,6 +1292,48 @@ impl Engine {
                 }
                 return;
             }
+
+            // 🧮 ExchangeInfo filtre kontrolü (LOT_SIZE / MIN_NOTIONAL / PRICE_FILTER).
+            // qty stepSize'a aşağı yuvarlanır, qty*price minNotional altındaysa emir
+            // gönderilmeden veto edilir → Binance -1013 reddini önler.
+            match executor.apply_filters(symbol, qty_val, entry).await {
+                Ok(rounded) => {
+                    if (rounded - qty_val).abs() > f64::EPSILON {
+                        if let Ok(mut st2) = state.lock() {
+                            st2.push_log(format!(
+                                "🧮 [LIVE-FILTER] {} qty {:.8} → {:.8} (stepSize'a yuvarlandı)",
+                                symbol, qty_val, rounded,
+                            ));
+                        }
+                        qty_val = rounded;
+                        new_pos.qty = rounded;
+                    }
+                    if let Ok(map) = executor.filters.read() {
+                        if let Some(f) = map.get(symbol) {
+                            let sl_r = f.round_price(new_pos.stop_loss);
+                            let tp_r = f.round_price(new_pos.take_profit);
+                            new_pos.stop_loss = sl_r;
+                            new_pos.take_profit = tp_r;
+                            new_pos.trailing_stop = f.round_price(new_pos.trailing_stop);
+                        }
+                    }
+                }
+                Err(reason) => {
+                    if let Ok(mut st2) = state.lock() {
+                        st2.push_log(format!(
+                            "🛑 [LIVE-FILTER-VETO] {} {} reddedildi: {}",
+                            symbol, side, reason,
+                        ));
+                        st2.guardian.repair_log.push_back(format!(
+                            "[{}] LOT_SIZE/MIN_NOTIONAL veto: {} {} ({})",
+                            chrono::Local::now().format("%H:%M:%S"), symbol, side, reason,
+                        ));
+                        while st2.guardian.repair_log.len() > 100 { st2.guardian.repair_log.pop_front(); }
+                    }
+                    return;
+                }
+            }
+
             if live_dry_run {
                 if let Ok(mut st2) = state.lock() {
                     st2.push_log(format!(
@@ -1309,8 +1355,8 @@ impl Engine {
 
                         // 🛡️ Borsa-tarafı koruma: SL ve TP emirlerini hemen yerleştir.
                         // Bot ölse / network kopsa bile pozisyon korumalı kalır.
-                        let pos_sl = plan.new_pos.stop_loss;
-                        let pos_tp = plan.new_pos.take_profit;
+                        let pos_sl = new_pos.stop_loss;
+                        let pos_tp = new_pos.take_profit;
                         let (sl_res, tp_res) = executor.place_protection_orders(
                             symbol, is_long, qty_val, pos_sl, pos_tp,
                         ).await;
@@ -1376,6 +1422,7 @@ impl Engine {
         // Mutex'i geri al
         let mut st = state.lock().unwrap();
 
+        let new_pos_for_log = new_pos.clone();
         {
             if let Ok(mut positions) = st.finance.live_positions.write() {
                 positions.insert(symbol.to_string(), new_pos);
@@ -1398,7 +1445,7 @@ impl Engine {
         let mode_tag = if live_order_id.is_some() { "LIVE" }
                        else if live_executor.is_some() && live_dry_run { "DRY-RUN" }
                        else { "PAPER" };
-        let pos_for_log = plan.new_pos;
+        let pos_for_log = new_pos_for_log;
         st.push_log(format!(
             "🚀 [{}-{}] {} açıldı @ {:.2} | Qty={:.4} ${:.2} | SL={:.2} TP={:.2} Trail={:.2} (ATR={:.4} ×{:.1})",
             mode_tag,

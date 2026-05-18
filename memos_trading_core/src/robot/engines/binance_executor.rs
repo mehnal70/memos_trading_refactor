@@ -1,12 +1,15 @@
 // robot/binance_executor.rs - Optimize Edilmiş Tam Sürüm
 
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
+use std::sync::RwLock;
 use reqwest::{Client, Method};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use serde_json::Value;
 use crate::Result;
 use crate::MemosTradingError;
+use crate::core::model::SymbolFilters;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -17,6 +20,10 @@ pub struct BinanceFuturesExecutor {
     pub is_paper: bool,
     pub is_spot: bool,
     pub base_url: String,
+    /// 🧮 Sembol bazlı emir filtreleri (stepSize/minQty/minNotional/tickSize).
+    /// İlk kullanımda exchangeInfo'dan çekilir, sonra burada cache'lenir. Live mode'da
+    /// `apply_filters` öncesi otomatik doldurulur. Paper modda boş kalır.
+    pub filters: RwLock<HashMap<String, SymbolFilters>>,
 }
 
 impl BinanceFuturesExecutor {
@@ -28,7 +35,11 @@ impl BinanceFuturesExecutor {
             (false, false) => "https://binance.com",
         }.to_owned();
 
-        Self { api_key, api_secret, client: Client::new(), is_paper, is_spot, base_url }
+        Self {
+            api_key, api_secret, client: Client::new(),
+            is_paper, is_spot, base_url,
+            filters: RwLock::new(HashMap::new()),
+        }
     }
 
     // --- MERKEZİ İŞLEMCİLER (Bloat'u temizleyen kısım burası) ---
@@ -243,5 +254,81 @@ impl BinanceFuturesExecutor {
 
     pub fn log_order(&self, symbol: &str, side: &str, qty: f64, price: f64) -> String {
         format!("[{}] Order: {} {} qty={} @ {}", if self.is_paper { "PAPER" } else { "LIVE" }, side, symbol, qty, price)
+    }
+
+    // === ExchangeInfo / LotSize / MinNotional filtreleri ===
+
+    /// 🧮 Binance exchangeInfo'dan tek sembolün filtrelerini çeker (LOT_SIZE,
+    /// PRICE_FILTER, MIN_NOTIONAL / NOTIONAL). İmza gerektirmez (public endpoint).
+    /// Çağıran genelde `apply_filters` üzerinden çağırır; bu metod cache'i atlatır.
+    pub async fn fetch_symbol_filters(&self, symbol: &str) -> Result<SymbolFilters> {
+        let path = if self.is_spot { "/api/v3/exchangeInfo" } else { "/fapi/v1/exchangeInfo" };
+        let url = format!("{}{}?symbol={}", self.base_url, path, symbol);
+        let resp = self.client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            return Err(MemosTradingError::Api(format!("exchangeInfo {}: {}", symbol, resp.text().await?)));
+        }
+        let v: Value = resp.json().await?;
+        let arr = v.get("symbols").and_then(|s| s.as_array())
+            .ok_or_else(|| MemosTradingError::Api(format!("exchangeInfo: symbols dizisi yok ({})", symbol)))?;
+        let sym = arr.iter().find(|s| s.get("symbol").and_then(|x| x.as_str()) == Some(symbol))
+            .ok_or_else(|| MemosTradingError::Api(format!("exchangeInfo: {} sembolü dönmedi", symbol)))?;
+
+        let filters = sym.get("filters").and_then(|f| f.as_array())
+            .ok_or_else(|| MemosTradingError::Api(format!("exchangeInfo: filters yok ({})", symbol)))?;
+
+        let mut out = SymbolFilters::default();
+        for f in filters {
+            let kind = f.get("filterType").and_then(|x| x.as_str()).unwrap_or("");
+            let parse = |k: &str| -> f64 {
+                f.get(k).and_then(|x| x.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0)
+            };
+            match kind {
+                "LOT_SIZE" | "MARKET_LOT_SIZE" => {
+                    // MARKET_LOT_SIZE futures'ta MARKET emirler için ayrı; varsa onu önceleriz.
+                    let step = parse("stepSize");
+                    let minq = parse("minQty");
+                    if kind == "MARKET_LOT_SIZE" || out.step_size <= 0.0 {
+                        out.step_size = step;
+                        out.min_qty = minq;
+                    }
+                }
+                "PRICE_FILTER" => { out.tick_size = parse("tickSize"); }
+                "MIN_NOTIONAL" => { out.min_notional = parse("minNotional"); }
+                "NOTIONAL" => {
+                    // Futures: NOTIONAL.notional veya minNotional alanı olabilir.
+                    let n = parse("notional");
+                    let mn = parse("minNotional");
+                    out.min_notional = if n > 0.0 { n } else { mn };
+                }
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
+    /// Cache yardımcısı: sembolün filtreleri yoksa çeker ve mühürler.
+    /// Live mode'da `apply_filters`'ın önyüzü.
+    pub async fn ensure_filters(&self, symbol: &str) -> Result<SymbolFilters> {
+        if let Ok(map) = self.filters.read() {
+            if let Some(f) = map.get(symbol) { return Ok(f.clone()); }
+        }
+        let f = self.fetch_symbol_filters(symbol).await?;
+        if let Ok(mut map) = self.filters.write() {
+            map.insert(symbol.to_string(), f.clone());
+        }
+        Ok(f)
+    }
+
+    /// 🛡️ Emir öncesi qty'yi borsa filtrelerinden geçirir.
+    /// Dönüş: yuvarlanmış qty (Ok) veya red sebebi (Err string).
+    /// Cache'te kayıt yoksa exchangeInfo'dan çekilir. Hata olursa filtreler atlanır
+    /// ve qty olduğu gibi döner (Binance reddederse de WS REJECTED event'ine düşer).
+    pub async fn apply_filters(&self, symbol: &str, qty: f64, price: f64) -> std::result::Result<f64, String> {
+        let filters = match self.ensure_filters(symbol).await {
+            Ok(f) => f,
+            Err(e) => return Err(format!("exchangeInfo çekilemedi ({}): {:?}", symbol, e)),
+        };
+        filters.validate(qty, price)
     }
 }
