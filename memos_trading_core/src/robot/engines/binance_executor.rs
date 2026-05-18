@@ -153,6 +153,14 @@ impl BinanceFuturesExecutor {
         self.signed_request(Method::DELETE, path, vec![format!("symbol={}", symbol)]).await
     }
 
+    /// Sembolün borsadaki açık emirlerini listele. Protection sync task bunu
+    /// kullanarak SL veya TP'nin tetiklendiğini (emir kaybolması) yakalar.
+    pub async fn get_open_orders(&self, symbol: &str) -> Result<Vec<Value>> {
+        let path = if self.is_spot { "/api/v3/openOrders" } else { "/fapi/v1/openOrders" };
+        let resp = self.signed_request(Method::GET, path, vec![format!("symbol={}", symbol)]).await?;
+        Ok(resp.as_array().cloned().unwrap_or_default())
+    }
+
     pub async fn get_balance(&self) -> Result<f64> {
         let path = if self.is_spot { "/api/v3/account" } else { "/fapi/v2/account" };
         let resp = self.signed_request(Method::GET, path, vec![]).await?;

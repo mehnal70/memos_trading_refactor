@@ -144,7 +144,7 @@ impl Engine {
     async fn spawn_infrastructure_fleet(state: Arc<Mutex<AppState>>) {
         log::info!("⚡ Srivastava Altyapı Filosu sevk ediliyor...");
         if let Ok(mut st) = state.lock() {
-            st.push_log("⚡ Altyapı filosu sevk edildi: heartbeat(1s) · phase(2s) · price-poll(5s) · trigger(250ms) · scheduler(60s)".into());
+            st.push_log("⚡ Altyapı filosu sevk edildi: heartbeat(1s) · phase(2s) · price-poll(5s) · trigger(250ms) · scheduler(60s) · psync(30s)".into());
         }
 
         // ── Task 1: Heartbeat — her saniye main_loop step'ini canlı tut, overdue'ya bak.
@@ -524,6 +524,78 @@ impl Engine {
                 }
 
                 sleep(Duration::from_secs(CHECK_EVERY_SECS)).await;
+            }
+        });
+
+        // ── Task 6: Protection sync (sadece Live mode'da çalışır).
+        //
+        // Her 30 sn'de bir, açık Live pozisyonların borsadaki SL+TP emirlerini sorgular.
+        // Bir taraf tetiklenmişse (0 veya 1 açık emir görülür), local pozisyonu kapatır
+        // ve orphan kalan diğer emri cancel eder. Bot ölmese bile bu döngü hız kazandırır:
+        // SL borsa tarafında tetiklenir → 30 sn içinde local arşive geçer.
+        let st_psync = Arc::clone(&state);
+        tokio::spawn(async move {
+            const SYNC_EVERY_SECS: u64 = 30;
+            loop {
+                let stop = st_psync.lock().map(|s| s.app_stop_signal.load(Ordering::Relaxed)).unwrap_or(true);
+                if stop { break; }
+
+                // Live executor + aktif sembol listesi — kısa kilit altında
+                let (executor, db_path, interval, active_symbols, live_dry_run) = {
+                    let st = match st_psync.lock() { Ok(s) => s, Err(_) => break };
+                    let executor = st.live_executor.clone();
+                    let active: Vec<String> = st.finance.live_positions.read()
+                        .map(|m| m.keys().cloned().collect()).unwrap_or_default();
+                    (executor, st.config.db_path.clone(), st.config.interval.clone(),
+                     active, st.live_dry_run)
+                };
+
+                // Yalnız Live mode + dry-run değil
+                if let (Some(exec), false) = (executor, live_dry_run) {
+                    for symbol in &active_symbols {
+                        match exec.get_open_orders(symbol).await {
+                            Ok(orders) => {
+                                let n = orders.len();
+                                // Pozisyon açıldığında 2 koruma emiri verildiği için < 2 demek tetiklendi.
+                                if n < 2 {
+                                    if let Ok(mut st) = st_psync.lock() {
+                                        st.push_log(format!(
+                                            "🔄 [SYNC] {} açık emir={} (<2) → SL/TP tetiklenmiş, local pozisyon kapatılıyor",
+                                            symbol, n,
+                                        ));
+                                    }
+                                    // Orphan emri (varsa) temizle
+                                    if n == 1 {
+                                        let _ = exec.cancel_all_orders(symbol).await;
+                                    }
+                                    // Mum verisini al ve local pozisyonu strateji-sinyal sebebiyle kapat
+                                    if let Ok(candles) = crate::persistence::reader::read_candles(
+                                        &db_path, symbol, &interval, 5,
+                                    ) {
+                                        if !candles.is_empty() {
+                                            // close_paper_position'ı Live emir ile değil, sadece
+                                            // local tarafı kapatacak şekilde çağırırız. Live close
+                                            // zaten zaten 0 pozisyon dönecek (Binance "Pozisyon kapalı"
+                                            // hatası). Sebebi: SL ve TP zaten tetiklendi.
+                                            Self::close_paper_position(
+                                                &st_psync, symbol, &candles, ExitReason::TrailingStop,
+                                            ).await;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if let Ok(mut st) = st_psync.lock() {
+                                    st.push_log(format!(
+                                        "⚠️ [SYNC] {} get_open_orders hatası: {:?}", symbol, e,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                sleep(Duration::from_secs(SYNC_EVERY_SECS)).await;
             }
         });
     }
