@@ -76,6 +76,68 @@ impl BinanceFuturesExecutor {
         self.signed_request(Method::POST, path, params).await
     }
 
+    /// 🛡️ STOP-LOSS emri (pozisyonu trigger fiyatında kapatır).
+    /// `side` pozisyonun KAPATMA yönü (long pozisyon için "SELL", short için "BUY").
+    /// Futures: STOP_MARKET + reduceOnly. Spot: STOP_LOSS (market stop).
+    pub async fn place_stop_loss_order(&self, symbol: &str, side: &str, qty: f64, stop_price: f64) -> Result<Value> {
+        let path = if self.is_spot { "/api/v3/order" } else { "/fapi/v1/order" };
+        let mut params = vec![
+            format!("symbol={}", symbol),
+            format!("side={}", side),
+            format!("quantity={}", self.format_f64(qty)),
+            format!("stopPrice={}", self.format_f64(stop_price)),
+        ];
+        if self.is_spot {
+            // Spot: STOP_LOSS (market trigger) — stopPrice tetiklendiğinde market emir oluşur.
+            params.push("type=STOP_LOSS".to_owned());
+        } else {
+            // Futures: STOP_MARKET + reduceOnly → mevcut pozisyonu kapatır, yeni pozisyon açmaz.
+            params.push("type=STOP_MARKET".to_owned());
+            params.push("reduceOnly=true".to_owned());
+            params.push("timeInForce=GTC".to_owned());
+        }
+        self.signed_request(Method::POST, path, params).await
+    }
+
+    /// 🎯 TAKE-PROFIT emri (kâr seviyesinde kapatır).
+    /// `side` pozisyonun KAPATMA yönü.
+    /// Futures: TAKE_PROFIT_MARKET + reduceOnly. Spot: TAKE_PROFIT (market trigger).
+    pub async fn place_take_profit_order(&self, symbol: &str, side: &str, qty: f64, tp_price: f64) -> Result<Value> {
+        let path = if self.is_spot { "/api/v3/order" } else { "/fapi/v1/order" };
+        let mut params = vec![
+            format!("symbol={}", symbol),
+            format!("side={}", side),
+            format!("quantity={}", self.format_f64(qty)),
+            format!("stopPrice={}", self.format_f64(tp_price)),
+        ];
+        if self.is_spot {
+            params.push("type=TAKE_PROFIT".to_owned());
+        } else {
+            params.push("type=TAKE_PROFIT_MARKET".to_owned());
+            params.push("reduceOnly=true".to_owned());
+            params.push("timeInForce=GTC".to_owned());
+        }
+        self.signed_request(Method::POST, path, params).await
+    }
+
+    /// Pozisyon için hem SL hem TP emrini sırayla yerleştirir.
+    /// Hata varsa Vec içinde toplar; herhangi biri başarısızsa caller emergency_close çağırmalı.
+    /// Dönüş: (sl_order_id, tp_order_id) — emir verilemezse None.
+    pub async fn place_protection_orders(
+        &self,
+        symbol: &str,
+        is_long: bool,
+        qty: f64,
+        stop_loss: f64,
+        take_profit: f64,
+    ) -> (Result<Value>, Result<Value>) {
+        // Long pozisyonu kapatma yönü SELL; short pozisyonu BUY ile kapatılır.
+        let close_side = if is_long { "SELL" } else { "BUY" };
+        let sl_res = self.place_stop_loss_order(symbol, close_side, qty, stop_loss).await;
+        let tp_res = self.place_take_profit_order(symbol, close_side, qty, take_profit).await;
+        (sl_res, tp_res)
+    }
+
     pub async fn get_order_status(&self, symbol: &str, order_id: u64) -> Result<Value> {
         let path = if self.is_spot { "/api/v3/order" } else { "/fapi/v1/order" };
         self.signed_request(Method::GET, path, vec![format!("symbol={}", symbol), format!("orderId={}", order_id)]).await

@@ -873,6 +873,48 @@ impl Engine {
                                 live_order_id.as_deref().unwrap_or("?"),
                             ));
                         }
+
+                        // 🛡️ Borsa-tarafı koruma: SL ve TP emirlerini hemen yerleştir.
+                        // Bot ölse / network kopsa bile pozisyon korumalı kalır.
+                        let pos_sl = plan.new_pos.stop_loss;
+                        let pos_tp = plan.new_pos.take_profit;
+                        let (sl_res, tp_res) = executor.place_protection_orders(
+                            symbol, is_long, qty_val, pos_sl, pos_tp,
+                        ).await;
+                        let sl_status = match &sl_res {
+                            Ok(r) => format!("SL ✓ ({})",
+                                r.get("orderId").map(|v| v.to_string()).unwrap_or_else(|| "?".into())),
+                            Err(e) => format!("SL ❌ {:?}", e),
+                        };
+                        let tp_status = match &tp_res {
+                            Ok(r) => format!("TP ✓ ({})",
+                                r.get("orderId").map(|v| v.to_string()).unwrap_or_else(|| "?".into())),
+                            Err(e) => format!("TP ❌ {:?}", e),
+                        };
+                        if let Ok(mut st2) = state.lock() {
+                            st2.push_log(format!(
+                                "🛡️ [LIVE-PROTECT] {} @ SL={:.4} TP={:.4} · {} · {}",
+                                symbol, pos_sl, pos_tp, sl_status, tp_status,
+                            ));
+                        }
+
+                        // Kritik uyarı: SL emri başarısızsa pozisyon korumasız — emergency.
+                        if sl_res.is_err() {
+                            if let Ok(mut st2) = state.lock() {
+                                st2.push_log(format!(
+                                    "🚨 [LIVE-EMERGENCY] {} SL emri verilemedi → pozisyon acil kapatılıyor",
+                                    symbol,
+                                ));
+                                st2.guardian.repair_log.push_back(format!(
+                                    "[{}] live SL hatası: {} emergency close",
+                                    chrono::Local::now().format("%H:%M:%S"), symbol,
+                                ));
+                                while st2.guardian.repair_log.len() > 100 { st2.guardian.repair_log.pop_front(); }
+                            }
+                            // Hemen pozisyonu kapat — koruma sağlanamadı.
+                            let _ = executor.close_position(symbol).await;
+                            return;
+                        }
                     }
                     Err(e) => {
                         if let Ok(mut st2) = state.lock() {
@@ -1154,6 +1196,26 @@ impl Engine {
                     ));
                 }
             } else {
+                // 1. Bekleyen koruma emirlerini iptal et (SL + TP). Bunlar tetiklenmeden
+                //    pozisyonu manuel kapatacağımız için artık gereksiz.
+                match executor.cancel_all_orders(symbol).await {
+                    Ok(_) => {
+                        if let Ok(mut st2) = state.lock() {
+                            st2.push_log(format!(
+                                "🧹 [LIVE] {} koruma emirleri iptal edildi (SL+TP)", symbol,
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        if let Ok(mut st2) = state.lock() {
+                            st2.push_log(format!(
+                                "⚠️ [LIVE] {} cancel_all_orders hatası: {:?} (orphan SL/TP olabilir)",
+                                symbol, e,
+                            ));
+                        }
+                    }
+                }
+                // 2. Pozisyonu market emir ile kapat.
                 match executor.close_position(symbol).await {
                     Ok(resp) => {
                         if let Ok(mut st2) = state.lock() {
