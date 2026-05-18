@@ -557,24 +557,61 @@ impl Engine {
              live_strategy, st.brain.ml_confidence)
         };
 
-        // 2) Risk yöneticisi (her tur taze policy; AppState'e taşımak istenirse daha sonra cache'lenir).
+        // 2) Paralel sembol infazı — her sembol için ayrı tokio task. State Arc<Mutex> üzerinden
+        //    paylaşılır; lock contention'ı kısa tutmak için her closure içinde minimal scope kullanılır.
+        //
+        // Sıralı→paralel kazanımı: 100 sembol × 5 ms DB read = 500 ms (sıralı) ≈ 30-80 ms (paralel,
+        // Tokio multi-thread). State mutex contention 100 sembolde de tolere edilebilir çünkü
+        // her sembol için tek kısa açış+kapanış+okuma turu yapılır.
+        let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(candidates.len());
+        for symbol in candidates {
+            let state_clone = Arc::clone(state);
+            let db_path_c = db_path.clone();
+            let interval_c = interval.clone();
+            let live_strategy_c = live_strategy.clone();
+            let snap_clone = snap.clone();
+            handles.push(tokio::spawn(async move {
+                Self::process_symbol_cycle(
+                    &state_clone, &symbol, &db_path_c, &interval_c,
+                    &live_strategy_c, ml_confidence, &snap_clone,
+                ).await;
+            }));
+        }
+        // Tüm sembollerin tamamlanmasını bekle (timeout yok — her biri kısa).
+        for h in handles { let _ = h.await; }
+    }
+
+    /// Bir sembol için tam tur: exit denetimi → strateji üretimi → edge filtresi →
+    /// risk gate → pozisyon aç/kapat. `execute_trade_cycle` her sembol için bu fonksiyonu
+    /// paralel spawn eder.
+    async fn process_symbol_cycle(
+        state: &Arc<Mutex<AppState>>,
+        symbol: &str,
+        db_path: &str,
+        interval: &str,
+        live_strategy: &str,
+        ml_confidence: f64,
+        snap: &MissionControl,
+    ) {
         let risk_manager = crate::robot::risk::RiskManager::new();
 
-        for symbol in candidates {
-            let candles = match crate::persistence::reader::read_candles(&db_path, &symbol, &interval, 200) {
+        // Tek sembol için iş bloğu — orijinal `for symbol in candidates` gövdesinin içeriği.
+        // Aşağıda `continue` yerine `return` kullanılır (kısa devre tek sembolde).
+        {
+            let candles = match crate::persistence::reader::read_candles(db_path, symbol, interval, 200) {
                 Ok(c) if !c.is_empty() => c,
-                _ => continue,
+                _ => return,
             };
 
             // === 1.5) AÇIK POZİSYON İSE: önce SL/TP/Trailing/Breakeven denetle ===
             let live_price = candles.last().map(|c| c.close).unwrap_or(0.0);
             let atr_value  = Self::calc_atr(&candles, 14);
             let exit_reason = {
-                let st = match state.lock() { Ok(s) => s, Err(_) => continue };
+                let st = match state.lock() { Ok(s) => s, Err(_) => return };
                 let atr_mult = st.brain.best_params.get("pos_atr_trail_mult").copied().unwrap_or(2.0);
                 let be_rr    = st.brain.best_params.get("pos_breakeven_at_rr").copied().unwrap_or(1.0);
                 let reason_opt = if let Ok(mut positions) = st.finance.live_positions.write() {
-                    if let Some(pos) = positions.get_mut(&symbol) {
+                    if let Some(pos) = positions.get_mut(symbol) {
                         pos.current_price = live_price;
                         Self::check_exit_conditions(pos, live_price, atr_value, atr_mult, be_rr)
                     } else { None }
@@ -588,8 +625,8 @@ impl Engine {
                         reason.emoji(), symbol, reason.as_str(), live_price,
                     ));
                 }
-                Self::close_paper_position(state, &symbol, &candles, reason);
-                continue; // bu sembolde tur bitti, yeniden açılış aynı turda denenmesin
+                Self::close_paper_position(state, symbol, &candles, reason);
+                return; // bu sembolde tur bitti, yeniden açılış aynı turda denenmesin
             }
 
             // 3) Strateji seçimi: brain.live_strategy "Default"/"AUTO" ise rejime göre otonom seç.
@@ -599,18 +636,18 @@ impl Engine {
                 let sel = crate::robot::ml_engine::strategy_selector::StrategySelector::new();
                 sel.select_best(&candles, &crate::core::types::StrategyParams::default()).to_string()
             } else {
-                live_strategy.clone()
+                live_strategy.to_string()
             };
 
             // "IDLE_PROTECT" / "IDLE" gibi savunma rejimlerinde sinyal üretme.
-            if strategy_name.to_uppercase().starts_with("IDLE") { continue; }
+            if strategy_name.to_uppercase().starts_with("IDLE") { return; }
 
             let strategy = crate::robot::logic::optimizer::make_strategy_pub(&strategy_name);
             let strat_params = crate::core::types::StrategyParams::default();
 
             let signal = match strategy.generate_signal(&candles, &strat_params, None, None) {
                 Ok(s) => s,
-                Err(_) => continue,
+                Err(_) => return,
             };
 
             // 4) Edge skoru: momentum + ML confidence uyumu. Yön uyuşmazsa edge düşer.
@@ -618,8 +655,8 @@ impl Engine {
             const EDGE_THRESHOLD: f64 = 0.55;
 
             let has_position = {
-                let st = match state.lock() { Ok(s) => s, Err(_) => continue };
-                st.finance.live_positions.read().map(|p| p.contains_key(&symbol)).unwrap_or(false)
+                let st = match state.lock() { Ok(s) => s, Err(_) => return };
+                st.finance.live_positions.read().map(|p| p.contains_key(symbol)).unwrap_or(false)
             };
 
             let signal_label = match signal {
@@ -639,7 +676,7 @@ impl Engine {
                                 ));
                             }
                         }
-                        continue;
+                        return;
                     }
                     let authorized = risk_manager.authorize(&signal, snap);
                     if !authorized {
@@ -649,7 +686,7 @@ impl Engine {
                                 symbol, signal_label, edge,
                             ));
                         }
-                        continue;
+                        return;
                     }
                     if let Ok(mut st) = state.lock() {
                         st.push_log(format!(
@@ -657,7 +694,7 @@ impl Engine {
                             symbol, signal_label, edge, strategy_name,
                         ));
                     }
-                    Self::open_paper_position(state, &symbol, &signal, &candles);
+                    Self::open_paper_position(state, symbol, &signal, &candles);
                 }
                 // Pozisyon varken ters sinyal → kapanış (edge filtresi gevşek).
                 (crate::core::types::Signal::Sell, true) | (crate::core::types::Signal::Buy, true) => {
@@ -667,7 +704,7 @@ impl Engine {
                             symbol, signal_label, edge,
                         ));
                     }
-                    Self::close_paper_position(state, &symbol, &candles, ExitReason::StrategySignal);
+                    Self::close_paper_position(state, symbol, &candles, ExitReason::StrategySignal);
                 }
                 _ => {}
             }
