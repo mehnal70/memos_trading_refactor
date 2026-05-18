@@ -3,10 +3,8 @@
 
 #[cfg(test)]
 mod dynamic_position_profile_integration {
-    use memos_trading_core::{
-        DynamicPosition, PositionManagementProfile,
-        TrailingStopConfig,
-    };
+    use memos_trading_core::robot::portfolio_manager::{DynamicPosition, TrailingStopConfig};
+    use memos_trading_core::robot::logic::config_helpers::PositionManagementProfile;
 
     #[test]
     fn test_conservative_position_with_profile() {
@@ -20,9 +18,9 @@ mod dynamic_position_profile_integration {
             1.0,      // long
             Some(44000.0),
             Some(46000.0),
-            profile.trailing_stop_config(),
-            profile.scale_in_config(),
-            profile.scale_out_config(),
+            profile.trailing_stop_config().into(),
+            profile.scale_in_config().into(),
+            profile.scale_out_config().into(),
         );
         
         // Conservative özellikleri doğru uygulanmış
@@ -43,9 +41,9 @@ mod dynamic_position_profile_integration {
             1.0,
             Some(2900.0),
             Some(3500.0),
-            profile.trailing_stop_config(),
-            profile.scale_in_config(),
-            profile.scale_out_config(),
+            profile.trailing_stop_config().into(),
+            profile.scale_in_config().into(),
+            profile.scale_out_config().into(),
         );
         
         assert_eq!(position.trailing_config.trailing_pct, 4.0);
@@ -72,9 +70,9 @@ mod dynamic_position_profile_integration {
         // Balanced profili uygula
         let profile = PositionManagementProfile::Balanced;
         position.apply_configs(
-            profile.trailing_stop_config(),
-            profile.scale_in_config(),
-            profile.scale_out_config(),
+            profile.trailing_stop_config().into(),
+            profile.scale_in_config().into(),
+            profile.scale_out_config().into(),
         );
         
         // Config'ler DEĞİŞMEMİŞ (Balanced da 2.5 kullanıyor)
@@ -84,9 +82,9 @@ mod dynamic_position_profile_integration {
         // Aggressive ile değiştir - bu gerçekten değişir
         let aggressive = PositionManagementProfile::Aggressive;
         position.apply_configs(
-            aggressive.trailing_stop_config(),
-            aggressive.scale_in_config(), 
-            aggressive.scale_out_config(),
+            aggressive.trailing_stop_config().into(),
+            aggressive.scale_in_config().into(),
+            aggressive.scale_out_config().into(),
         );
         
         assert_eq!(position.trailing_config.trailing_pct, 4.0); // Değişti!
@@ -105,9 +103,9 @@ mod dynamic_position_profile_integration {
             1.0,
             None,
             None,
-            profile.trailing_stop_config(),
-            profile.scale_in_config(),
-            profile.scale_out_config(),
+            profile.trailing_stop_config().into(),
+            profile.scale_in_config().into(),
+            profile.scale_out_config().into(),
         );
         
         // Scalper: %0.5 trailing
@@ -134,9 +132,9 @@ mod dynamic_position_profile_integration {
             1.0,
             None,
             None,
-            profile.trailing_stop_config(),
-            profile.scale_in_config(),
-            profile.scale_out_config(),
+            profile.trailing_stop_config().into(),
+            profile.scale_in_config().into(),
+            profile.scale_out_config().into(),
         );
         
         // SwingTrading: %5 trailing
@@ -174,9 +172,9 @@ mod dynamic_position_profile_integration {
             1.0,
             None,
             None,
-            custom_trailing, // Custom
-            profile.scale_in_config(), // Balanced default
-            profile.scale_out_config(), // Balanced default
+            custom_trailing, // Custom (zaten dynamic_position::TrailingStopConfig)
+            profile.scale_in_config().into(), // Balanced default
+            profile.scale_out_config().into(), // Balanced default
         );
         
         // Custom trailing uygulanmış
@@ -199,9 +197,9 @@ mod dynamic_position_profile_integration {
             1.0,
             Some(44000.0),
             Some(50000.0),
-            profile.trailing_stop_config(),
-            profile.scale_in_config(),
-            profile.scale_out_config(),
+            profile.trailing_stop_config().into(),
+            profile.scale_in_config().into(),
+            profile.scale_out_config().into(),
         );
         
         // Balanced: scale-in enabled, max 2 kez
@@ -230,9 +228,9 @@ mod dynamic_position_profile_integration {
             1.0,
             Some(44000.0),
             Some(60000.0),
-            profile.trailing_stop_config(),
-            profile.scale_in_config(),
-            profile.scale_out_config(),
+            profile.trailing_stop_config().into(),
+            profile.scale_in_config().into(),
+            profile.scale_out_config().into(),
         );
         
         // Aggressive: 4 profit target [3%, 7%, 15%, 30%]

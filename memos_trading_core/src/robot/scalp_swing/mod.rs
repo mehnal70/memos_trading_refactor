@@ -95,7 +95,7 @@ impl ScalpSwingStats {
 pub fn auto_tune(stats: &ScalpSwingStats, trade_type: TradeType, cfg: &mut ScalpSwingConfig) -> Vec<String> {
     let mut changes = Vec::new();
     let wr = stats.win_rate();
-    let pf = stats.profit_factor();
+    let _pf = stats.profit_factor();
     match trade_type {
         TradeType::Scalp => { /* ... Scalp lojiği ... */ }
         TradeType::Swing => {

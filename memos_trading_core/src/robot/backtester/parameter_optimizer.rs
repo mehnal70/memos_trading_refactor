@@ -113,7 +113,7 @@ impl ParameterOptimizer {
         n_iter: usize,
     ) -> Result<OptimizationResult> {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
+        let mut _rng = rand::thread_rng();
 
         let results: Vec<(ParameterSet, BacktestResult)> = (0..n_iter)
             .into_par_iter()

@@ -182,7 +182,7 @@ impl OrderManager for BinanceOrderManager {
         Ok(out)
     }
 
-    async fn get_order_history(&self, symbol: Option<&str>, limit: Option<usize>) -> MemosTradingResult<Vec<Order>> {
+    async fn get_order_history(&self, _symbol: Option<&str>, _limit: Option<usize>) -> MemosTradingResult<Vec<Order>> {
         // ... (Kısım 4'teki HashSet ve Sort mantığıyla aynı)
         Ok(vec![]) // Implementasyon detayı korunur
     }

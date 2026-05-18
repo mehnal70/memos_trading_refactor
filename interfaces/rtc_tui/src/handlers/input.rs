@@ -7,7 +7,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::io;
 use ratatui::{Terminal, backend::CrosstermBackend};
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::{
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
 
 use memos_trading_core::core::bridge;
 use memos_trading_core::core::commands::RobotCommand;
@@ -22,14 +26,38 @@ pub struct TuiManager {
 
 impl TuiManager {
     pub fn new() -> Self {
-        Self { active_tab: 0, log_scroll: 0, settings_open: false }
+        // Başlangıç sekmesi: TUI_INITIAL_TAB env'i 0..=8 aralığında bir sayı olabilir.
+        // Demo/Test'te belirli sekmeden açmak için kullanılır.
+        let initial = std::env::var("TUI_INITIAL_TAB").ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|n| n.min(8))
+            .unwrap_or(0);
+        Self { active_tab: initial, log_scroll: 0, settings_open: false }
     }
 
     pub async fn spawn_tui_loop(&mut self, state: Arc<Mutex<AppState>>) -> io::Result<()> {
-        let stdout = io::stdout();
+        // Terminal'i TUI moduna al: raw mode + alternate screen → temiz, geri dönüşlü
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
+        // Hata olsa bile terminal'i temiz bırakacak iç çalıştırıcı
+        let result = self.run_inner(&mut terminal, state).await;
+
+        // Cleanup: hangi sonuçla bitilirse bitilsin terminal eski haline döner
+        disable_raw_mode().ok();
+        execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+        terminal.show_cursor().ok();
+        result
+    }
+
+    async fn run_inner(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        state: Arc<Mutex<AppState>>,
+    ) -> io::Result<()> {
         loop {
             // 1. SNAPSHOT AL (Kilit süresi minimumda)
             let snapshot = {
@@ -82,29 +110,35 @@ impl TuiManager {
     }
 
     /// Komutu yeni mimari'ye uygun olarak FleetCommand.triggers HashMap'ına sızdırır.
+    /// Kullanıcı tuşu da guardian.log'a yazılır → TUI archives panelinde bağlam görünür.
     fn dispatch_command(&self, cmd: RobotCommand, state: &Arc<Mutex<AppState>>) {
-        let st = state.lock().unwrap();
+        let mut st = state.lock().unwrap();
         match cmd {
             RobotCommand::TriggerMl => {
                 if let Some(t) = st.fleet.triggers.get("ml") {
                     t.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
+                st.push_log("⌨️ Kullanıcı tuşu [m] ⇒ ml trigger gönderildi".into());
             }
             RobotCommand::TriggerBacktest => {
                 if let Some(t) = st.fleet.triggers.get("backtest") {
                     t.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
+                st.push_log("⌨️ Kullanıcı tuşu [b] ⇒ backtest trigger gönderildi".into());
             }
             RobotCommand::StartDownload => {
                 if let Some(t) = st.fleet.triggers.get("download") {
                     t.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
+                st.push_log("⌨️ Kullanıcı tuşu [d] ⇒ download trigger gönderildi".into());
             }
             RobotCommand::ToggleAutoMode => {
                 // Otonom mod geçiş mantığı brain üzerinden yönetilir (ileride wire'lanır).
+                st.push_log("⌨️ Kullanıcı tuşu [s] ⇒ otonom mod geçişi (henüz uygulanmadı)".into());
             }
             RobotCommand::GracefulShutdown => {
                 st.app_stop_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+                st.push_log("⌨️ Kullanıcı tuşu [q] ⇒ graceful shutdown başlatıldı".into());
             }
             _ => {}
         }

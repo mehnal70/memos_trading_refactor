@@ -10,6 +10,7 @@ pub trait ErrorLogger: Send + Sync {
     fn log_warn(&self, context: &str, msg: &str) {
         println!("[WARN][{}] {}", context, msg);
     }
+    fn log_repair(&self, context: &str, msg: &str);
 }
 
 /// Standart Konsol Çıktısı Sağlayıcısı
@@ -22,6 +23,10 @@ impl ErrorLogger for StdoutLogger {
     fn log_info(&self, context: &str, msg: &str) {
         println!("[INFO][{}] {}", context, msg);
     }
+    fn log_repair(&self, step_id: &str, message: &str) {
+        // Onarım logları terminalde adli sarı/mavi ayrımıyla veya direkt etiketle basılır
+        println!("[REPAIR][{}] 🔧 {}", step_id, message);
+    }
 }
 
 /// NOP (No-Operation) Logger - Testler veya sessiz mod için
@@ -29,4 +34,5 @@ pub struct NoopLogger;
 impl ErrorLogger for NoopLogger {
     fn log_error(&self, _ctx: &str, _m: &str) {}
     fn log_info(&self, _ctx: &str, _m: &str) {}
+    fn log_repair(&self, _ctx: &str, _m: &str) {}
 }

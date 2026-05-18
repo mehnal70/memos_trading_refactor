@@ -1,7 +1,7 @@
 // Gerçek zamanlı (anlık) BIST veri çekme testi
 // cargo test --test bist_realtime_test ile çalıştırabilirsiniz
 
-use memos_trading_core::bist;
+use memos_trading_core::robot::infra::exchange::bist;
 use chrono::Utc;
 
 #[tokio::test]

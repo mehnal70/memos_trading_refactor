@@ -1,7 +1,7 @@
 // src/ui/charts.rs
 use ratatui::layout::{Layout, Direction, Constraint, Rect};
 use ratatui::widgets::{Block, Borders, Paragraph, canvas::{Canvas, Points}};
-use ratatui::style::{Color, Style, Modifier};
+use ratatui::style::{Color, Style};
 use ratatui::symbols::Marker;
 use std::f64::consts::PI;
 use memos_trading_core::core::model::MissionControl;

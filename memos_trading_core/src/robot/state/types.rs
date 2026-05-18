@@ -5,6 +5,18 @@ use serde::{Serialize, Deserialize};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use crate::core::types::Market;
+use crate::core::model::PositionModel;
+
+/// Sembol → açık pozisyon eşleme (SymbolOrchestrator ile FinanceVault paylaşır).
+pub type LivePositionMap = HashMap<String, PositionModel>;
+
+/// Tek sembol için canlı fiyat snapshot'ı (worker'ların ortak yazdığı).
+#[derive(Debug, Clone, Default)]
+pub struct LivePriceData {
+    pub symbol:     String,
+    pub close:      f64,
+    pub change_pct: f64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SystemStatistics {

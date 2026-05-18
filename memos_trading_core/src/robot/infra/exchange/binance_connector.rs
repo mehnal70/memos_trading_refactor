@@ -72,7 +72,7 @@ impl ExchangeConnector for BinanceConnector {
     }
 
     /// Tekil varlık bakiyesi sorgular
-    async fn get_balance(&self, asset: &str) -> Result<f64> {
+    async fn get_balance(&self, _asset: &str) -> Result<f64> {
         // Executor zaten market-aware bakiye hesaplıyor
         self.executor.get_balance().await
     }

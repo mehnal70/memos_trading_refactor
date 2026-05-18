@@ -5,7 +5,7 @@ use crate::core::model::{
     MissionControl, FinanceSnapshot, PositionModel, WorkerModel,
     PipelineStep, AiBrainSnapshot, AnomalyModel, TradeTypeStats,
     ChartSnapshot, TradeDistribution, LogEntry, ClosedTradeModel,
-    MarketAnalysisModel,
+    MarketAnalysisModel, SrZoneModel,
 };
 use chrono::Local;
 
@@ -14,10 +14,12 @@ use chrono::Local;
 pub fn get_snapshot(st: &AppState) -> MissionControl {
 
     // 1. FİNANSAL HASAT (Anlık PnL Hesaplamaları)
-    // TODO: SymbolOrchestrator + live_execution_costs yeni AppState'e bağlanınca
-    //       open_pnl ve total_fees gerçek değerlerden hesaplanacak.
-    let open_pnl: f64 = 0.0;
-    let total_fees: f64 = 0.0;
+    let open_pnl: f64 = st.fleet.symbol_orchestrator.read().ok()
+        .map(|orch| orch.total_open_pnl(None))
+        .unwrap_or(0.0);
+    let total_fees: f64 = st.finance.live_execution_costs.read().ok()
+        .map(|c| c.total_cost_usd)
+        .unwrap_or(0.0);
     let finance = FinanceSnapshot {
         total_equity: st.finance.equity + open_pnl,
         realize_pnl: st.finance.equity - st.config.capital,
@@ -26,19 +28,10 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
         total_fees,
     };
 
-    // 2. POZİSYON DÖNÜŞTÜRÜCÜ
-    let positions: Vec<PositionModel> = st.finance.live_positions.read().ok().map(|m| {
-        m.values().map(|p| PositionModel {
-            symbol: p.symbol.clone(),
-            entry_price: p.entry_price,
-            current_price: p.current_price,
-            qty: p.qty,
-            leverage: p.leverage,
-            is_long: p.is_long,
-            trade_type: p.trade_type.clone(),
-            opened_at: p.opened_at.clone(),
-        }).collect()
-    }).unwrap_or_default();
+    // 2. POZİSYON DÖNÜŞTÜRÜCÜ — clone yeterli (struct serialize-friendly)
+    let positions: Vec<PositionModel> = st.finance.live_positions.read().ok()
+        .map(|m| m.values().cloned().collect())
+        .unwrap_or_default();
 
     // 3. ADLİ LOG VE ARŞİV HASADI (Son 100 log ve 50 işlem)
     let logs: Vec<LogEntry> = st.guardian.log.iter().rev().take(100).map(|line| {
@@ -54,7 +47,20 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
     }).collect();
 
     let mut trade_history: Vec<ClosedTradeModel> = vec![];
-    let mut charts = ChartSnapshot { distributions: vec![], total_closed_pnl: 0.0, total_trade_count: 0 };
+    let equity_series: Vec<f64> = st.finance.equity_history.read()
+        .map(|h| h.iter().copied().collect()).unwrap_or_default();
+    let peak = st.finance.peak_equity.max(st.finance.equity);
+    let current_dd = if peak > 0.0 {
+        ((peak - st.finance.equity) / peak * 100.0).max(0.0)
+    } else { 0.0 };
+    let mut charts = ChartSnapshot {
+        distributions: vec![],
+        total_closed_pnl: 0.0,
+        total_trade_count: 0,
+        equity_series,
+        current_drawdown_pct: current_dd,
+        peak_equity: peak,
+    };
 
     if let Ok(trades) = st.finance.live_closed_trades.read() {
         trade_history = trades.iter().rev().take(50).map(|t| {
@@ -89,33 +95,90 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
     }
 
     // 4. FİLO VE PAZAR ALGISI (Worker Status + S/R Zones)
-    // TODO: SymbolOrchestrator yeni AppState'e bağlanınca worker_status'tan doldurulacak.
-    let fleet: Vec<WorkerModel> = vec![];
+    let live_price_map = st.fleet.live_price.read().ok().map(|g| g.clone()).unwrap_or_default();
+    let fleet: Vec<WorkerModel> = st.fleet.symbol_orchestrator.read().ok().map(|orch| {
+        orch.get_worker_status().into_iter().map(|w| {
+            let price = live_price_map.get(&w.symbol).copied().unwrap_or(0.0);
+            WorkerModel {
+                symbol: w.symbol,
+                market: w.market,
+                interval: w.interval,
+                price,
+                change_pct: 0.0, // change_pct ileride live_price snapshot'tan beslenecek
+                uptime_secs: w.uptime_secs,
+                is_paused: w.paused,
+                score: 0.0, // skor ml_engine'den geldiğinde wire'lanır
+            }
+        }).collect()
+    }).unwrap_or_default();
 
-    // TODO: live_sr_zones yeni AppState'e taşınınca buradan beslenecek.
-    let market_fleet: Vec<MarketAnalysisModel> = vec![];
+    let market_fleet: Vec<MarketAnalysisModel> = st.fleet.live_sr_zones.read().ok().map(|zones_map| {
+        zones_map.iter().map(|(sym, zones)| {
+            let zones_converted = zones.iter().map(|z| SrZoneModel {
+                zone_type:   format!("{:?}", z.zone_type),
+                price_low:   z.price_low,
+                price_high:  z.price_high,
+                strength:    z.strength,
+                touch_count: z.touch_count,
+            }).collect();
+            MarketAnalysisModel {
+                symbol: sym.clone(),
+                current_price: live_price_map.get(sym).copied().unwrap_or(0.0),
+                change_24h: 0.0,
+                zones: zones_converted,
+                nearest_support: None,
+                nearest_resistance: None,
+            }
+        }).collect()
+    }).unwrap_or_default();
 
     // 5. AI BEYİN, PİPELİNE VE ANOMALİLER
-    // TODO: live_pipeline yeni AppState'e taşınınca chain_steps/anomalies buradan gelecek.
-    let steps: Vec<PipelineStep> = vec![];
-    let anomalies: Vec<AnomalyModel> = vec![];
+    let (steps, anomalies): (Vec<PipelineStep>, Vec<AnomalyModel>) = st.guardian.live_pipeline.read().ok()
+        .map(|ph| {
+            let s = ph.chain_steps.iter().map(|step| PipelineStep {
+                label:             step.label.clone(),
+                status:            format!("{:?}", step.status),
+                last_run_age_secs: step.last_run_secs,
+                overdue_secs:      step.overdue_secs as i64,
+            }).collect();
+            let a = ph.anomalies.iter().map(|anom| AnomalyModel {
+                severity:   format!("{:?}", anom.severity),
+                kind:       format!("{:?}", anom.kind),
+                message:    anom.message.clone(),
+                fix_hint:   anom.fix_hint.clone().unwrap_or_default(),
+                auto_fixed: anom.auto_fixed,
+            }).collect();
+            (s, a)
+        })
+        .unwrap_or_else(|| (vec![], vec![]));
 
     // total_trades alanı yeni AppState'de yok; kapanmış işlem sayısı en yakın kaynak.
     let trade_count = st.finance.live_closed_trades.read()
         .map(|t| t.len()).unwrap_or(0);
 
+    // IntelligenceHub'tan canlı veriler — kullanılamıyorsa muhafazakar varsayılana düş.
+    let (hub_drift, hub_pending, hub_cycle, hub_state, hub_evolution_active) =
+        st.brain.intelligence_hub.read().map(|h| (
+            h.drift_detector.drift_score,
+            h.pending_trades.len(),
+            h.controller.cycle_id,
+            h.controller.state.to_string(),
+            h.controller.evolution_enabled,
+        )).unwrap_or((0.0, 0, 0, "Unknown".into(), false));
+
     let ai_brain = AiBrainSnapshot {
-        genome_id: "Srivastava-Alpha-9".to_string(),
+        genome_id: format!("Srivastava-Alpha-9 [cycle={} · ctrl={}]", hub_cycle, hub_state),
         fitness: finance.total_equity,
         win_rate: charts.distributions.iter().map(|d| d.win_rate).sum::<f64>() / charts.distributions.len().max(1) as f64,
         trade_count,
-        gbt_score: Some(0.0),
+        gbt_score: Some(st.brain.hyperopt_score),
         exploration_rate: 0.1,
-        drift_score: 0.05,
+        drift_score: hub_drift,
         mc_ruin_prob: 0.01,
-        is_evolution_active: true,
-        next_evolution_secs: 300,
+        is_evolution_active: hub_evolution_active,
+        next_evolution_secs: 300_u64.saturating_sub((hub_cycle % 300) as u64),
     };
+    let _ = hub_pending; // ileride snapshot'a açık pozisyon hafıza sayacı olarak eklenebilir
 
     // 6. ÖZEL İSTATİSTİKLER (Placeholder - Lojik Engine'e taşınacak)
     let (scalp_stats, swing_stats) = (
@@ -125,13 +188,13 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
 
     // anomalies aşağıda MissionControl'a move edilmeden önce sayıyı yakala.
     let active_anomalies = anomalies.len();
-    // TODO: repair_log yeni AppState'de yok; Guardian altına eklenince buradan beslenecek.
-    let repair_log: Vec<String> = vec![];
+    let repair_log: Vec<String> = st.guardian.repair_log.iter().rev().take(50).cloned().collect();
 
     MissionControl {
         finance,
         positions,
         ai_brain,
+        phase: st.fleet.phase.clone(),
         pipeline_steps: steps,
         anomalies,
         repair_log,

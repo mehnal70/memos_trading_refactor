@@ -31,7 +31,7 @@ pub async fn batch_fetch_bist_klines(
     config: &BatchFetchConfig,
 ) -> Vec<(String, anyhow::Result<Vec<Vec<Value>>>)> {
     let batch_start = Instant::now();
-    let client = Client::new(); // Tek client örneği üzerinden reuse (performans)
+    let _client = Client::new(); // Tek client örneği üzerinden reuse (performans)
 
     // Modern Rust: Mutex yerine stream'lerin sonuçlarını toplayan yapı (lock-free)
     let results = stream::iter(symbols)

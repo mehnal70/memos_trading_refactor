@@ -1,11 +1,11 @@
 // src/ui/special_trades.rs
 use ratatui::layout::{Layout, Direction, Constraint, Rect};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::style::{Color, Style, Modifier};
+use ratatui::style::{Color, Style};
 use memos_trading_core::core::model::{MissionControl, TradeTypeStats};
 
 fn draw_stat_box(area: Rect, f: &mut ratatui::Frame, stats: &TradeTypeStats, color: Color) {
-    let streak_color = if stats.current_streak >= 0 { Color::Green } else { Color::Red };
+    let _streak_color = if stats.current_streak >= 0 { Color::Green } else { Color::Red };
     let info = vec![
         format!(" Kazanma: {:.1}% ", stats.win_rate),
         format!(" Kâr Faktörü: {:.2} ", stats.profit_factor),

@@ -11,6 +11,14 @@ pub struct PositionId(uuid::Uuid);
 impl PositionId {
     #[inline]
     pub fn new() -> Self { Self(uuid::Uuid::new_v4()) }
+    /// Var olan UUID'den inşa et — track_trade ↔ learn_from_exit eşlemesi için.
+    #[inline]
+    pub fn from_uuid(u: uuid::Uuid) -> Self { Self(u) }
+    /// String'ten parse et; hata sessizce yeni bir UUID üretir (test/serde uyumu).
+    #[inline]
+    pub fn from_str_or_new(s: &str) -> Self {
+        uuid::Uuid::parse_str(s).map(Self).unwrap_or_else(|_| Self::new())
+    }
 }
 
 impl Default for PositionId {

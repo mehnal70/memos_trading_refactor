@@ -6,7 +6,7 @@ mod integration_tests {
     use memos_trading_core::robot::data_fetcher::parse_kline;
     use memos_trading_core::robot::order_management::paper_executor::PaperTradingExecutor;
     use memos_trading_core::robot::safety::{SafetyManager, SafetyRules, PaperTradingDashboard};
-    use memos_trading_core::types::Trade;
+    use memos_trading_core::core::types::Trade;
     use chrono::Utc;
 
     /// Örnek test: Basit kline'ı parse et

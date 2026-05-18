@@ -23,7 +23,7 @@ impl OrderManagementSystem {
         const BIP: f64 = 0.0001; 
 
         let is_long = matches!(signal, Signal::Buy);
-        let mut current_price = base_price;
+        let current_price = base_price;
 
         for attempt in 1..=MAX_ATTEMPTS {
             let (best_bid, best_ask) = executor_wrapper.executor
@@ -57,7 +57,7 @@ impl OrderManagementSystem {
 
             match result {
                 Ok(trade) => return vec![Ok(trade)],
-                Err(e) => {
+                Err(_e) => {
                     if attempt >= MAX_ATTEMPTS {
                         return vec![Err(format!("SmartLimit {} deneme başarısız [{}]", MAX_ATTEMPTS, symbol).into())];
                     }

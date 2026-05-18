@@ -1,5 +1,5 @@
 // Güvenilir BIST veri çekme testi (AKBNK.IS, 1d, son 30 gün)
-use memos_trading_core::bist;
+use memos_trading_core::robot::infra::exchange::bist;
 use chrono::Utc;
 
 #[tokio::test]

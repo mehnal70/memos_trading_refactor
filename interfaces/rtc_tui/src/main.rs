@@ -18,15 +18,52 @@ use crate::handlers::input::TuiManager;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
-    // --- AppState (4 Bakanlık) inşa ---
-    let config = RoboticLoopConfig::default();
+    // --- Env değişkenlerinden config'i süzdür (rtc_headless ile aynı sözleşme) ---
+    let symbol  = std::env::var("TRADE_SYMBOL").unwrap_or_else(|_| "BTCUSDT".to_owned());
+    let market  = std::env::var("TRADE_MARKET").unwrap_or_else(|_| "spot".to_owned());
+    let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "data/trader.db".to_owned());
+
+    // Klasörlerin varlığını garantile (logs/ ve data/ üst dizini)
+    let _ = std::fs::create_dir_all("logs");
+    if let Some(parent) = std::path::Path::new(&db_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let config = RoboticLoopConfig {
+        symbol: symbol.clone(),
+        market: market.clone(),
+        db_path: db_path.clone(),
+        ..Default::default()
+    };
     let state = Arc::new(Mutex::new(AppState::new(config)));
+
+    // SQLite bağlantısının gerçekten kurulduğunu doğrula; başarısız ise kullanıcıya bildir.
+    {
+        let st = state.lock().unwrap();
+        if st.guardian.db_conn.is_none() {
+            eprintln!("⚠️  Uyarı: SQLite bağlantısı kurulamadı (path={}). Persistence devre dışı.", db_path);
+        } else {
+            println!("⚡ [INIT] rtc_tui | sembol={} | borsa={} | db={}", symbol, market, db_path);
+        }
+    }
 
     // --- Master Engine'i arka planda ateşle (TUI'den bağımsız) ---
     let engine_state = Arc::clone(&state);
     tokio::spawn(async move {
         Engine::run_autonomous_loop(engine_state).await;
     });
+
+    // --- Ortak Snapshot Writer (Android/Web istemciler bu JSON'u poll eder) ---
+    let snap_path = std::env::var("SNAPSHOT_PATH")
+        .unwrap_or_else(|_| "data/snapshot.json".to_owned());
+    if let Some(parent) = std::path::Path::new(&snap_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    memos_trading_core::robot::infra::snapshot_writer::spawn_snapshot_writer(
+        Arc::clone(&state),
+        snap_path,
+        1,
+    );
 
     // --- Mod seçimi: TUI mu, headless mi? ---
     let args: Vec<String> = std::env::args().collect();

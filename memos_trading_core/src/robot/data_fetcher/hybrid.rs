@@ -79,7 +79,7 @@ impl LiveDataFetcher for HybridBinanceFetcher {
     async fn fetch_latest(
         &self,
         _exchange: Exchange,
-        market: Market,
+        _market: Market,
         symbol: &str,
         interval: &str,
         limit: usize,

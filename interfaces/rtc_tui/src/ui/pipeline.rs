@@ -1,6 +1,6 @@
 // src/ui/pipeline.rs
 use ratatui::layout::{Layout, Direction, Constraint, Rect};
-use ratatui::widgets::{Block, Borders, Paragraph, Row, Table, Cell};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::style::{Color, Style, Modifier};
 use memos_trading_core::core::model::MissionControl;
 

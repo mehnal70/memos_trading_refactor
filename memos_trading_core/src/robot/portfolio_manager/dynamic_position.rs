@@ -30,6 +30,18 @@ impl Default for TrailingStopConfig {
     }
 }
 
+/// config_helpers profillerinden üretilen TrailingStopConfig'i pozisyon yöneticisinin
+/// kullandığı (aynı alan setine sahip) tipe köprüler.
+impl From<crate::robot::logic::config_helpers::TrailingStopConfig> for TrailingStopConfig {
+    fn from(c: crate::robot::logic::config_helpers::TrailingStopConfig) -> Self {
+        Self {
+            trailing_pct:     c.trailing_pct,
+            min_movement_bps: c.min_movement_bps,
+            enabled:          c.enabled,
+        }
+    }
+}
+
 /// Kademeli Giriş Konfigürasyonu (Scale-In)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScaleInConfig {
@@ -57,6 +69,19 @@ impl Default for ScaleInConfig {
     }
 }
 
+/// config_helpers profilinden üretilen ScaleInConfig'i pozisyon yöneticisinin
+/// kullandığı tipe köprüler. `max_scalein_count` u32 → usize cast'i.
+impl From<crate::robot::logic::config_helpers::ScaleInConfig> for ScaleInConfig {
+    fn from(c: crate::robot::logic::config_helpers::ScaleInConfig) -> Self {
+        Self {
+            enabled:               c.enabled,
+            max_scalein_count:     c.max_scalein_count as usize,
+            scale_in_pct:          c.scale_in_pct,
+            trigger_proximity_pct: c.trigger_proximity_pct,
+        }
+    }
+}
+
 /// Kademeli Çıkış Konfigürasyonu (Scale-Out)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScaleOutConfig {
@@ -80,6 +105,19 @@ impl Default for ScaleOutConfig {
             max_scaleout_count: 3,
             scaleout_pct: 33.33, // Her target'ta 1/3'ünü kapamak
             profit_targets: vec![2.0, 5.0, 10.0],
+        }
+    }
+}
+
+/// config_helpers profilinden üretilen ScaleOutConfig'i pozisyon yöneticisinin
+/// kullandığı tipe köprüler. `max_scaleout_count` u32 → usize cast'i.
+impl From<crate::robot::logic::config_helpers::ScaleOutConfig> for ScaleOutConfig {
+    fn from(c: crate::robot::logic::config_helpers::ScaleOutConfig) -> Self {
+        Self {
+            enabled:            c.enabled,
+            max_scaleout_count: c.max_scaleout_count as usize,
+            scaleout_pct:       c.scaleout_pct,
+            profit_targets:     c.profit_targets,
         }
     }
 }

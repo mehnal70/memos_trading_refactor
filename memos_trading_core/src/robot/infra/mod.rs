@@ -17,3 +17,4 @@ pub mod error;
 pub mod file_logger;
 pub mod interfaces;
 pub mod logger;
+pub mod snapshot_writer;

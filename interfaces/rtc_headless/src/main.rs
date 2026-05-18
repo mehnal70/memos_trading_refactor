@@ -47,8 +47,11 @@ fn load_profiles() -> ProfileConfig {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 1. Ortam Değişkenleri
+    // 1. Ortam Değişkenleri + global logger
     dotenvy::dotenv().ok();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_millis()
+        .try_init();
 
     let symbol      = env::var("TRADE_SYMBOL").unwrap_or_else(|_| "BTCUSDT".to_owned());
     let market      = env::var("TRADE_MARKET").unwrap_or_else(|_| "spot".to_owned());
@@ -109,6 +112,19 @@ async fn main() -> Result<()> {
             stop_handle.store(true, Ordering::SeqCst);
         }
     });
+
+    // 6b. Ortak snapshot writer (TUI/Android/Web istemciler bu dosyayı okur)
+    let snap_path = std::env::var("SNAPSHOT_PATH")
+        .unwrap_or_else(|_| "data/snapshot.json".to_owned());
+    if let Some(parent) = std::path::Path::new(&snap_path).parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    memos_trading_core::robot::infra::snapshot_writer::spawn_snapshot_writer(
+        Arc::clone(&state),
+        snap_path.clone(),
+        1, // her saniye
+    );
+    println!("📤 [SNAPSHOT] {} (her 1s) Android/web istemciler için yazılıyor", snap_path);
 
     // 7. Master Engine'i ateşle
     println!("🚀 [START] Master Engine devriye giriyor...");

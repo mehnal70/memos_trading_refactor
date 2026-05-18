@@ -1,7 +1,7 @@
 // BIST veri indirme fonksiyonunun bağımsız testi
 // cargo test --test bist_download_test ile çalıştırabilirsiniz
 
-use memos_trading_core::bist;
+use memos_trading_core::robot::infra::exchange::bist;
 use serde_json::Value;
 
 #[tokio::test]

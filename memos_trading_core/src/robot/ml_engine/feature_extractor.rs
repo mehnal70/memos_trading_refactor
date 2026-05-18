@@ -133,7 +133,7 @@ impl FeatureExtractor {
     fn ema(prices: &[f64], period: usize) -> f64 {
         match prices.len() {
             n if n < period => prices.iter().sum::<f64>() / n.max(1) as f64,
-            n => {
+            _n => {
                 let k = 2.0 / (period as f64 + 1.0);
                 let sma = prices.iter().take(period).sum::<f64>() / period as f64;
                 prices.iter().skip(period).fold(sma, |acc, &p| acc + k * (p - acc))

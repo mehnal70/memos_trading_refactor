@@ -3,11 +3,11 @@
 
 #[cfg(test)]
 mod integration_with_config_helpers {
-    use memos_trading_core::{
+    use memos_trading_core::robot::logic::config_helpers::{
         PositionManagementProfile, SecurityProfile, PositionConfigBuilder,
         TrailingStopConfig, ScaleInConfig,
-        UserRole,
     };
+    use memos_trading_core::robot::security::types::UserRole;
 
     #[test]
     fn test_conservative_profile_configs() {

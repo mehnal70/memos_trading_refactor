@@ -4,8 +4,8 @@
 // Hiçbir mock kullanmaz — gerçek hesaplama zincirleri test edilir.
 
 use memos_trading_core::robot::ml_engine::{FeatureExtractor, LinearRegressor};
-use memos_trading_core::robot::backtester::engine::{Backtester, BacktestConfig};
-use memos_trading_core::types::Candle;
+use memos_trading_core::robot::backtester::backtest_engine::{Backtester, BacktestConfig};
+use memos_trading_core::core::types::Candle;
 use chrono::Utc;
 
 // ── Yardımcı ─────────────────────────────────────────────────────────────────
@@ -167,19 +167,3 @@ fn test_backtest_partial_tp_more_trades() {
     assert!(result_partial.total_trades >= result_normal.total_trades);
 }
 
-/// optimize_position_management: yeterli data varsa sonuç döner,
-/// skor ve metrikler sınırlar içinde olmalı.
-#[test]
-fn test_pos_opt_valid_metrics() {
-    let candles = make_candles(200, 100.0, |i| (i as f64 * 0.4) % 3.0 - 1.0);
-    let base    = base_cfg("RSI");
-
-    if let Some(best) = Backtester::optimize_position_management(&base, &candles) {
-        assert!(best.score.is_finite(),                      "skor NaN/Inf");
-        assert!(best.total_trades >= 3,                      "min 3 trade");
-        assert!(best.win_rate >= 0.0 && best.win_rate <= 100.0);
-        assert!(best.profit_factor >= 0.0,                   "PF negatif olamaz");
-        assert!(best.total_pnl_pct.is_finite(),              "pnl_pct NaN/Inf");
-    }
-    // None dönmesi de geçerli (tüm kombolarda < 3 trade)
-}

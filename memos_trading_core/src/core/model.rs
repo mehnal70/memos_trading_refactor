@@ -224,6 +224,10 @@ pub struct PipelineStep {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionModel {
+    /// Pozisyonun tekil kimliği. IntelligenceHub.track_trade ↔ learn_from_exit eşlemesi için.
+    /// UUID v4 string. Eski serialize'lı pozisyonlarda boş gelir (serde default).
+    #[serde(default)]
+    pub pos_id: String,
     pub symbol: String,
     pub entry_price: f64,
     pub current_price: f64,
@@ -232,6 +236,26 @@ pub struct PositionModel {
     pub is_long: bool,
     pub trade_type: String,
     pub opened_at: String,
+
+    // === Pozisyon Yönetimi (Risk Exit Çekirdeği) ===
+    /// Statik stop loss seviyesi (long için entry'nin altı, short için üstü).
+    /// 0.0 ise SL devre dışı (geriye uyumluluk: eski serialize'lı pozisyonlar).
+    #[serde(default)]
+    pub stop_loss: f64,
+    /// Statik take profit seviyesi.
+    #[serde(default)]
+    pub take_profit: f64,
+    /// Trailing stop seviyesi — ATR × atr_trail_mult uzaklıkta, en uygun fiyatı kovalar.
+    /// Long: max_favorable_price - delta; Short: min_favorable_price + delta.
+    #[serde(default)]
+    pub trailing_stop: f64,
+    /// Pozisyon açıldıktan sonra ulaşılan en uygun (long için en yüksek, short için en düşük) fiyat.
+    /// Trailing stop ve breakeven kararı bu rakama göre verilir.
+    #[serde(default)]
+    pub max_favorable_price: f64,
+    /// Breakeven aktif mi? Aktif olduktan sonra SL = entry_price'a sabitlenir.
+    #[serde(default)]
+    pub breakeven_activated: bool,
 }
 
 impl PositionModel {
@@ -308,6 +332,15 @@ pub struct ChartSnapshot {
     pub distributions: Vec<TradeDistribution>,
     pub total_closed_pnl: f64,
     pub total_trade_count: usize,
+    /// Equity tarihçesi (en eski → en yeni). Sparkline'da çizilir.
+    #[serde(default)]
+    pub equity_series: Vec<f64>,
+    /// Anlık drawdown yüzdesi (zirve ⇒ şu an), 0..100.
+    #[serde(default)]
+    pub current_drawdown_pct: f64,
+    /// Zirve equity (rapor için).
+    #[serde(default)]
+    pub peak_equity: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,6 +371,9 @@ pub struct MissionControl {
     pub finance: FinanceSnapshot,
     pub positions: Vec<PositionModel>,
     pub fleet: Vec<WorkerModel>,
+    /// Ana döngünün anlık fazı: Booting/Scanning/Executing/Recovering/Stopped/Idle.
+    #[serde(default)]
+    pub phase: String,
     pub pipeline_steps: Vec<PipelineStep>,
     pub ai_brain: AiBrainSnapshot,
     pub market_fleet: Vec<MarketAnalysisModel>,

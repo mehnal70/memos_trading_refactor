@@ -1,12 +1,24 @@
 // src/robot/robotic_loop.rs - Srivastava ATP Reaktif Mimari Çekirdeği
 // 4 Büyük Krallık (Bakanlık) Düzeni
-
-use std::sync::{Arc, RwLock, atomic::{AtomicBool, Ordering}};
+use crate::prelude::*;
+use std::sync::{Arc, RwLock, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::collections::{HashMap, VecDeque};
 use tokio::time::Instant;
 use crate::core::model::{PositionModel, RoboticLoopConfig, ClosedTradeModel};
 use crate::robot::risk::RiskGate;
+use crate::robot::data_pipeline::PipelineStatus;
+use crate::robot::sr_detector::SrZone;
+use crate::robot::state::symbol_orchestrator::SymbolOrchestrator;
 use rusqlite::Connection;
+
+/// 💸 Yürütme maliyetleri (komisyon + slipaj) izlemesi.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExecutionCosts {
+    pub total_cost_usd: f64,
+    pub commission_usd: f64,
+    pub slippage_usd:   f64,
+    pub trade_count:    usize,
+}
 
 /// 🧬 Srivastava ATP - Otonom Eşik Muhafazası
 #[derive(Debug, Clone, Copy, Default)]
@@ -23,8 +35,14 @@ pub struct AdaptiveThresholds {
 pub struct FinanceVault {
     pub equity: f64,
     pub starting_capital: f64,
+    pub peak_equity: f64,
     pub live_positions: Arc<RwLock<HashMap<String, PositionModel>>>,
     pub live_closed_trades: Arc<RwLock<Vec<ClosedTradeModel>>>,
+    /// Komisyon + slipaj birikimleri (UI raporu + risk hesaplama için).
+    pub live_execution_costs: Arc<RwLock<ExecutionCosts>>,
+    /// Equity tarihçesi (en eski → en yeni). Sparkline ve drawdown hesabı için.
+    /// Ana döngü her ~2.5 sn'de bir push eder, kapasite 120 nokta (~5 dk).
+    pub equity_history: Arc<RwLock<VecDeque<f64>>>,
 }
 
 impl FinanceVault {
@@ -45,8 +63,12 @@ pub struct BrainBox {
     pub live_strategy: Arc<RwLock<String>>,
 
     // YENİ EKLEME: Sabitleri yıkan dinamik bariyer alanı buraya entegre edilir.
-    pub thresholds: AdaptiveThresholds, 
+    pub thresholds: AdaptiveThresholds,
     pub drift_history: std::collections::VecDeque<f64>, // Son 100 döngünün sapma hafızası
+
+    /// 🧠 Otonom Öğrenme Merkezi (drift, pattern, post-trade learning, evolution).
+    /// Ana döngü her tur drift güncellemesi ve periyodik evrim için bu hub'a yazar.
+    pub intelligence_hub: Arc<RwLock<crate::robot::ml_engine::intelligence_hub::IntelligenceHub>>,
 }
 
 /// 🧠 OTONOM DEĞERLENDİRME: `ml_engine::IntelligenceHub`'dan gelen ham 
@@ -76,10 +98,17 @@ impl BrainBox {
 
 /// ⚔️ HAREKÂT VE FİLO KOMUTANLIĞI: İş Akışı, Semboller ve Tetikleyiciler
 pub struct FleetCommand {
-    pub phase: String, // "Idle", "Download", "ML", "Trade"
+    pub phase: String,
     pub download_active: bool,
-    pub triggers: HashMap<String, Arc<AtomicBool>>,
-    pub live_price: Arc<RwLock<HashMap<String, f64>>>,
+    pub triggers: std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub live_price: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, f64>>>,
+    
+    // [DÜZELTME]: live_sr_zones'un içindeki veri tipi anayasal SrZone olarak tescillendi 🎯
+    pub live_sr_zones: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, Vec<SrZone>>>>,
+    pub symbol_orchestrator: std::sync::Arc<std::sync::RwLock<SymbolOrchestrator>>,
+    /// Ana otonom döngünün en son nabız anı (UNIX epoch saniye). Heartbeat task'ı bu alanı
+    /// okuyarak `main_loop` adımının gerçekten ilerleyip ilerlemediğini denetler.
+    pub last_loop_tick: Arc<AtomicU64>,
 }
 
 impl FleetCommand {
@@ -107,6 +136,10 @@ pub struct GuardianShield {
     pub risk_gate: RiskGate,
     pub anomaly_count: u32,
     pub db_conn: Option<Connection>,
+    /// Çalışma zamanı pipeline durumu (chain_steps + anomalies kaynağı).
+    pub live_pipeline: Arc<RwLock<PipelineStatus>>,
+    /// Otonom onarım (auto-fix) günlüğü — son N kayıt UI'a yansır.
+    pub repair_log: VecDeque<String>,
 }
 
 impl GuardianShield {
@@ -138,34 +171,82 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Yeni bir otonom organizma oluşturur
+    /// Yeni bir otonom organizma oluşturur (Srivastava ATP - F1 Mühürlü)
     pub fn new(config: RoboticLoopConfig) -> Self {
         // Global durdurma sinyallerini oluştur
         let stop_sig = Arc::new(AtomicBool::new(false));
         
         // Bakanlıkları varsayılan (safe) değerlerle kur
+        // Live positions Arc paylaşılır: FinanceVault yazar, SymbolOrchestrator okur.
+        let live_positions = Arc::new(RwLock::new(HashMap::new()));
+
+        let mut initial_history = VecDeque::with_capacity(120);
+        initial_history.push_back(config.capital);
         let finance = FinanceVault {
             equity: config.capital,
             starting_capital: config.capital,
-            live_positions: Arc::new(RwLock::new(HashMap::new())),
+            peak_equity: config.capital,
+            live_positions: Arc::clone(&live_positions),
             live_closed_trades: Arc::new(RwLock::new(Vec::new())),
+            live_execution_costs: Arc::new(RwLock::new(ExecutionCosts::default())),
+            equity_history: Arc::new(RwLock::new(initial_history)),
         };
 
+        let intelligence_hub = crate::robot::ml_engine::intelligence_hub::IntelligenceHub::new(
+            crate::evolution::AutonomousController::new(
+                crate::evolution::AutonomousControllerConfig::default(),
+            ),
+        );
         let brain = BrainBox {
             ml_signal: "HOLD".to_string(),
             ml_confidence: 0.0,
             hyperopt_score: 0.0,
             best_params: HashMap::new(),
             live_strategy: Arc::new(RwLock::new("Default".to_string())),
-            thresholds: AdaptiveThresholds { drift_baseline: 0.0, volatility_regime: 0.0 },
+            thresholds: AdaptiveThresholds { drift_baseline: 0.15, volatility_regime: 1.0 },
             drift_history: VecDeque::with_capacity(100),
+            intelligence_hub: Arc::new(RwLock::new(intelligence_hub)),
         };
 
+        // --- 🧬 F1: ORKESTRATÖRÜNÜN SAFİLEŞTİRİLMESİ VE FİLO KAYDI ---
+        // 1. SymbolOrchestrator nesnesini ham olarak üret
+        let mut symbol_orchestrator = SymbolOrchestrator::new(16, Arc::clone(&live_positions));
+
+        // 2. Sabitlenmiş elit sembolleri (Pinned Symbols) doğrudan orkestratöre kaydet
+        for sym in &config.pinned_symbols {
+            symbol_orchestrator.register(
+                sym, 
+                &config.market, 
+                &config.interval
+            );
+        }
+
+        // 3. Kalıcı hafızadaki (SQLite) en çok kazandıran sembolleri hasat et (Elite Fleet)
+        // Eğer veritabanı yolu üzerinde kayıtlı semboller varsa, onları da otonom listeye ekler
+        if let Ok(elite_symbols) = crate::persistence::reader::list_symbols(&config.db_path) {
+            for sym in elite_symbols {
+                // Mükerrer kaydı engellemek için kontrol bariyeri (Double-execution koruması)
+                if !config.pinned_symbols.contains(&sym) {
+                    symbol_orchestrator.register(
+                        &sym,
+                        &config.market,
+                        &config.interval
+                    );
+                }
+            }
+        }
+
+        // 4. Hazırlanan ve sembollerle doldurulan orkestratörü FleetCommand'a teslim et
         let fleet = FleetCommand {
             phase: "Idle".to_string(),
             download_active: false,
             triggers: Self::init_default_triggers(),
             live_price: Arc::new(RwLock::new(HashMap::new())),
+            live_sr_zones: Arc::new(RwLock::new(HashMap::new())),
+            symbol_orchestrator: Arc::new(RwLock::new(symbol_orchestrator)),
+            // Başlangıç değeri 0 → heartbeat'i hemen DataStall uyarısı vermesin diye
+            // sonradan ana döngünün ilk turunda doldurulur.
+            last_loop_tick: Arc::new(AtomicU64::new(0)),
         };
 
         let guardian = GuardianShield {
@@ -174,7 +255,14 @@ impl AppState {
             risk_gate: RiskGate::default(),
             anomaly_count: 0,
             db_conn: Connection::open(&config.db_path).ok(),
+            live_pipeline: Arc::new(RwLock::new(PipelineStatus::new())),
+            repair_log: VecDeque::with_capacity(100),
         };
+
+        // Adli Tamirat Günlüğü
+        log::info!(target:"STATE_INIT",
+            "F1: Otonom filo, pinned ve SQLite geçmiş sembolleriyle donatılarak ayağa kaldırıldı. Seviye INFO"
+        );
 
         Self {
             config,
@@ -186,6 +274,7 @@ impl AppState {
             pause_signal: Arc::new(AtomicBool::new(false)),
         }
     }
+
 
     /// Tüm otonom tetikleyicileri (m, b, d, s) tek seferde mühürler
     fn init_default_triggers() -> HashMap<String, Arc<AtomicBool>> {
@@ -206,7 +295,7 @@ impl AppState {
         /// Otonom Karar Verici: Bakanlıklar arası dengeyi gözeterek aksiyon alır.
     pub fn orchestrate_autonomy(&mut self) {
         // 1. Pazar Rejimi Tespiti (Vites Belirleme)
-        let regime_volatility = self.fleet.calculate_current_volatility();
+        let _regime_volatility = self.fleet.calculate_current_volatility();
         
         // 2. Risk Toleransı (Kasa durumuna göre dinamik vites)
         let risk_multiplier = self.finance.calculate_risk_appetite(); 

@@ -37,8 +37,8 @@ impl PerformanceMetrics {
         let n = trade_pnl_pcts.len();
         if n == 0 { return Self::default(); }
 
-        let (mut winning_trades, mut losing_trades) = (0, 0);
-        let (mut total_wins, mut total_losses, mut total_pnl_pct) = (0.0, 0.0, 0.0);
+        let (winning_trades, losing_trades) = (0, 0);
+        let (total_wins, total_losses, total_pnl_pct) = (0.0, 0.0, 0.0);
         let (mut cumulative_pnl, mut peak, mut max_drawdown) = (0.0_f64, 0.0_f64, 0.0_f64);
 
         for &pnl in trade_pnl_pcts {

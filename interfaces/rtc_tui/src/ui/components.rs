@@ -1,25 +1,49 @@
 // src/ui/components.rs
-use ratatui::widgets::{Row, Cell, Table, Block, Borders, Paragraph, Gauge};
-use ratatui::layout::{Constraint, Rect};
+use ratatui::widgets::{Row, Cell, Block, Borders, Paragraph, Gauge};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Style, Modifier};
 use memos_trading_core::core::model::{PositionModel, FinanceSnapshot, PipelineStep};
+use ratatui::text::{Line, Span};
 
 /// Srivastava ATP - Evrensel Finansal Üst Bilgi
 /// main.rs içinde her sekmede tekrarlanan bakiye çizimlerini bitirir.
-pub fn render_finance_header(area: Rect, f: &mut ratatui::Frame, snap: &FinanceSnapshot) {
+/// `phase` boş geçilebilir; doluysa sağ tarafa renkli rozet düşer.
+pub fn render_finance_header(area: Rect, f: &mut ratatui::Frame, snap: &FinanceSnapshot, phase: &str) {
     let pnl = snap.net_pnl();
     let pnl_color = if pnl >= 0.0 { Color::LightGreen } else { Color::LightRed };
-    
-    let line = format!(
-        " 💰 SERMAYE: ${:.2} | Realize: {:+.2} | Açık PnL: {:+.2} | NET: {:+.2} ",
+
+    let body = format!(
+        " 💰 SERMAYE: ${:.2} | Realize: {:+.2} | Açık PnL: {:+.2} | NET: {:+.2}   ",
         snap.total_equity, snap.realize_pnl, snap.open_pnl, pnl
     );
 
-    let p = Paragraph::new(line)
-        .block(Block::default().borders(Borders::ALL).title(" Finansal Durum "))
-        .style(Style::default().fg(pnl_color).add_modifier(Modifier::BOLD));
-    
+    let (phase_emoji, phase_color) = phase_badge(phase);
+    let mut spans = vec![Span::styled(body,
+        Style::default().fg(pnl_color).add_modifier(Modifier::BOLD))];
+    if !phase.is_empty() {
+        spans.push(Span::styled(
+            format!("{} {}", phase_emoji, phase),
+            Style::default().fg(phase_color).add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let p = Paragraph::new(Line::from(spans))
+        .block(Block::default().borders(Borders::ALL).title(" Finansal Durum "));
+
     f.render_widget(p, area);
+}
+
+/// Phase string'i için emoji + renk eşlemesi (UI rozeti).
+pub fn phase_badge(phase: &str) -> (&'static str, Color) {
+    match phase {
+        "Booting"    => ("🔌", Color::DarkGray),
+        "Scanning"   => ("🔭", Color::LightCyan),
+        "Executing"  => ("⚔️",  Color::LightGreen),
+        "Recovering" => ("🛡️",  Color::LightYellow),
+        "Stopped"    => ("🛑", Color::Red),
+        "Idle" | ""  => ("○",  Color::DarkGray),
+        _            => ("•",  Color::White),
+    }
 }
 
 /// Tüm sekmelerde ortak kullanılan Pozisyon Tablo Satırı
