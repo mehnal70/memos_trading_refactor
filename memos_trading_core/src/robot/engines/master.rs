@@ -616,12 +616,22 @@ impl Engine {
     }
 
     /// 💰 Periyodik hesap bakiye senkronu — Live mode için.
+    ///
+    /// İki katmanlı karar:
+    ///   - Mismatch %1+ tek seferlik gözlem → ⚠️ uyarı (henüz onarım yok)
+    ///   - Mismatch N kez (default 3) ardışık → 🩹 otomatik onarım (equity = borsa)
+    /// Eşik altına döner dönmez sayaç sıfırlanır.
     fn spawn_balance_sync(state: Arc<Mutex<AppState>>) {
         tokio::spawn(async move {
             let interval_secs: u64 = std::env::var("BALANCE_SYNC_EVERY_SECS")
                 .ok().and_then(|v| v.parse().ok()).unwrap_or(300);
             let mismatch_pct_threshold: f64 = std::env::var("BALANCE_MISMATCH_PCT")
                 .ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            // Otomatik onarım için ardışık gözlem eşiği. 0 → autofix kapalı.
+            let autofix_after_n: u32 = std::env::var("BALANCE_AUTOFIX_AFTER_N_OBS")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+            let autofix_enabled: bool = std::env::var("BALANCE_AUTOFIX_ENABLED")
+                .map(|v| v != "false" && v != "0").unwrap_or(true);
 
             // Sadece Live + non-dry-run modunda çalış
             let (executor, dry_run) = {
@@ -641,6 +651,8 @@ impl Engine {
             // İlk turda 30 sn warmup (boot anomalilerinden kaçınmak için)
             sleep(Duration::from_secs(30)).await;
 
+            let mut consecutive_mismatch: u32 = 0;
+
             loop {
                 let stop = state.lock().map(|s| s.app_stop_signal.load(Ordering::Relaxed)).unwrap_or(true);
                 if stop { break; }
@@ -653,24 +665,65 @@ impl Engine {
                             (diff / local_equity) * 100.0
                         } else { 0.0 };
 
-                        if let Ok(mut st) = state.lock() {
-                            if pct > mismatch_pct_threshold {
+                        if pct > mismatch_pct_threshold {
+                            // Eşik aşıldı → mismatch sayacı bir artar
+                            consecutive_mismatch = consecutive_mismatch.saturating_add(1);
+
+                            // Önce uyarı log'u
+                            if let Ok(mut st) = state.lock() {
                                 st.push_log(format!(
-                                    "⚠️ [BALANCE-MISMATCH] borsa=${:.2} local=${:.2} fark=${:.2} ({:.2}%) > {:.2}% eşiği",
+                                    "⚠️ [BALANCE-MISMATCH] borsa=${:.2} local=${:.2} fark=${:.2} ({:.2}%) > {:.2}% (gözlem #{} / {})",
                                     exchange_balance, local_equity, diff, pct, mismatch_pct_threshold,
+                                    consecutive_mismatch, autofix_after_n,
                                 ));
                                 st.guardian.repair_log.push_back(format!(
-                                    "[{}] balance mismatch: exchange=${:.2} local=${:.2} ({:.2}%)",
+                                    "[{}] mismatch obs#{}: exchange=${:.2} local=${:.2} ({:.2}%)",
                                     chrono::Local::now().format("%H:%M:%S"),
-                                    exchange_balance, local_equity, pct,
+                                    consecutive_mismatch, exchange_balance, local_equity, pct,
                                 ));
                                 while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
-                            } else {
+                            }
+
+                            // Autofix tetikleyici: N ardışık gözlem
+                            if autofix_enabled && autofix_after_n > 0 && consecutive_mismatch >= autofix_after_n {
+                                // Otomatik onarım: local equity'yi borsaya hizala
+                                if let Ok(mut st) = state.lock() {
+                                    let old_equity = st.finance.equity;
+                                    let delta = exchange_balance - old_equity;
+                                    st.finance.equity = exchange_balance;
+                                    // peak_equity revize: yeni equity peak'in üzerindeyse güncelle
+                                    if exchange_balance > st.finance.peak_equity {
+                                        st.finance.peak_equity = exchange_balance;
+                                    }
+                                    st.push_log(format!(
+                                        "🩹 [BALANCE-AUTOFIX] {} ardışık mismatch sonrası onarım: ${:.2} → ${:.2} (Δ={:+.2})",
+                                        consecutive_mismatch, old_equity, exchange_balance, delta,
+                                    ));
+                                    st.guardian.repair_log.push_back(format!(
+                                        "[{}] AUTOFIX: equity ${:.2} → ${:.2} (Δ={:+.2})",
+                                        chrono::Local::now().format("%H:%M:%S"),
+                                        old_equity, exchange_balance, delta,
+                                    ));
+                                    while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
+                                }
+                                consecutive_mismatch = 0; // sayaç reset
+                            }
+                        } else {
+                            // Eşik altına düştü → sayacı toparla
+                            if consecutive_mismatch > 0 {
+                                if let Ok(mut st) = state.lock() {
+                                    st.push_log(format!(
+                                        "💰 [BALANCE-SYNC] mismatch toparlandı (sayaç sıfırlandı): borsa=${:.2} ≈ local=${:.2}",
+                                        exchange_balance, local_equity,
+                                    ));
+                                }
+                            } else if let Ok(mut st) = state.lock() {
                                 st.push_log(format!(
                                     "💰 [BALANCE-SYNC] borsa=${:.2} ≈ local=${:.2} (fark {:.2}%, eşik altı)",
                                     exchange_balance, local_equity, pct,
                                 ));
                             }
+                            consecutive_mismatch = 0;
                         }
                     }
                     Err(e) => {
