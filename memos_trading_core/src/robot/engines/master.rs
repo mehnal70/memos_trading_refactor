@@ -1211,17 +1211,28 @@ impl Engine {
                         let (sl_res, tp_res) = executor.place_protection_orders(
                             symbol, is_long, qty_val, pos_sl, pos_tp,
                         ).await;
+                        let sl_id = sl_res.as_ref().ok()
+                            .and_then(|r| r.get("orderId").map(|v| v.to_string()));
+                        let tp_id = tp_res.as_ref().ok()
+                            .and_then(|r| r.get("orderId").map(|v| v.to_string()));
                         let sl_status = match &sl_res {
-                            Ok(r) => format!("SL ✓ ({})",
-                                r.get("orderId").map(|v| v.to_string()).unwrap_or_else(|| "?".into())),
+                            Ok(_)  => format!("SL ✓ ({})", sl_id.as_deref().unwrap_or("?")),
                             Err(e) => format!("SL ❌ {:?}", e),
                         };
                         let tp_status = match &tp_res {
-                            Ok(r) => format!("TP ✓ ({})",
-                                r.get("orderId").map(|v| v.to_string()).unwrap_or_else(|| "?".into())),
+                            Ok(_)  => format!("TP ✓ ({})", tp_id.as_deref().unwrap_or("?")),
                             Err(e) => format!("TP ❌ {:?}", e),
                         };
+                        // Order ID eşlemesini state'e mühürle (cancel için audit trail).
                         if let Ok(mut st2) = state.lock() {
+                            if let Ok(mut map) = st2.finance.live_orders.write() {
+                                map.insert(symbol.to_string(), crate::core::model::LiveOrderRefs {
+                                    entry_order_id: live_order_id.clone(),
+                                    sl_order_id: sl_id.clone(),
+                                    tp_order_id: tp_id.clone(),
+                                    placed_at: chrono::Utc::now().to_rfc3339(),
+                                });
+                            }
                             st2.push_log(format!(
                                 "🛡️ [LIVE-PROTECT] {} @ SL={:.4} TP={:.4} · {} · {}",
                                 symbol, pos_sl, pos_tp, sl_status, tp_status,
@@ -1526,23 +1537,70 @@ impl Engine {
                     ));
                 }
             } else {
-                // 1. Bekleyen koruma emirlerini iptal et (SL + TP). Bunlar tetiklenmeden
-                //    pozisyonu manuel kapatacağımız için artık gereksiz.
-                match executor.cancel_all_orders(symbol).await {
-                    Ok(_) => {
+                // 1. Bekleyen koruma emirlerini hedefli olarak iptal et.
+                //    live_orders map'inden SL ve TP order_id'leri okunur; sadece bu emirler
+                //    cancel edilir (paralel sembollerdeki orphan'lar etkilenmesin).
+                //    Map'te kayıt yoksa fallback: cancel_all_orders (eski davranış).
+                let refs = state.lock().ok()
+                    .and_then(|s| s.finance.live_orders.read().ok()
+                        .and_then(|m| m.get(symbol).cloned()));
+
+                let cancel_result = if let Some(refs) = refs {
+                    let mut summary: Vec<String> = Vec::new();
+                    if let Some(sl_id_str) = refs.sl_order_id.as_deref() {
+                        if let Ok(id) = sl_id_str.trim_matches('"').parse::<u64>() {
+                            match executor.cancel_order(symbol, id).await {
+                                Ok(_) => summary.push(format!("SL#{} ✓", id)),
+                                Err(e) => summary.push(format!("SL#{} ❌ {:?}", id, e)),
+                            }
+                        }
+                    }
+                    if let Some(tp_id_str) = refs.tp_order_id.as_deref() {
+                        if let Ok(id) = tp_id_str.trim_matches('"').parse::<u64>() {
+                            match executor.cancel_order(symbol, id).await {
+                                Ok(_) => summary.push(format!("TP#{} ✓", id)),
+                                Err(e) => summary.push(format!("TP#{} ❌ {:?}", id, e)),
+                            }
+                        }
+                    }
+                    Some(summary)
+                } else {
+                    None
+                };
+
+                match cancel_result {
+                    Some(summary) if !summary.is_empty() => {
                         if let Ok(mut st2) = state.lock() {
                             st2.push_log(format!(
-                                "🧹 [LIVE] {} koruma emirleri iptal edildi (SL+TP)", symbol,
+                                "🧹 [LIVE] {} hedefli iptal: {}", symbol, summary.join(" · "),
                             ));
                         }
                     }
-                    Err(e) => {
-                        if let Ok(mut st2) = state.lock() {
-                            st2.push_log(format!(
-                                "⚠️ [LIVE] {} cancel_all_orders hatası: {:?} (orphan SL/TP olabilir)",
-                                symbol, e,
-                            ));
+                    _ => {
+                        // Fallback: order_id eşlemesi yoksa cancel_all (geriye uyum)
+                        match executor.cancel_all_orders(symbol).await {
+                            Ok(_) => {
+                                if let Ok(mut st2) = state.lock() {
+                                    st2.push_log(format!(
+                                        "🧹 [LIVE] {} cancel_all (id yok, geniş iptal)", symbol,
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                if let Ok(mut st2) = state.lock() {
+                                    st2.push_log(format!(
+                                        "⚠️ [LIVE] {} cancel_all_orders hatası: {:?} (orphan SL/TP olabilir)",
+                                        symbol, e,
+                                    ));
+                                }
+                            }
                         }
+                    }
+                }
+                // Eşlemeyi temizle (pozisyon artık yok).
+                if let Ok(st2) = state.lock() {
+                    if let Ok(mut map) = st2.finance.live_orders.write() {
+                        map.remove(symbol);
                     }
                 }
                 // 2. Pozisyonu market emir ile kapat.

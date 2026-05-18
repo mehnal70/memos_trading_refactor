@@ -240,6 +240,26 @@ pub struct PipelineStep {
     pub overdue_secs: i64,
 }
 
+/// 💱 Live mode'da bir sembol için açık olan borsa emirlerinin referansı.
+/// AppState.finance.live_orders[symbol] altında saklanır. Açılışta entry/SL/TP
+/// order_id'leri yazılır; kapatma anında cancel_all_orders yerine bu hedefli
+/// id'ler kullanılır → paralel sembollerin emirleri etkilenmez.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LiveOrderRefs {
+    /// Açılış market emrinin id'si (audit trail için, cancel edilmez)
+    #[serde(default)]
+    pub entry_order_id: Option<String>,
+    /// Stop-loss emrinin id'si
+    #[serde(default)]
+    pub sl_order_id: Option<String>,
+    /// Take-profit emrinin id'si
+    #[serde(default)]
+    pub tp_order_id: Option<String>,
+    /// Mühürlendiği zaman (RFC3339)
+    #[serde(default)]
+    pub placed_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionModel {
     /// Pozisyonun tekil kimliği. IntelligenceHub.track_trade ↔ learn_from_exit eşlemesi için.

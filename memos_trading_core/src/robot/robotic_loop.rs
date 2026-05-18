@@ -43,6 +43,9 @@ pub struct FinanceVault {
     /// Equity tarihçesi (en eski → en yeni). Sparkline ve drawdown hesabı için.
     /// Ana döngü her ~2.5 sn'de bir push eder, kapasite 120 nokta (~5 dk).
     pub equity_history: Arc<RwLock<VecDeque<f64>>>,
+    /// 💱 Live mode'da sembol başına entry/SL/TP order_id eşlemesi.
+    /// Açılışta yazılır, kapatma anında hedefli cancel_order için okunur.
+    pub live_orders: Arc<RwLock<HashMap<String, crate::core::model::LiveOrderRefs>>>,
 }
 
 impl FinanceVault {
@@ -200,6 +203,7 @@ impl AppState {
             live_closed_trades: Arc::new(RwLock::new(Vec::new())),
             live_execution_costs: Arc::new(RwLock::new(ExecutionCosts::default())),
             equity_history: Arc::new(RwLock::new(initial_history)),
+            live_orders: Arc::new(RwLock::new(HashMap::new())),
         };
 
         let intelligence_hub = crate::robot::ml_engine::intelligence_hub::IntelligenceHub::new(
