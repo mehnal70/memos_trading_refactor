@@ -881,18 +881,19 @@ impl Engine {
                 _ => x.to_string(),
             }).unwrap_or_default()
         };
-        let (status, symbol, orig_qty, cum_qty, last_qty, side, order_id, reject_reason) =
+        // L = bu event'te dolan kısmın ortalama fiyatı (last_filled_price).
+        let (status, symbol, orig_qty, cum_qty, last_qty, last_price, side, order_id, reject_reason) =
             match event_type.as_str() {
                 "executionReport" => (
                     parse_s(&v, "X"), parse_s(&v, "s"),
-                    parse_f(&v, "q"), parse_f(&v, "z"), parse_f(&v, "l"),
+                    parse_f(&v, "q"), parse_f(&v, "z"), parse_f(&v, "l"), parse_f(&v, "L"),
                     parse_s(&v, "S"), parse_id(&v, "i"), parse_s(&v, "r"),
                 ),
                 "ORDER_TRADE_UPDATE" => {
                     let o = v.get("o").cloned().unwrap_or_default();
                     (
                         parse_s(&o, "X"), parse_s(&o, "s"),
-                        parse_f(&o, "q"), parse_f(&o, "z"), parse_f(&o, "l"),
+                        parse_f(&o, "q"), parse_f(&o, "z"), parse_f(&o, "l"), parse_f(&o, "L"),
                         parse_s(&o, "S"), parse_id(&o, "i"), parse_s(&o, "r"),
                     )
                 }
@@ -902,7 +903,9 @@ impl Engine {
         match status.as_str() {
             "FILLED" => Self::process_user_fill_status(state, &status, &symbol).await,
             "PARTIALLY_FILLED" =>
-                Self::process_partial_fill(state, &symbol, orig_qty, cum_qty, last_qty).await,
+                Self::process_partial_fill(
+                    state, &symbol, &side, orig_qty, cum_qty, last_qty, last_price,
+                ).await,
             "REJECTED" | "EXPIRED" =>
                 Self::process_order_anomaly(
                     state, &status, &symbol, &side, &order_id, orig_qty, &reject_reason,
@@ -949,41 +952,92 @@ impl Engine {
         }
     }
 
-    /// 🌓 PARTIAL fill — pozisyon kısmi tetiklendi, kalan miktar borsada açık.
-    /// Local pozisyonun qty'sini kalan = (orig_qty − cum_qty) ile güncelleriz.
-    /// SL/TP emirleri Binance'te orijinal qty ile durur (reduceOnly), bu sebeple
-    /// borsada qty otomatik azalır; bizim local hafızamız da hizalanmalı.
-    async fn process_partial_fill(
+    /// 🌓 PARTIAL fill — emirin bir bölümü dolu. İki tür var:
+    ///
+    /// **ENTRY partial** (side pozisyonun yönüyle aynı: LONG için BUY, SHORT için SELL):
+    ///   - Local qty `cum_qty`'e hizalanır (gerçekte bu kadar tutuyoruz).
+    ///   - Sadece komisyon equity'den düşülür; realize PnL yok.
+    ///
+    /// **CLOSE partial** (side pozisyonu kapatıyor: LONG için SELL, SHORT için BUY):
+    ///   - Local qty bu event'te kapanan kadar (`last_qty`) azalır.
+    ///   - Realize PnL = (last_price − entry_price) × last_qty × yön; equity'e işlenir.
+    ///   - Komisyon ayrıca düşülür; live_execution_costs.commission_usd büyür.
+    ///
+    /// `pub` çünkü entegrasyon testleri (partial fill PnL muhasebesi) bunu doğrular.
+    pub async fn process_partial_fill(
         state: &Arc<Mutex<AppState>>,
         symbol: &str,
+        side: &str,
         orig_qty: f64,
         cum_qty: f64,
         last_qty: f64,
+        last_price: f64,
     ) {
-        if symbol.is_empty() || orig_qty <= 0.0 { return; }
-        let remaining = (orig_qty - cum_qty).max(0.0);
+        if symbol.is_empty() || orig_qty <= 0.0 || last_qty <= 0.0 { return; }
         let fill_pct = (cum_qty / orig_qty * 100.0).clamp(0.0, 100.0);
+        const COMMISSION_RATE: f64 = 0.001; // 0.1% — open/close ile aynı
 
-        // Local pozisyonu güncelle: qty -> remaining (eğer pozisyon hâlâ varsa)
-        let mut updated = false;
-        let mut local_qty_before: f64 = 0.0;
-        if let Ok(st) = state.lock() {
-            if let Ok(mut positions) = st.finance.live_positions.write() {
-                if let Some(pos) = positions.get_mut(symbol) {
-                    local_qty_before = pos.qty;
-                    // SL/TP qty'sini hizala (remaining > 0 ise hâlâ açık)
-                    pos.qty = remaining;
-                    updated = true;
+        // 1. Pozisyonu oku, entry vs close sınıflandır.
+        let (is_long, entry_price, local_qty_before) = {
+            let st = match state.lock() { Ok(s) => s, Err(_) => return };
+            let positions = match st.finance.live_positions.read() { Ok(p) => p, Err(_) => return };
+            match positions.get(symbol) {
+                Some(pos) => (pos.is_long, pos.entry_price, pos.qty),
+                None => return, // bot bilmediği bir sembol için event aldı
+            }
+        };
+        let is_closing = (is_long && side == "SELL") || (!is_long && side == "BUY");
+
+        // 2. Fiyat 0 ise (executor pratikte 0 dönmez ama defensive guard) realize PnL
+        //    hesaplayamayız; o zaman sadece qty güncelle ve log at — komisyon da
+        //    notional 0 olur. Çağıran zaten WS payload'unu doğrudan veriyor.
+        let trade_notional = last_qty * last_price;
+        let commission = trade_notional * COMMISSION_RATE;
+        let realized_pnl = if is_closing && last_price > 0.0 {
+            crate::core::math::calculate_pnl(entry_price, last_price, last_qty, is_long)
+        } else { 0.0 };
+
+        // 3. State mutation — pozisyon qty + equity + execution_costs.
+        let new_qty: Option<f64> = if let Ok(mut st) = state.lock() {
+            let mutated = if let Ok(mut positions) = st.finance.live_positions.write() {
+                positions.get_mut(symbol).map(|pos| {
+                    if is_closing {
+                        pos.qty = (pos.qty - last_qty).max(0.0);
+                    } else {
+                        // Entry partial: cum kadar gerçekten tutuyoruz
+                        pos.qty = cum_qty;
+                    }
+                    pos.qty
+                })
+            } else { None };
+
+            if mutated.is_some() {
+                if let Ok(mut costs) = st.finance.live_execution_costs.write() {
+                    costs.commission_usd += commission;
+                    costs.total_cost_usd += commission;
+                }
+                // Realize PnL sadece kapanış partial'inde; ENTRY partial'de equity
+                // sadece komisyon kadar azalır (notional henüz realize değil).
+                if is_closing {
+                    st.finance.equity += realized_pnl - commission;
+                } else {
+                    st.finance.equity -= commission;
                 }
             }
-        }
+            mutated
+        } else { None };
 
-        if updated {
+        // 4. Log + audit.
+        if let Some(new_q) = new_qty {
+            let kind_tag = if is_closing { "CLOSE" } else { "ENTRY" };
+            let pnl_part = if is_closing {
+                format!(" · pnl=${:+.2}", realized_pnl)
+            } else { String::new() };
             if let Ok(mut st) = state.lock() {
                 st.push_log(format!(
-                    "🌓 [WS-PARTIAL] {} %{:.1} dolu (last={:.4}, cum={:.4}/{:.4}, kalan={:.4}) · local qty: {:.4} → {:.4}",
-                    symbol, fill_pct, last_qty, cum_qty, orig_qty, remaining,
-                    local_qty_before, remaining,
+                    "🌓 [WS-PARTIAL-{}] {} %{:.1} ({} {:.4} @ {:.4}) · qty {:.4} → {:.4}{} · fee=${:.4}",
+                    kind_tag, symbol, fill_pct, side, last_qty, last_price,
+                    local_qty_before, new_q, pnl_part, commission,
                 ));
             }
         }
