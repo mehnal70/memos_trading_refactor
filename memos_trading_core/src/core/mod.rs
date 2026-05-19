@@ -9,5 +9,3 @@ pub mod sim_data;
 pub mod types;
 pub mod metrics;
 pub mod batch_config;
-
-// pub mod constants; // Gelecek aşamada eklenecek

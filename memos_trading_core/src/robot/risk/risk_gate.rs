@@ -22,14 +22,17 @@ impl RiskGate {
         let dd = if input.peak_equity > 0.0 {
             (input.peak_equity - input.account_equity) / input.peak_equity * 100.0
         } else { 0.0 };
-        
+
         if dd > self.policy.max_drawdown_pct {
             reasons.push(format!("Kritik Max DD aşıldı: {:.2}%", dd));
             halt = true;
         }
 
-        // 2. Günlük Kayıp Denetimi (Gün başı sermaye üzerinden)
-        let daily_loss = (input.day_start_equity - input.account_equity) / input.day_start_equity * 100.0;
+        // 2. Günlük Kayıp Denetimi (Gün başı sermaye üzerinden).
+        // day_start_equity ≤ 0 ise oran tanımsız → 0% varsay (NaN üretme).
+        let daily_loss = if input.day_start_equity > 0.0 {
+            (input.day_start_equity - input.account_equity) / input.day_start_equity * 100.0
+        } else { 0.0 };
         if daily_loss > self.policy.max_daily_loss_pct {
             reasons.push(format!("Günlük kayıp sınırı ihlal edildi: {:.2}%", daily_loss));
             // Günlük kayıp çok sertse (%5 üstü) sistemi tamamen durdur
@@ -41,7 +44,7 @@ impl RiskGate {
             reasons.push(format!("İşlem hacmi limit dışı: ${:.2}", input.requested_notional_usd));
         }
 
-        // 4. ML Güven Barajı (Yeni Derinlik)
+        // 4. ML Güven Barajı
         if input.model_confidence < 0.35 {
             reasons.push("ML Model güven seviyesi yetersiz".to_string());
         }
@@ -49,7 +52,6 @@ impl RiskGate {
         if reasons.is_empty() {
             RiskDecision::Allow
         } else {
-            // Karar Verici: Safe mode mu yoksa tam durdurma mı?
             RiskDecision::Deny {
                 reasons,
                 enter_safe_mode: dd > (self.policy.max_drawdown_pct * self.policy.safe_mode_threshold) || daily_loss > 2.0,
@@ -57,8 +59,6 @@ impl RiskGate {
             }
         }
     }
-    pub fn is_approved(&self, _sig: &Signal) -> bool { true }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

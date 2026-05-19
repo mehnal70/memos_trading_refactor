@@ -2,8 +2,6 @@
 // Srivastava ATP - Adli Matematik ve Finansal Hesaplama Birimi
 // Bu modül saf veri ve matematik motorudur; hiçbir kilit (lock) veya dış bağımlılık taşımaz.
 
-use std::collections::HashMap;
-
 // =============================================================================
 // 1. TEMEL BORSA VE HASSASİYET MATEMATİĞİ (FINANCIAL COMPLIANCE)
 // =============================================================================
@@ -15,11 +13,13 @@ pub fn round_to_precision(val: f64, step: f64) -> f64 {
     (val / step).round() * step
 }
 
-/// Brüt PnL Hesabı (Hassasiyet Korumalı)
+/// Brüt PnL Hesabı — ham f64 döner. Yuvarlama UI/raporlama tarafında yapılmalı;
+/// hesapta yuvarlamak biriken hata yaratır ve alt-coinlerde (örn. SHIB) görünür
+/// precision kaybına yol açar.
+#[inline]
 pub fn calculate_pnl(entry: f64, current: f64, qty: f64, is_long: bool) -> f64 {
     let diff = if is_long { current - entry } else { entry - current };
-    // Hassas yuvarlama: 4 hane (USD/USDT pariteleri için ideal)
-    (diff * qty * 10000.0).round() / 10000.0
+    diff * qty
 }
 
 /// ROE (Return on Equity) - Gerçek Sermaye Verimliliği
@@ -33,13 +33,17 @@ pub fn calculate_roe(entry: f64, current: f64, leverage: f64, is_long: bool) -> 
     price_diff_pct * direction_mult * leverage * 100.0
 }
 
-/// Kâr Faktörü (Profit Factor) - Sıfıra Bölme Korumalı
-pub fn safe_profit_factor(gross_win: f64, gross_loss: f64) -> f64 {
+/// Kâr Faktörü (Profit Factor) — sıfıra bölme korumalı, sentinel'siz.
+/// Konvansiyon (trade_summary, Calmar, Omega ile tutarlı):
+///   - Hem win hem loss yoksa: Some(0.0).
+///   - Sadece loss yoksa (win > 0): None (tanımsız; sınırsız PF).
+///   - Aksi halde: Some(gross_win / |gross_loss|).
+pub fn safe_profit_factor(gross_win: f64, gross_loss: f64) -> Option<f64> {
     let loss_abs = gross_loss.abs();
-    if loss_abs < 0.00000001 { // f64::EPSILON yerine daha güvenli bir finansal eşik
-        if gross_win > 0.0 { 999.99 } else { 0.0 } // Sonsuz yerine okunabilir tavan
+    if loss_abs < 1e-12 {
+        if gross_win > 0.0 { None } else { Some(0.0) }
     } else {
-        gross_win / loss_abs
+        Some(gross_win / loss_abs)
     }
 }
 
@@ -69,6 +73,8 @@ pub fn calculate_advanced_score(
     trade_count: usize,
 ) -> f64 {
     // 1. Temel Barikatlar (Diskalifiye)
+    // NaN profit_factor (örn. tanımsız PF) burada None ile gelmez — caller
+    // tanımsız PF'yi büyük pozitif değer olarak normalize etmiş olmalı.
     if trade_count < 3 || profit_factor < 1.0 || max_dd > 40.0 {
         return 0.0;
     }
@@ -122,7 +128,7 @@ pub fn calculate_trade_reward(pnl_pct: f64, hold_time_mins: u64, max_favorable_e
 
 pub struct Statistics;
 impl Statistics {
-    /// Median: Sıralama maliyetini düşürmek için in-place olmayan seçim (O(n log n))
+    /// Median: O(n log n) sıralama tabanlı medyan. Boş slice için 0.0.
     pub fn median(values: &[f64]) -> f64 {
         if values.is_empty() { return 0.0; }
         let mut sorted = values.to_vec();
@@ -130,42 +136,33 @@ impl Statistics {
         let mid = sorted.len() / 2;
         if sorted.len() % 2 == 0 { (sorted[mid - 1] + sorted[mid]) / 2.0 } else { sorted[mid] }
     }
-
-    /// Mode: Frekans haritası ile bit tabanlı tam f64 mod hesabı (O(n))
-    pub fn mode(values: &[f64]) -> f64 {
-        let mut counts = HashMap::new();
-        for &val in values {
-            let count = counts.entry(val.to_bits()).or_insert(0);
-            *count += 1;
-        }
-        counts.into_iter()
-            .max_by_key(|&(_, count)| count)
-            .map(|(bits, _)| f64::from_bits(bits))
-            .unwrap_or(0.0)
-    }
+    // Mode kaldırıldı: f64 mod hesabı (bit-pattern key) NaN/-0/+0 sorunlu ve
+    // sürekli fiyat verisinde anlamlı değer üretmez. Kullanan kod yoktu.
 }
 
 pub struct RiskMetrics;
 impl RiskMetrics {
-    /// Sharpe Ratio: Risk-adjusted kümülatif getiri serisi hesabı (Sıfıra bölünme korumalı)
+    /// Sharpe Ratio — **sample (n-1) varyansı** ile (trading standardı).
+    /// risk_free_rate aynı dönem getirisi cinsinden (örn. günlük bar serisi için günlük r_f).
     pub fn sharpe_ratio(returns: &[f64], risk_free_rate: f64) -> f64 {
         let n = returns.len();
         if n < 2 { return 0.0; }
         let mean = returns.iter().sum::<f64>() / n as f64;
-        let var = returns.iter().map(|&r| (r - mean).powi(2)).sum::<f64>() / n as f64;
+        // Bessel düzeltmesi: numune (sample) varyansı için n-1.
+        let var = returns.iter().map(|&r| (r - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
         let std_dev = var.sqrt();
         if std_dev < f64::EPSILON { 0.0 } else { (mean - risk_free_rate) / std_dev }
     }
 
-    /// Max Drawdown: Peak-to-Trough zirve-dip düşüş yüzdesi (%) - NaN Korumalı
+    /// Max Drawdown: Peak-to-Trough zirve-dip düşüş yüzdesi (negatif değer).
+    /// Boş seri veya peak ≤ 0 için 0.0.
     pub fn max_drawdown(prices: &[f64]) -> f64 {
         if prices.is_empty() { return 0.0; }
         let mut max_price: f64 = prices[0];
-        let mut mdd: f64 = 0.0; 
-
+        let mut mdd: f64 = 0.0;
         for &p in prices {
             if p > max_price { max_price = p; }
-            let dd = (p - max_price) / (max_price + f64::EPSILON);
+            let dd = if max_price > 0.0 { (p - max_price) / max_price } else { 0.0 };
             mdd = f64::min(mdd, dd);
         }
         mdd * 100.0
@@ -174,9 +171,10 @@ impl RiskMetrics {
 
 pub struct Correlation;
 impl Correlation {
-    /// Pearson: İki bağımsız sembol serisi arasındaki doğrusal ilişki (O(n))
-    pub fn pearson(x: &[f64], y: &[f64]) -> f64 {
-        if x.len() != y.len() || x.is_empty() { return 0.0; }
+    /// Pearson korelasyon — `Option<f64>` döner. None: boyut uyuşmazlığı, boş seri,
+    /// veya iki serinin de varyansı sıfır (tanımsız). Aksi halde Some(ρ), ρ ∈ [-1, 1].
+    pub fn pearson(x: &[f64], y: &[f64]) -> Option<f64> {
+        if x.len() != y.len() || x.is_empty() { return None; }
         let n = x.len() as f64;
         let (mx, my) = (x.iter().sum::<f64>() / n, y.iter().sum::<f64>() / n);
         let (mut num, mut sx, mut sy) = (0.0, 0.0, 0.0);
@@ -187,6 +185,6 @@ impl Correlation {
             sy += dy.powi(2);
         }
         let den = (sx * sy).sqrt();
-        if den < f64::EPSILON { 0.0 } else { num / den }
+        if den < f64::EPSILON { None } else { Some(num / den) }
     }
 }

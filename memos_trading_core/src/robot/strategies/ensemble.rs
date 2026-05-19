@@ -1,8 +1,12 @@
 // robot/strategies/ensemble.rs - Çoklu strateji konsensüs motoru
 //
-// `StrategyEnsemble` birden çok `Strategy`'yi paralel çalıştırır, oy yoğunluğuna
+// `StrategyEnsemble` birden çok `Strategy`'yi sırayla çalıştırır, oy yoğunluğuna
 // göre tek bir final sinyal üretir. Kendisi de `Strategy` trait'ini uygular —
 // yani başka bir ensemble'ın içine bileşen olarak girebilir (composite pattern).
+//
+// Not: Üyeler iter().map() ile **sequential** çalıştırılır (her strateji ucuz
+// hesap; tokio task'a almanın overhead'i kazançtan büyük). Gerçek paralel
+// gerekirse rayon::par_iter ile değiştirilebilir.
 
 use crate::core::types::{Candle, Signal, StrategyParams, FundingRatePoint};
 use crate::robot::strategies::base::Strategy;

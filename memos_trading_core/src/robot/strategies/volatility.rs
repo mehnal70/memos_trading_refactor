@@ -3,7 +3,7 @@
 // Bollinger Bands: ortalama ± std_dev*σ bantlarından dışarı çıkış sinyali.
 // Donchian Channel: son N barın en yüksek/en düşük seviyesinden kırılım.
 
-use crate::core::indicators::{calculate_bollinger, CoreIndicatorEngine};
+use crate::core::indicators::calculate_bollinger;
 use crate::core::types::{Candle, Signal, StrategyParams, FundingRatePoint};
 use crate::robot::strategies::base::Strategy;
 use crate::robot::strategies::utils::htf_trend_filter;
@@ -52,6 +52,3 @@ impl Strategy for DonchianChannelStrategy {
     }
 }
 
-// CoreIndicatorEngine'i sessiz tutmak için (Bollinger zaten kullanıyor, Donchian ileride lazım olabilir).
-#[allow(dead_code)]
-fn _ensure_sma_link(c: &[Candle]) -> f64 { CoreIndicatorEngine::sma(c, 1) }

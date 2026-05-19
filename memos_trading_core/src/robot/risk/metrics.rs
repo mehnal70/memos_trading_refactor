@@ -6,20 +6,17 @@ use serde::{Serialize, Deserialize};
 pub struct SharpeCalculator;
 
 impl SharpeCalculator {
+    /// Sharpe — sample (n-1) varyansı (Bessel düzeltmesi). Trading standardı.
     pub fn calculate(returns: &[f64], rf_rate: f64) -> f64 {
         let n = returns.len();
         if n < 2 { return 0.0; }
-        
-        let sum: f64 = returns.iter().sum();
-        let avg_return = sum / n as f64;
-        
-        // Varyans hesabı (Single-pass iterator)
+
+        let avg_return = returns.iter().sum::<f64>() / n as f64;
         let variance_sum: f64 = returns.iter()
             .map(|&r| (r - avg_return).powi(2))
             .sum();
-        
-        let std_dev = (variance_sum / n as f64).sqrt();
-        
+        let std_dev = (variance_sum / (n - 1) as f64).sqrt();
+
         if std_dev < f64::EPSILON { 0.0 } else { (avg_return - rf_rate) / std_dev }
     }
 }
@@ -28,22 +25,20 @@ impl SharpeCalculator {
 pub struct SortinoCalculator;
 
 impl SortinoCalculator {
+    /// Sortino — sample (n-1) downside deviation (sadece hedef altı sapma).
     pub fn calculate(returns: &[f64], rf_rate: f64, target_return: f64) -> f64 {
         let n = returns.len();
         if n < 2 { return 0.0; }
-        
+
         let avg_return = returns.iter().sum::<f64>() / n as f64;
-        
-        // Downside deviation: Sadece hedefin altındaki sapmaları say (Allocation-free)
         let downside_var_sum: f64 = returns.iter()
             .map(|&r| {
                 let diff = target_return - r;
                 if diff > 0.0 { diff.powi(2) } else { 0.0 }
             })
             .sum();
-        
-        let downside_std = (downside_var_sum / n as f64).sqrt();
-        
+        let downside_std = (downside_var_sum / (n - 1) as f64).sqrt();
+
         if downside_std < f64::EPSILON { 0.0 } else { (avg_return - rf_rate) / downside_std }
     }
 }
@@ -86,8 +81,9 @@ impl InformationRatio {
             .zip(benchmark_returns)
             .map(|(s, b)| ((s - b) - avg_excess).powi(2))
             .sum();
-            
-        let tracking_error = (te_sum / n as f64).sqrt();
+
+        // Sample (Bessel) düzeltmesi — tracking error standardı.
+        let tracking_error = (te_sum / (n - 1) as f64).sqrt();
         let ratio = if tracking_error < f64::EPSILON { 0.0 } else { avg_excess / tracking_error };
         
         Some(InformationRatio { excess_return: avg_excess, tracking_error, ratio })
