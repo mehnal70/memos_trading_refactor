@@ -79,19 +79,41 @@ impl StrategyEnsemble {
         }).collect()
     }
 
-    /// Oy sayımı: (buy, sell, hold).
-    fn tally(results: &[StrategyResult]) -> (usize, usize, usize) {
+    /// Oy sayımı: (buy, sell, hold) — eşit ağırlıklı, geriye dönük uyumluluk için.
+    pub fn tally(results: &[StrategyResult]) -> (usize, usize, usize) {
         results.iter().fold((0, 0, 0), |(b, s, h), r| match r.signal {
             Signal::Buy  => (b + 1, s, h),
             Signal::Sell => (b, s + 1, h),
             Signal::Hold => (b, s, h + 1),
         })
     }
+
+    /// Confidence-weighted oy ağırlığı: (buy_weight, sell_weight, total_weight).
+    /// Hold oyları toplam ağırlığa dahil değildir — eşik (threshold_ratio) sadece
+    /// aktif (Buy/Sell) oyların payı üzerinden değerlendirilir; "yarısı Hold" bir
+    /// stratejiyi otomatik bloklamasın.
+    pub fn weighted_tally(results: &[StrategyResult]) -> (f64, f64, f64) {
+        let mut buy = 0.0_f64;
+        let mut sell = 0.0_f64;
+        let mut total = 0.0_f64;
+        for r in results {
+            let w = r.confidence.max(0.0); // negatif confidence anlamsız → 0'a clamp
+            match r.signal {
+                Signal::Buy  => { buy  += w; total += w; }
+                Signal::Sell => { sell += w; total += w; }
+                Signal::Hold => {} // Hold ağırlığı katılmaz
+            }
+        }
+        (buy, sell, total)
+    }
 }
 
 impl Strategy for StrategyEnsemble {
     fn name(&self) -> &str { "ENSEMBLE" }
 
+    /// **Confidence-weighted** oylama: üyelerin Strategy::confidence değerleri
+    /// ağırlık olarak kullanılır. Eşik (threshold_ratio) aktif (Buy/Sell) oyların
+    /// toplam aktif ağırlığa oranı üzerinden değerlendirilir.
     fn generate_signal(
         &self,
         candles: &[Candle],
@@ -101,11 +123,13 @@ impl Strategy for StrategyEnsemble {
     ) -> Result<Signal> {
         if self.members.is_empty() { return Ok(Signal::Hold); }
         let results = self.evaluate_all(candles, params, funding_rates, htf_candles);
-        let (buys, sells, _) = Self::tally(&results);
-        let total = results.len() as f64;
-        let need = (total * self.threshold_ratio).ceil() as usize;
+        let (buy_w, sell_w, total_w) = Self::weighted_tally(&results);
+        if total_w <= f64::EPSILON { return Ok(Signal::Hold); }
 
-        Ok(match (buys >= need, sells >= need) {
+        let buy_ratio  = buy_w  / total_w;
+        let sell_ratio = sell_w / total_w;
+
+        Ok(match (buy_ratio >= self.threshold_ratio, sell_ratio >= self.threshold_ratio) {
             (true, false) => Signal::Buy,
             (false, true) => Signal::Sell,
             _             => Signal::Hold,
