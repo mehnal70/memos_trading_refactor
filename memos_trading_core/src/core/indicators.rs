@@ -201,15 +201,32 @@ pub fn calculate_stochastic(candles: &[Candle], period: usize) -> StochasticOutp
     StochasticOutput { k_line, d_line }
 }
 
-/// ATR Serisi - Kopyalamasız (In-place) Gerçek Aralık süzgeci
+/// ATR Serisi — **Wilder Smoothed Moving Average (SMMA)** ile.
+/// TradingView/standart formül: ATR_0 = mean(TR[0..N]); ATR_i = (ATR_(i-1)*(N-1) + TR_i) / N.
+/// Çıktı uzunluğu candles.len() - period (her bar bir önceki kapanışa bağlı olduğundan TR=candles-1,
+/// SMMA seed periodun ilk N TR'sini yer; sonuç =`TR.len() - N + 1`).
 pub fn calculate_atr(candles: &[Candle], period: usize) -> Vec<f64> {
-    if candles.len() < 2 { return Vec::new(); }
+    if candles.len() < period + 1 || period == 0 { return Vec::new(); }
+
+    // 1) True Range serisi (bar #0 hariç; ilk TR bar #1'in TR'si)
     let mut trs = Vec::with_capacity(candles.len() - 1);
     for i in 1..candles.len() {
         trs.push(calculate_true_range(candles[i].high, candles[i].low, candles[i - 1].close));
     }
-    let dummy_candles: Vec<Candle> = trs.iter().map(|&tr| Candle { close: tr, ..Default::default() }).collect();
-    calculate_sma(&dummy_candles, period)
+
+    // 2) Wilder SMMA seed = ilk N TR'nin aritmetik ortalaması
+    let mut atr = trs.iter().take(period).sum::<f64>() / period as f64;
+    let mut out = Vec::with_capacity(trs.len() - period + 1);
+    out.push(atr);
+
+    // 3) Wilder smoothing: ATR_i = (ATR_(i-1) * (N-1) + TR_i) / N
+    let n_minus_1 = (period - 1) as f64;
+    let n = period as f64;
+    for &tr in trs.iter().skip(period) {
+        atr = (atr * n_minus_1 + tr) / n;
+        out.push(atr);
+    }
+    out
 }
 
 /// Keltner Kanalları Serisi - SMA ve ATR birleşik otobanı
@@ -229,27 +246,68 @@ pub fn calculate_keltner_channel(candles: &[Candle], period: usize, mult: f64) -
     KeltnerChannelOutput { upper, middle, lower }
 }
 
-/// Parabolic SAR Serisi - Otonom ivme çarpanı (`af`) takibi
+/// Parabolic SAR Serisi — Wilder'ın klasik algoritması.
+///
+/// Persistent trend rejimi (uptrend/downtrend). Her bar:
+/// 1. SAR_i = SAR_(i-1) + AF * (EP - SAR_(i-1))
+/// 2. EP yeni extreme'e ulaşırsa AF arttırılır (`+step`, `max` ile sınır).
+/// 3. Uptrend: SAR son 2 barın low'larını geçemez (clamp); aksi halde anlık reversal.
+/// 4. Downtrend: SAR son 2 barın high'larını altına inemez (clamp).
+/// 5. Trend reversal: uptrend'de SAR > current low → trend ⇒ downtrend, SAR ← EP,
+///    yeni EP ← current low, AF ← step. Downtrend'de simetrik.
+///
+/// `step` tipik 0.02, `max` 0.20.
 pub fn calculate_parabolic_sar(candles: &[Candle], step: f64, max: f64) -> Vec<f64> {
-    if candles.len() < 2 { return Vec::new(); }
-    let mut sar_vec = Vec::with_capacity(candles.len());
-    let mut sar = candles[0].low;
-    let mut ep = candles[0].high;
-    let mut af = step;
-    sar_vec.push(sar);
+    let n = candles.len();
+    if n < 2 { return Vec::new(); }
 
-    for i in 1..candles.len() {
-        let uptrend = candles[i].close > candles[i - 1].close;
+    let mut out = Vec::with_capacity(n);
+
+    // İlk barın trend yönünü ikinci bar ile karşılaştırarak seç (sıradan başlangıç heuristiği).
+    let mut uptrend = candles[1].close >= candles[0].close;
+    let (mut sar, mut ep) = if uptrend {
+        (candles[0].low, candles[0].high)
+    } else {
+        (candles[0].high, candles[0].low)
+    };
+    let mut af = step;
+    out.push(sar);
+
+    for i in 1..n {
+        // 1) Tentatif yeni SAR
+        let mut new_sar = sar + af * (ep - sar);
+
+        // 3-4) Son 2 barın aşırı uçlarını geçmesini engelle (clamp)
         if uptrend {
-            sar += af * (ep - sar);
-            if candles[i].high > ep { ep = candles[i].high; af = (af + step).min(max); }
+            let cap = if i >= 2 { candles[i - 1].low.min(candles[i - 2].low) } else { candles[i - 1].low };
+            new_sar = new_sar.min(cap);
         } else {
-            sar -= af * (sar - ep);
-            if candles[i].low < ep { ep = candles[i].low; af = (af + step).min(max); }
+            let cap = if i >= 2 { candles[i - 1].high.max(candles[i - 2].high) } else { candles[i - 1].high };
+            new_sar = new_sar.max(cap);
         }
-        sar_vec.push(sar);
+
+        // 5) Trend reversal kontrolü
+        let reverse = if uptrend { candles[i].low <= new_sar } else { candles[i].high >= new_sar };
+        if reverse {
+            uptrend = !uptrend;
+            new_sar = ep;
+            ep = if uptrend { candles[i].high } else { candles[i].low };
+            af = step;
+        } else {
+            // 2) EP güncellemesi + AF arttırımı (sadece yeni extreme görüldüğünde)
+            if uptrend && candles[i].high > ep {
+                ep = candles[i].high;
+                af = (af + step).min(max);
+            } else if !uptrend && candles[i].low < ep {
+                ep = candles[i].low;
+                af = (af + step).min(max);
+            }
+        }
+
+        sar = new_sar;
+        out.push(sar);
     }
-    sar_vec
+    out
 }
 
 /// Williams %R Serisi - Aşırı alım/satım dönüm noktaları
@@ -267,29 +325,72 @@ pub fn calculate_williams_r(candles: &[Candle], period: usize) -> Vec<f64> {
     wr_vec
 }
 
-/// ADX Serisi (+DI ve -DI dâhil yönlü hareket endeksi)
+/// ADX Serisi — Klasik Wilder algoritması (TradingView uyumlu).
+///
+/// 1. Her bar için TR, +DM, -DM hesaplanır.
+/// 2. Wilder SMMA(TR, period) = ATR; aynı şekilde +DM ve -DM smooth edilir.
+/// 3. +DI = 100 * +DM_smooth / ATR;  -DI = 100 * -DM_smooth / ATR.
+/// 4. DX = 100 * |+DI - -DI| / (+DI + -DI).
+/// 5. **ADX = Wilder SMMA(DX, period)** — son adımdaki bu smoothing,
+///    önceki sürümde eksikti (DX serisi ADX adıyla dönüyordu).
+///
+/// Çıktı uzunluğu yaklaşık `candles.len() - 2*period`; başlangıçta hem DI
+/// hem ADX seed'i için 2 ardışık SMMA penceresi tüketilir.
 pub fn calculate_adx(candles: &[Candle], period: usize) -> Vec<f64> {
-    if candles.len() < period + 1 { return Vec::new(); }
-    let mut dx_vec = Vec::with_capacity(candles.len() - period);
+    let n = candles.len();
+    if n < 2 * period + 1 || period == 0 { return Vec::new(); }
 
-    for i in period..candles.len() {
-        let slice = &candles[i - period..=i];
-        let mut tr_sum = 0.0;
-        let mut plus_dm = 0.0;
-        let mut minus_dm = 0.0;
-        for j in 1..slice.len() {
-            tr_sum += calculate_true_range(slice[j].high, slice[j].low, slice[j - 1].close);
-            let up_move = slice[j].high - slice[j - 1].high;
-            let down_move = slice[j - 1].low - slice[j].low;
-            if up_move > down_move && up_move > 0.0 { plus_dm += up_move; }
-            if down_move > up_move && down_move > 0.0 { minus_dm += down_move; }
-        }
-        if tr_sum == 0.0 { dx_vec.push(0.0); continue; }
-        let plus_di = 100.0 * (plus_dm / tr_sum);
-        let minus_di = 100.0 * (minus_dm / tr_sum);
-        dx_vec.push(100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).max(f64::EPSILON));
+    // 1) TR, +DM, -DM serileri (bar #0 hariç)
+    let len = n - 1;
+    let mut tr  = Vec::with_capacity(len);
+    let mut p_dm = Vec::with_capacity(len);
+    let mut m_dm = Vec::with_capacity(len);
+    for i in 1..n {
+        tr.push(calculate_true_range(candles[i].high, candles[i].low, candles[i - 1].close));
+        let up   = candles[i].high - candles[i - 1].high;
+        let down = candles[i - 1].low - candles[i].low;
+        p_dm.push(if up > down && up > 0.0 { up } else { 0.0 });
+        m_dm.push(if down > up && down > 0.0 { down } else { 0.0 });
     }
-    dx_vec
+
+    // 2) Wilder SMMA seed = ilk period elemanın ortalaması
+    let seed = |v: &[f64]| v.iter().take(period).sum::<f64>() / period as f64;
+    let mut s_tr  = seed(&tr);
+    let mut s_pdm = seed(&p_dm);
+    let mut s_mdm = seed(&m_dm);
+
+    // 3) Tüm bar'lar için smooth + DX hesabı
+    let n_minus_1 = (period - 1) as f64;
+    let n_p = period as f64;
+    let mut dx_series = Vec::with_capacity(len - period + 1);
+
+    // İlk seed barına karşılık gelen DX
+    let push_dx = |s_pdm: f64, s_mdm: f64, s_tr: f64, out: &mut Vec<f64>| {
+        let p_di = if s_tr > f64::EPSILON { 100.0 * s_pdm / s_tr } else { 0.0 };
+        let m_di = if s_tr > f64::EPSILON { 100.0 * s_mdm / s_tr } else { 0.0 };
+        let denom = (p_di + m_di).max(f64::EPSILON);
+        out.push(100.0 * (p_di - m_di).abs() / denom);
+    };
+    push_dx(s_pdm, s_mdm, s_tr, &mut dx_series);
+
+    // Sonraki barlar için Wilder smoothing devam
+    for i in period..len {
+        s_tr  = (s_tr  * n_minus_1 + tr[i])   / n_p;
+        s_pdm = (s_pdm * n_minus_1 + p_dm[i]) / n_p;
+        s_mdm = (s_mdm * n_minus_1 + m_dm[i]) / n_p;
+        push_dx(s_pdm, s_mdm, s_tr, &mut dx_series);
+    }
+
+    // 4) ADX = Wilder SMMA(DX, period) — son adım.
+    if dx_series.len() < period { return Vec::new(); }
+    let mut adx = dx_series.iter().take(period).sum::<f64>() / period as f64;
+    let mut adx_series = Vec::with_capacity(dx_series.len() - period + 1);
+    adx_series.push(adx);
+    for &dx in dx_series.iter().skip(period) {
+        adx = (adx * n_minus_1 + dx) / n_p;
+        adx_series.push(adx);
+    }
+    adx_series
 }
 
 /// Kümülatif VWAP Serisi - Hacim ağırlıklı ortalama fiyat çizgisi
@@ -309,8 +410,21 @@ pub fn calculate_ema_series(candles: &[Candle], period: usize) -> Vec<f64> {
     calculate_ema(candles, period)
 }
 
-/// Supertrend - ATR bazlı dinamik trend takip indikatörü.
-/// Çıktı: her bar için (trend, bant değeri). trend: +1 yukarı, -1 aşağı.
+/// Supertrend — ATR bazlı dinamik trend takip indikatörü (klasik path-dependent algoritma).
+///
+/// Her bar için iki temel bant:
+///   basic_upper = hl2 + multiplier * ATR
+///   basic_lower = hl2 - multiplier * ATR
+///
+/// Final bantlar path-dependent şekilde "carry over" yapar (yalnızca trend güçlenirse
+/// daralır, yoksa önceki seviyeyi korur):
+///   final_upper_i = if basic_upper_i < final_upper_(i-1) OR close_(i-1) > final_upper_(i-1)
+///                     then basic_upper_i else final_upper_(i-1)
+///   final_lower_i = if basic_lower_i > final_lower_(i-1) OR close_(i-1) < final_lower_(i-1)
+///                     then basic_lower_i else final_lower_(i-1)
+///
+/// Supertrend trend yön kararı: önceki barın supertrend bandı (upper mu lower mu) ve
+/// mevcut close'a göre flip eder. Çıktı: her bar için (trend: +1 yukarı / -1 aşağı, value: aktif bant).
 pub fn calculate_supertrend(candles: &[Candle], period: usize, multiplier: f64) -> Vec<SupertrendPoint> {
     let n = candles.len();
     if n < period + 1 { return Vec::new(); }
@@ -318,28 +432,48 @@ pub fn calculate_supertrend(candles: &[Candle], period: usize, multiplier: f64) 
     let atr = calculate_atr(candles, period);
     if atr.is_empty() { return Vec::new(); }
 
+    // ATR `period+1` barda başlar (TR uzunluğu n-1, smooth seed period eler).
     let offset = n - atr.len();
     let mut out: Vec<SupertrendPoint> = Vec::with_capacity(atr.len());
-    let mut prev_trend: i8 = 1;
-    let mut prev_value: f64 = candles[offset].close;
 
-    for (i, &a) in atr.iter().enumerate() {
-        let c = &candles[offset + i];
+    // İlk barda final bantları basic bantlara eşitle; trend close-vs-hl2 ile başlangıç.
+    let c0 = &candles[offset];
+    let hl2_0 = (c0.high + c0.low) / 2.0;
+    let mut final_upper = hl2_0 + multiplier * atr[0];
+    let mut final_lower = hl2_0 - multiplier * atr[0];
+    let mut prev_trend: i8 = if c0.close >= hl2_0 { 1 } else { -1 };
+    let mut prev_super = if prev_trend == 1 { final_lower } else { final_upper };
+    out.push(SupertrendPoint { trend: prev_trend, value: prev_super });
+
+    for k in 1..atr.len() {
+        let c     = &candles[offset + k];
+        let c_prev = &candles[offset + k - 1];
         let hl2 = (c.high + c.low) / 2.0;
-        let upper = hl2 + multiplier * a;
-        let lower = hl2 - multiplier * a;
+        let basic_upper = hl2 + multiplier * atr[k];
+        let basic_lower = hl2 - multiplier * atr[k];
 
-        let (trend, value) = if c.close > prev_value {
-            (1_i8, lower.max(prev_value))
-        } else if c.close < prev_value {
-            (-1_i8, upper.min(prev_value))
+        // Final bant carry-over: yalnızca daralma yönünde güncelle.
+        final_upper = if basic_upper < final_upper || c_prev.close > final_upper {
+            basic_upper
+        } else { final_upper };
+        final_lower = if basic_lower > final_lower || c_prev.close < final_lower {
+            basic_lower
+        } else { final_lower };
+
+        // Trend kararı: önceki bandın hangi taraf olduğuna ve close'un ona göre konumuna bağlı.
+        let (trend, value) = if prev_trend == 1 {
+            // Önceden uptrend (alt bant aktif); close alt bandın altına düşerse downtrend'e flip.
+            if c.close < final_lower { (-1_i8, final_upper) }
+            else                     { (1_i8,  final_lower) }
         } else {
-            (prev_trend, prev_value)
+            // Önceden downtrend (üst bant aktif); close üst bandın üstüne çıkarsa uptrend'e flip.
+            if c.close > final_upper { (1_i8,  final_lower) }
+            else                     { (-1_i8, final_upper) }
         };
 
         prev_trend = trend;
-        prev_value = value;
-        out.push(SupertrendPoint { trend, value });
+        prev_super = value;
+        out.push(SupertrendPoint { trend, value: prev_super });
     }
     out
 }
@@ -416,18 +550,39 @@ impl CoreIndicatorEngine {
         candles[start..].iter().map(|c| c.close).sum::<f64>() / period as f64
     }
 
-    /// Son barın RSI değerini, listeyi kopyalamadan referansla (Slicing) döner
+    /// Son barın RSI değerini Wilder SMMA ile döner — `calculate_rsi(...).last()` ile
+    /// **bit-bit aynı** sonucu üretir (series/fast-path tutarlılığı şart).
+    ///
+    /// Eski sürüm sadece son `period+1` bar üzerinden düz toplama yapıyordu; bu hem
+    /// Wilder smoothing'i atlıyordu hem de series-path ile farklı değer veriyordu.
     pub fn rsi(candles: &[Candle], period: usize) -> f64 {
         let n = candles.len();
-        if n <= period { return 50.0; }
-        let start = n.saturating_sub(period + 1);
-        let (mut gains, mut losses) = (0.0, 0.0);
-        for w in candles[start..].windows(2) {
-            let diff = w[1].close - w[0].close;
-            if diff > 0.0 { gains += diff; } else { losses -= diff.abs(); }
+        if n <= period || period == 0 { return 50.0; }
+
+        // 1) İlk `period` bar için Wilder SMMA seed (gain/loss aritmetik ortalaması).
+        let mut gains = 0.0;
+        let mut losses = 0.0;
+        for i in 1..=period {
+            let diff = candles[i].close - candles[i - 1].close;
+            if diff > 0.0 { gains += diff; } else { losses -= diff; }
         }
-        if losses == 0.0 { return 100.0; }
-        100.0 - (100.0 / (1.0 + (gains / losses)))
+        let mut avg_gain = gains / period as f64;
+        let mut avg_loss = losses / period as f64;
+
+        // 2) Sonraki barlar için Wilder smoothing:
+        //    avg = (prev_avg * (period - 1) + new) / period
+        let n_minus_1 = (period - 1) as f64;
+        let n_p = period as f64;
+        for i in (period + 1)..n {
+            let diff = candles[i].close - candles[i - 1].close;
+            let (g, l) = if diff > 0.0 { (diff, 0.0) } else { (0.0, -diff) };
+            avg_gain = (avg_gain * n_minus_1 + g) / n_p;
+            avg_loss = (avg_loss * n_minus_1 + l) / n_p;
+        }
+
+        if avg_loss == 0.0 { return 100.0; }
+        let rs = avg_gain / avg_loss;
+        100.0 - 100.0 / (1.0 + rs)
     }
 
     /// Machine Learning modelleri için anlık öznitelik (Feature) üreticisi
