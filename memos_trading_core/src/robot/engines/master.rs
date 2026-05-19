@@ -144,7 +144,7 @@ impl Engine {
     async fn spawn_infrastructure_fleet(state: Arc<Mutex<AppState>>) {
         log::info!("⚡ Srivastava Altyapı Filosu sevk ediliyor...");
         if let Ok(mut st) = state.lock() {
-            st.push_log("⚡ Altyapı filosu sevk edildi: snapshot(5s) · heartbeat(1s) · phase(2s) · price-poll(5s) · trigger(250ms) · scheduler(60s) · psync(30s) · ws-user-data · balance-sync(5dk)".into());
+            st.push_log("⚡ Altyapı filosu sevk edildi: snapshot(5s) · heartbeat-file(60s) · heartbeat(1s) · phase(2s) · price-poll(5s) · trigger(250ms) · scheduler(60s) · psync(30s) · ws-user-data · balance-sync(5dk)".into());
         }
 
         // ── Task 0: MissionControl snapshot yazıcısı — her 5 sn'de bir tam state'i
@@ -164,6 +164,25 @@ impl Engine {
             );
         } else if let Ok(mut st) = state.lock() {
             st.push_log("📤 Snapshot writer devre dışı (SNAPSHOT_WRITER_DISABLE)".into());
+        }
+
+        // ── Task 0b: Heartbeat yazıcısı — her dakika equity/açık/kapalı/anomali/faz
+        //    metriklerini logs/heartbeat.jsonl'e append'ler. RAM'deki "💓 Devriye"
+        //    logu uçunca post-mortem ve equity zaman serisi bu dosyadan replay edilir.
+        //    HEARTBEAT_WRITER_DISABLE=1 ise atlanır.
+        let heartbeat_disabled = std::env::var("HEARTBEAT_WRITER_DISABLE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !heartbeat_disabled {
+            let heartbeat_path = std::env::var("HEARTBEAT_PATH")
+                .unwrap_or_else(|_| "logs/heartbeat.jsonl".to_string());
+            let heartbeat_secs: u64 = std::env::var("HEARTBEAT_SECS")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(60).max(1);
+            crate::robot::infra::heartbeat_writer::spawn_heartbeat_writer(
+                Arc::clone(&state), heartbeat_path, heartbeat_secs,
+            );
+        } else if let Ok(mut st) = state.lock() {
+            st.push_log("💓 Heartbeat writer devre dışı (HEARTBEAT_WRITER_DISABLE)".into());
         }
 
         // ── Task 1: Heartbeat — her saniye main_loop step'ini canlı tut, overdue'ya bak.
