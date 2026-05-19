@@ -13,6 +13,11 @@ pub struct StochasticRsiStrategy;
 
 impl Strategy for StochasticRsiStrategy {
     fn name(&self) -> &str { "STOCHASTIC_RSI" }
+    /// **K-line ile D-line crossing** (snapshot değil) + OS/OB bölge filtresi.
+    ///   dipte (k < os) yukarı kesişim (prev k ≤ prev d, curr k > curr d) → Buy
+    ///   tepede (k > ob) aşağı kesişim (prev k ≥ prev d, curr k < curr d) → Sell
+    /// Eski sürümde sadece son bar koşullarına bakılıyordu → k > d kaldığı sürece
+    /// her bar Buy sinyali (flood).
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
         let rsi_period   = params.period.unwrap_or(14);
         let stoch_period = params.fast.unwrap_or(14);
@@ -22,14 +27,15 @@ impl Strategy for StochasticRsiStrategy {
         let os = params.oversold.unwrap_or(20.0);
 
         let out = calculate_stochastic_rsi(candles, rsi_period, stoch_period, smooth_k, smooth_d);
-        let k = out.k_line.last().copied();
-        let d = out.d_line.last().copied();
+        let kn = out.k_line.len();
+        let dn = out.d_line.len();
+        if kn < 2 || dn < 2 { return Ok(Signal::Hold); }
+        let (pk, ck) = (out.k_line[kn - 2], out.k_line[kn - 1]);
+        let (pd, cd) = (out.d_line[dn - 2], out.d_line[dn - 1]);
 
-        let raw = match (k, d) {
-            (Some(k), Some(d)) if k < os && k > d => Signal::Buy,   // dipte yukarı kesişim
-            (Some(k), Some(d)) if k > ob && k < d => Signal::Sell,  // tepede aşağı kesişim
-            _ => Signal::Hold,
-        };
+        let raw = if ck < os && pk <= pd && ck > cd      { Signal::Buy }
+                  else if ck > ob && pk >= pd && ck < cd { Signal::Sell }
+                  else { Signal::Hold };
         Ok(htf_trend_filter(raw, htf, 10, 30, "StochRSI"))
     }
 }

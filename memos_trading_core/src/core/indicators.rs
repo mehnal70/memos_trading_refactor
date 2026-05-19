@@ -23,6 +23,18 @@ impl MacdOutput {
         let h = self.histogram.last().copied().unwrap_or(m - s);
         Some((m, s, h))
     }
+
+    /// Son iki barın (macd, signal) değerlerini ((prev_m, prev_s), (curr_m, curr_s))
+    /// olarak döner — crossing tespiti için. En az 2 değer yoksa None.
+    pub fn last_two_lines(&self) -> Option<((f64, f64), (f64, f64))> {
+        let mn = self.macd_line.len();
+        let sn = self.signal_line.len();
+        if mn < 2 || sn < 2 { return None; }
+        Some((
+            (self.macd_line[mn - 2], self.signal_line[sn - 2]),
+            (self.macd_line[mn - 1], self.signal_line[sn - 1]),
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -62,13 +74,6 @@ pub struct StochasticRsiOutput {
 // =============================================================================
 // 2. ÇEKİRDEK PERFORMANS YARDIMCILARI (INTERNAL DRY MATH)
 // =============================================================================
-
-/// Verilen serinin ve aritmetik ortalamanın saf varyansını tek geçişte hesaplar
-#[inline]
-fn calculate_variance(values: &[f64], mean: f64) -> f64 {
-    if values.is_empty() { return 0.0; }
-    values.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64
-}
 
 /// Tek bir barın Gerçek Aralık (True Range) değerini mikro saniyede döndürür
 #[inline]
@@ -167,19 +172,50 @@ pub fn calculate_macd(candles: &[Candle], fast: usize, slow: usize, signal: usiz
     MacdOutput { macd_line, signal_line, histogram }
 }
 
-/// Bollinger Bantları Serisi - Tek seferlik yerleşik varyans hasadı
+/// Bollinger Bantları Serisi — **rolling sum / sum-of-squares** (O(n) total).
+/// Eski sürüm her bar için varyansı baştan hesaplıyordu (O(n·period)); küçük
+/// uzunluklarda fark yok ama uzun candle dizilerinde belirgin gereksiz iş.
+///
+/// Sayısal kararlılık: kapanış fiyatları için tipik bar uzunluklarında (period
+/// 20-50, fiyat seviyesi 1e0-1e6 USDT) `sum_x2 - sum_x²/N` catastrophic
+/// cancellation üretmeyecek kadar yumuşak; risk olduğu yerlerde Welford'a
+/// kayılabilir.
 pub fn calculate_bollinger(candles: &[Candle], period: usize, mult: f64) -> BollingerBandsOutput {
-    let middle = calculate_sma(candles, period);
-    let mut upper = Vec::with_capacity(middle.len());
-    let mut lower = Vec::with_capacity(middle.len());
-    let start_idx = candles.len() - middle.len();
+    let n = candles.len();
+    if n < period || period == 0 {
+        return BollingerBandsOutput::default();
+    }
 
-    for (i, &m) in middle.iter().enumerate() {
-        let current_start = start_idx + i;
-        let window: Vec<f64> = candles[current_start..current_start + period].iter().map(|c| c.close).collect();
-        let std_dev = calculate_variance(&window, m).sqrt();
-        upper.push(m + mult * std_dev);
-        lower.push(m - mult * std_dev);
+    let out_len = n - period + 1;
+    let mut middle = Vec::with_capacity(out_len);
+    let mut upper  = Vec::with_capacity(out_len);
+    let mut lower  = Vec::with_capacity(out_len);
+
+    // İlk pencere
+    let mut sum_x:  f64 = candles[..period].iter().map(|c| c.close).sum();
+    let mut sum_x2: f64 = candles[..period].iter().map(|c| c.close * c.close).sum();
+    let p_f = period as f64;
+
+    let push_band = |sum_x: f64, sum_x2: f64,
+                     middle: &mut Vec<f64>, upper: &mut Vec<f64>, lower: &mut Vec<f64>| {
+        let mean = sum_x / p_f;
+        // E[x²] - E[x]² (popülasyon varyansı — Bollinger geleneksel olarak böyle).
+        // Sayısal taban: küçük artıkları sıfıra clamp et.
+        let var = ((sum_x2 / p_f) - mean * mean).max(0.0);
+        let sd  = var.sqrt();
+        middle.push(mean);
+        upper.push(mean + mult * sd);
+        lower.push(mean - mult * sd);
+    };
+    push_band(sum_x, sum_x2, &mut middle, &mut upper, &mut lower);
+
+    // Rolling: yeni eleman in, eski eleman out
+    for i in period..n {
+        let in_c  = candles[i].close;
+        let out_c = candles[i - period].close;
+        sum_x  += in_c - out_c;
+        sum_x2 += in_c * in_c - out_c * out_c;
+        push_band(sum_x, sum_x2, &mut middle, &mut upper, &mut lower);
     }
     BollingerBandsOutput { upper, middle, lower }
 }

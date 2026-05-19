@@ -33,13 +33,20 @@ fn get_swing_levels(slice: &[Candle]) -> (f64, f64) {
 pub struct RsiStrategy;
 impl Strategy for RsiStrategy {
     fn name(&self) -> &str { "RSI" }
+    /// RSI **crossing** sinyali: aşırı alım/satıma yeni *giriş* anı.
+    ///   prev ≤ ob && curr > ob → Sell (yeni overbought)
+    ///   prev ≥ os && curr < os → Buy  (yeni oversold)
+    /// Bölge içinde kalmaya devam ettiği sürece Hold — sinyal flood'u engellenir.
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
         let rsi_series = calculate_rsi(candles, params.period.unwrap_or(14));
-        let raw = match rsi_series.last().copied() {
-            Some(v) if v > params.overbought.unwrap_or(70.0) => Signal::Sell,
-            Some(v) if v < params.oversold.unwrap_or(30.0)   => Signal::Buy,
-            _ => Signal::Hold,
-        };
+        let n = rsi_series.len();
+        if n < 2 { return Ok(Signal::Hold); }
+        let ob = params.overbought.unwrap_or(70.0);
+        let os = params.oversold.unwrap_or(30.0);
+        let (prev, curr) = (rsi_series[n - 2], rsi_series[n - 1]);
+        let raw = if prev <= ob && curr > ob { Signal::Sell }
+                  else if prev >= os && curr < os { Signal::Buy }
+                  else { Signal::Hold };
         finalize(raw, htf, "RSI")
     }
 }
@@ -47,6 +54,10 @@ impl Strategy for RsiStrategy {
 pub struct MacdStrategy;
 impl Strategy for MacdStrategy {
     fn name(&self) -> &str { "MACD" }
+    /// MACD **crossing** sinyali: macd çizgisinin signal çizgisini kestiği bar.
+    ///   prev m ≤ prev s && curr m > curr s → Buy (yukarı kesişim)
+    ///   prev m ≥ prev s && curr m < curr s → Sell (aşağı kesişim)
+    /// Çizgiler arasında sürekli pozitif/negatif farkta Hold — flood engellenir.
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
         let out = calculate_macd(
             candles,
@@ -54,9 +65,9 @@ impl Strategy for MacdStrategy {
             params.slow.unwrap_or(26),
             params.signal_period.unwrap_or(9),
         );
-        let raw = match out.last_lines() {
-            Some((m, s, _)) if m > s => Signal::Buy,
-            Some((m, s, _)) if m < s => Signal::Sell,
+        let raw = match out.last_two_lines() {
+            Some(((pm, ps), (cm, cs))) if pm <= ps && cm > cs => Signal::Buy,
+            Some(((pm, ps), (cm, cs))) if pm >= ps && cm < cs => Signal::Sell,
             _ => Signal::Hold,
         };
         finalize(raw, htf, "MACD")
@@ -80,21 +91,32 @@ impl Strategy for SupertrendStrategy {
 pub struct PriceActionStrategy;
 impl Strategy for PriceActionStrategy {
     fn name(&self) -> &str { "PRICE_ACTION" }
+    /// Engulfing / pin-bar tespiti — doji koruması ile.
+    /// Doji: prev_body < prev_range * 0.1 → engulfing tespiti devre dışı
+    /// (eski sürümde p_body=0 her c_body > 0'ı engulfing sayıyordu).
     fn generate_signal(&self, candles: &[Candle], _: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
         let n = candles.len();
         if n < 3 { return Ok(Signal::Hold); }
         let (prev, curr) = (&candles[n-2], &candles[n-1]);
-        
+
         let p_body = (prev.close - prev.open).abs();
         let c_body = (curr.close - curr.open).abs();
         let c_upper = curr.high - curr.close.max(curr.open);
         let c_lower = curr.close.min(curr.open) - curr.low;
 
+        // Doji eşiği: prev range'in %10'undan küçük gövde → "gerçek mum değil",
+        // engulfing tespiti güvenilir değil.
+        let p_range = (prev.high - prev.low).max(1e-12);
+        let prev_is_doji = p_body < p_range * 0.10;
+
         let raw = match () {
-            _ if prev.close < prev.open && curr.close > curr.open && c_body > p_body * 1.1 => Signal::Buy,
-            _ if prev.close > prev.open && curr.close < curr.open && c_body > p_body * 1.1 => Signal::Sell,
-            _ if c_lower >= c_body * 2.0 && c_upper < c_body * 0.5 => Signal::Buy,
-            _ if c_upper >= c_body * 2.0 && c_lower < c_body * 0.5 => Signal::Sell,
+            _ if !prev_is_doji && prev.close < prev.open && curr.close > curr.open
+                 && c_body > p_body * 1.1 => Signal::Buy,
+            _ if !prev_is_doji && prev.close > prev.open && curr.close < curr.open
+                 && c_body > p_body * 1.1 => Signal::Sell,
+            // Pin bar (alt/üst gölge baskın) — prev doji olsa da geçerli (curr-only)
+            _ if c_body > 1e-12 && c_lower >= c_body * 2.0 && c_upper < c_body * 0.5 => Signal::Buy,
+            _ if c_body > 1e-12 && c_upper >= c_body * 2.0 && c_lower < c_body * 0.5 => Signal::Sell,
             _ => Signal::Hold,
         };
         finalize(raw, htf, "PriceAction")

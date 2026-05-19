@@ -1,7 +1,12 @@
 // robot/strategies/volatility.rs - Volatilite / kanal bazlı stratejiler
 //
-// Bollinger Bands: ortalama ± std_dev*σ bantlarından dışarı çıkış sinyali.
-// Donchian Channel: son N barın en yüksek/en düşük seviyesinden kırılım.
+// Bollinger Bands: **mean-reversion** sinyali — close alt banda değdiğinde Buy
+//                  (yukarı dönüş beklentisi), üst banda değdiğinde Sell. Bu
+//                  klasik "BB squeeze breakout" stratejisi DEĞİL; o aksini söyler
+//                  (band dışına çıkış → trend takibi). Gerek olursa ayrı bir
+//                  BollingerBreakoutStrategy eklenir.
+// Donchian Channel: son N barın en yüksek/en düşük seviyesinden **breakout**
+//                  sinyali (turtle-style).
 
 use crate::core::indicators::calculate_bollinger;
 use crate::core::types::{Candle, Signal, StrategyParams, FundingRatePoint};
