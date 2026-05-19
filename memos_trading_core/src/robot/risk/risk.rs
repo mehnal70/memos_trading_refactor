@@ -60,7 +60,11 @@ pub struct TradeSignal {
 }
 
 impl TradeSignal {
-    /// Yeni sinyal oluştur - Zero-Panic yaklaşımı
+    /// Yeni sinyal oluştur — action'a göre yönlü SL/TP.
+    ///
+    /// - `Buy`  (LONG):  SL = entry * (1 - sl%);  TP = entry * (1 + tp%)
+    /// - `Sell` (SHORT): SL = entry * (1 + sl%);  TP = entry * (1 - tp%)
+    /// - `Hold`:         SL/TP entry'ye eşitlenir (anlamsız ama panic'siz).
     pub fn new(
         entry_price: f64,
         timestamp: i64,
@@ -69,12 +73,20 @@ impl TradeSignal {
     ) -> Self {
         // Matematiksel kontroller: Sıfır fiyat durumunda çökme önlenir
         let entry = entry_price.max(f64::EPSILON);
-        
+        let sl_factor = risk.stop_loss_pct / 100.0;
+        let tp_factor = risk.take_profit_pct / 100.0;
+
+        let (stop_loss, take_profit) = match action {
+            TradeAction::Buy  => (entry * (1.0 - sl_factor), entry * (1.0 + tp_factor)),
+            TradeAction::Sell => (entry * (1.0 + sl_factor), entry * (1.0 - tp_factor)),
+            TradeAction::Hold => (entry, entry),
+        };
+
         TradeSignal {
             action,
             entry_price: entry,
-            stop_loss: entry * (1.0 - risk.stop_loss_pct / 100.0),
-            take_profit: entry * (1.0 + risk.take_profit_pct / 100.0),
+            stop_loss,
+            take_profit,
             timestamp,
         }
     }
@@ -83,20 +95,33 @@ impl TradeSignal {
     pub fn calculate_position_size(&self, capital: f64, risk: &RiskParams) -> f64 {
         let max_allowed_capital = risk.max_position_size_pct
             .map_or(capital, |pct| capital * (pct / 100.0));
-        
+
         max_allowed_capital / self.entry_price
     }
 
-    /// Net Kâr/Zarar (PnL)
+    /// Net Kâr/Zarar (PnL) — action yönünü dikkate alır.
+    /// LONG: (exit - entry) * qty;  SHORT: (entry - exit) * qty.
     #[inline]
     pub fn calculate_pnl(&self, exit_price: f64, quantity: f64) -> f64 {
-        (exit_price - self.entry_price) * quantity
+        let diff = match self.action {
+            TradeAction::Buy  => exit_price - self.entry_price,
+            TradeAction::Sell => self.entry_price - exit_price,
+            TradeAction::Hold => 0.0,
+        };
+        diff * quantity
     }
 
-    /// Yüzdesel PnL
+    /// Yüzdesel PnL — action yönünü dikkate alır.
+    /// LONG: (exit/entry - 1) * 100;  SHORT: (entry/exit - 1) * 100.
     #[inline]
     pub fn calculate_pnl_pct(&self, exit_price: f64) -> f64 {
-        ((exit_price / self.entry_price) - 1.0) * 100.0
+        let entry = self.entry_price.max(f64::EPSILON);
+        let exit  = exit_price.max(f64::EPSILON);
+        match self.action {
+            TradeAction::Buy  => ((exit / entry) - 1.0) * 100.0,
+            TradeAction::Sell => ((entry / exit) - 1.0) * 100.0,
+            TradeAction::Hold => 0.0,
+        }
     }
 }
 

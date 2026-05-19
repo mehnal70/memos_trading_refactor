@@ -57,7 +57,8 @@ async fn rejected_futures_event_logs_warning() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn expired_event_logs_with_clock_emoji() {
+async fn expired_event_logs_with_warning_prefix() {
+    // EXPIRED → push_alert(Severity::Warning) → log mesajı ⚠️ prefix'i taşır.
     let state = fresh_state();
     let raw = r#"{
         "e":"executionReport","s":"BNBUSDT","X":"EXPIRED","S":"BUY",
@@ -67,9 +68,9 @@ async fn expired_event_logs_with_clock_emoji() {
 
     let st = state.lock().unwrap();
     let saw = st.guardian.log.iter().any(|l|
-        l.contains("[WS-EXPIRED]") && l.contains("BNBUSDT") && l.contains("⏰")
+        l.contains("[WS-EXPIRED]") && l.contains("BNBUSDT") && l.contains("⚠️")
     );
-    assert!(saw, "EXPIRED log ⏰ ile atılmalı; mevcut: {:?}", st.guardian.log);
+    assert!(saw, "EXPIRED log ⚠️ Warning prefix'i taşımalı; mevcut: {:?}", st.guardian.log);
 }
 
 #[tokio::test(flavor = "current_thread")]

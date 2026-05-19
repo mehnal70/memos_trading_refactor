@@ -1259,12 +1259,19 @@ impl Engine {
                         }
                         return;
                     }
-                    let authorized = risk_manager.authorize(&signal, snap);
-                    if !authorized {
+                    // Risk otorizasyonu: RiskGate + Kelly + VaR. Notional yaklaşımı:
+                    // mevcut equity'nin %10'u (tek emir notional tavanı RiskGatePolicy ile
+                    // ayrıca clamp'lenir). Daha hassas notional açılış formülünden gelmeli.
+                    let req_notional = snap.finance.total_equity * 0.10;
+                    let decision = risk_manager.authorize(&signal, snap, edge, req_notional);
+                    if let crate::robot::risk::risk_gate::RiskDecision::Deny { reasons, enter_safe_mode, halt } = decision {
                         if let Ok(mut st) = state.lock() {
+                            let mode = if halt { "HALT" }
+                                else if enter_safe_mode { "SAFE-MODE" }
+                                else { "DENY" };
                             st.push_log(format!(
-                                "🛡️ {} {} edge={:.2} ✓ ama RiskManager VETO etti (Guardrails/Kelly/Gate/VaR)",
-                                symbol, signal_label, edge,
+                                "🛡️ {} {} edge={:.2} ✓ ama RiskManager [{}]: {}",
+                                symbol, signal_label, edge, mode, reasons.join(" · "),
                             ));
                         }
                         return;
