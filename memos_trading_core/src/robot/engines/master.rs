@@ -144,7 +144,26 @@ impl Engine {
     async fn spawn_infrastructure_fleet(state: Arc<Mutex<AppState>>) {
         log::info!("⚡ Srivastava Altyapı Filosu sevk ediliyor...");
         if let Ok(mut st) = state.lock() {
-            st.push_log("⚡ Altyapı filosu sevk edildi: heartbeat(1s) · phase(2s) · price-poll(5s) · trigger(250ms) · scheduler(60s) · psync(30s) · ws-user-data · balance-sync(5dk)".into());
+            st.push_log("⚡ Altyapı filosu sevk edildi: snapshot(5s) · heartbeat(1s) · phase(2s) · price-poll(5s) · trigger(250ms) · scheduler(60s) · psync(30s) · ws-user-data · balance-sync(5dk)".into());
+        }
+
+        // ── Task 0: MissionControl snapshot yazıcısı — her 5 sn'de bir tam state'i
+        //    data/mission_control.json'a atomik (tmp+rename) yazar. Headless mod ve
+        //    Android/web istemcileri tek gerçek kaynak olarak bu dosyayı okur.
+        //    SNAPSHOT_WRITER_DISABLE=1 ise atlanır.
+        let snapshot_disabled = std::env::var("SNAPSHOT_WRITER_DISABLE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !snapshot_disabled {
+            let snapshot_path = std::env::var("MISSION_CONTROL_SNAPSHOT_PATH")
+                .unwrap_or_else(|_| "data/mission_control.json".to_string());
+            let snapshot_secs: u64 = std::env::var("MISSION_CONTROL_SNAPSHOT_SECS")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(5).max(1);
+            crate::robot::infra::snapshot_writer::spawn_snapshot_writer(
+                Arc::clone(&state), snapshot_path, snapshot_secs,
+            );
+        } else if let Ok(mut st) = state.lock() {
+            st.push_log("📤 Snapshot writer devre dışı (SNAPSHOT_WRITER_DISABLE)".into());
         }
 
         // ── Task 1: Heartbeat — her saniye main_loop step'ini canlı tut, overdue'ya bak.
