@@ -613,6 +613,20 @@ impl Engine {
         // %1+ fark → repair_log + uyarı (bot ↔ borsa para sayımı ayrışmış).
         // Senkron için BALANCE_SYNC_EVERY_SECS env'i ile aralık ayarlanabilir.
         Self::spawn_balance_sync(Arc::clone(&state));
+
+        // ── Task 9: Daily/weekly trade summary raporu (mode-agnostik).
+        //
+        // closed_trades üzerinden o günün ve haftanın özetini her 5 dk yeniden
+        // hesaplayıp data/reports/ altına atomik JSON olarak yazar. Geçmiş raporlar
+        // dokunulmaz (dosya adı tarih/hafta bazlı). Paper & Live ortak çalışır.
+        // TRADE_REPORT_DIR ve TRADE_REPORT_EVERY_SECS env'leri ayarı geçer.
+        let reports_dir = std::env::var("TRADE_REPORT_DIR")
+            .unwrap_or_else(|_| "data/reports".to_owned());
+        let report_every = std::env::var("TRADE_REPORT_EVERY_SECS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+        crate::robot::infra::reporting::trade_summary::spawn_trade_summary(
+            Arc::clone(&state), reports_dir, report_every,
+        );
     }
 
     /// 💰 Periyodik hesap bakiye senkronu — Live mode için.
