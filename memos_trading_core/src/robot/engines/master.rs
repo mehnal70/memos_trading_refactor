@@ -683,13 +683,17 @@ impl Engine {
                             // Eşik aşıldı → mismatch sayacı bir artar
                             consecutive_mismatch = consecutive_mismatch.saturating_add(1);
 
-                            // Önce uyarı log'u
+                            // Önce uyarı log'u + Telegram (BALANCE-MISMATCH key ile throttle)
                             if let Ok(mut st) = state.lock() {
-                                st.push_log(format!(
-                                    "⚠️ [BALANCE-MISMATCH] borsa=${:.2} local=${:.2} fark=${:.2} ({:.2}%) > {:.2}% (gözlem #{} / {})",
-                                    exchange_balance, local_equity, diff, pct, mismatch_pct_threshold,
-                                    consecutive_mismatch, autofix_after_n,
-                                ));
+                                st.push_alert(
+                                    "BALANCE-MISMATCH",
+                                    crate::robot::infra::telegram_notifier::Severity::Warning,
+                                    format!(
+                                        "[BALANCE-MISMATCH] borsa=${:.2} local=${:.2} fark=${:.2} ({:.2}%) > {:.2}% (gözlem #{} / {})",
+                                        exchange_balance, local_equity, diff, pct, mismatch_pct_threshold,
+                                        consecutive_mismatch, autofix_after_n,
+                                    ),
+                                );
                                 st.guardian.repair_log.push_back(format!(
                                     "[{}] mismatch obs#{}: exchange=${:.2} local=${:.2} ({:.2}%)",
                                     chrono::Local::now().format("%H:%M:%S"),
@@ -709,10 +713,14 @@ impl Engine {
                                     if exchange_balance > st.finance.peak_equity {
                                         st.finance.peak_equity = exchange_balance;
                                     }
-                                    st.push_log(format!(
-                                        "🩹 [BALANCE-AUTOFIX] {} ardışık mismatch sonrası onarım: ${:.2} → ${:.2} (Δ={:+.2})",
-                                        consecutive_mismatch, old_equity, exchange_balance, delta,
-                                    ));
+                                    st.push_alert(
+                                        "BALANCE-AUTOFIX",
+                                        crate::robot::infra::telegram_notifier::Severity::Critical,
+                                        format!(
+                                            "[BALANCE-AUTOFIX] {} ardışık mismatch sonrası onarım: ${:.2} → ${:.2} (Δ={:+.2})",
+                                            consecutive_mismatch, old_equity, exchange_balance, delta,
+                                        ),
+                                    );
                                     st.guardian.repair_log.push_back(format!(
                                         "[{}] AUTOFIX: equity ${:.2} → ${:.2} (Δ={:+.2})",
                                         chrono::Local::now().format("%H:%M:%S"),
@@ -803,9 +811,14 @@ impl Engine {
                     Ok(p) => p,
                     Err(e) => {
                         if let Ok(mut st) = state.lock() {
-                            st.push_log(format!(
-                                "🛰️ WS connect hatası: {:?} (backoff={}s)", e, backoff_secs,
-                            ));
+                            st.push_alert(
+                                "WS-CONNECT-FAIL",
+                                crate::robot::infra::telegram_notifier::Severity::Warning,
+                                format!(
+                                    "[WS-CONNECT-FAIL] userDataStream bağlanılamadı: {:?} (backoff={}s)",
+                                    e, backoff_secs,
+                                ),
+                            );
                         }
                         sleep(Duration::from_secs(backoff_secs)).await;
                         backoff_secs = (backoff_secs * 2).min(60);
@@ -942,7 +955,6 @@ impl Engine {
         reject_reason: &str,
     ) {
         if symbol.is_empty() { return; }
-        let emoji = if status == "REJECTED" { "🛑" } else { "⏰" };
         // Spot'ta `r="NONE"` gelirse sebep yok demektir. Boş veya NONE olan değeri gizle.
         let reason_part = if reject_reason.is_empty() || reject_reason == "NONE" {
             String::new()
@@ -953,10 +965,21 @@ impl Engine {
         let id_part = if order_id.is_empty() { String::new() } else { format!(" order={}", order_id) };
 
         if let Ok(mut st) = state.lock() {
-            st.push_log(format!(
-                "{} [WS-{}] {}{} qty={:.4}{}{}",
-                emoji, status, symbol, side_part, orig_qty, id_part, reason_part,
-            ));
+            // Telegram: REJECTED → Critical, EXPIRED → Warning. Throttle key sembol+status.
+            let severity = if status == "REJECTED" {
+                crate::robot::infra::telegram_notifier::Severity::Critical
+            } else {
+                crate::robot::infra::telegram_notifier::Severity::Warning
+            };
+            let key = format!("WS-{}-{}", status, symbol);
+            st.push_alert(
+                &key,
+                severity,
+                format!(
+                    "[WS-{}] {}{} qty={:.4}{}{}",
+                    status, symbol, side_part, orig_qty, id_part, reason_part,
+                ),
+            );
             st.guardian.repair_log.push_back(format!(
                 "[{}] {}: {}{} qty={:.4}{}{}",
                 chrono::Local::now().format("%H:%M:%S"),
@@ -1516,10 +1539,14 @@ impl Engine {
                         // Kritik uyarı: SL emri başarısızsa pozisyon korumasız — emergency.
                         if sl_res.is_err() {
                             if let Ok(mut st2) = state.lock() {
-                                st2.push_log(format!(
-                                    "🚨 [LIVE-EMERGENCY] {} SL emri verilemedi → pozisyon acil kapatılıyor",
-                                    symbol,
-                                ));
+                                st2.push_alert(
+                                    "LIVE-EMERGENCY",
+                                    crate::robot::infra::telegram_notifier::Severity::Critical,
+                                    format!(
+                                        "[LIVE-EMERGENCY] {} SL emri verilemedi → pozisyon acil kapatılıyor",
+                                        symbol,
+                                    ),
+                                );
                                 st2.guardian.repair_log.push_back(format!(
                                     "[{}] live SL hatası: {} emergency close",
                                     chrono::Local::now().format("%H:%M:%S"), symbol,

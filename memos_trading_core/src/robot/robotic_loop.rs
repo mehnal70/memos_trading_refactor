@@ -178,6 +178,10 @@ pub struct AppState {
     /// default $100. RiskGate'in üstünde bir bariyer.
     pub live_max_notional_usd: f64,
 
+    /// 📣 Telegram push kanalı (kritik olaylar için). TELEGRAM_BOT_TOKEN +
+    /// TELEGRAM_CHAT_ID set değilse None — kod sessizce çalışmaya devam eder.
+    pub notifier: Option<Arc<crate::robot::infra::telegram_notifier::TelegramNotifier>>,
+
     // Global Durdurma Sinyalleri
     pub app_stop_signal: Arc<AtomicBool>,
     pub pause_signal: Arc<AtomicBool>,
@@ -308,6 +312,16 @@ impl AppState {
         let live_max_notional_usd = std::env::var("LIVE_MAX_NOTIONAL_USD")
             .ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(100.0).max(0.0);
 
+        // 📣 Telegram notifier — TELEGRAM_BOT_TOKEN+TELEGRAM_CHAT_ID set ise kurulur.
+        // None: push devre dışı; tg_notify! sessizce geçer.
+        let notifier = crate::robot::infra::telegram_notifier::TelegramNotifier::from_env()
+            .map(Arc::new);
+        if notifier.is_some() {
+            log::info!(target:"STATE_INIT", "📣 Telegram notifier aktif (TELEGRAM_BOT_TOKEN/CHAT_ID set)");
+        } else {
+            log::info!(target:"STATE_INIT", "📣 Telegram notifier devre dışı (env yok)");
+        }
+
         Self {
             config,
             finance,
@@ -317,8 +331,25 @@ impl AppState {
             live_executor,
             live_dry_run,
             live_max_notional_usd,
+            notifier,
             app_stop_signal: stop_sig,
             pause_signal: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Hem `push_log`'a yazar hem (notifier varsa) Telegram'a yollar.
+    /// `key`: throttle anahtarı (örn. "BALANCE-AUTOFIX"). Aynı key cooldown
+    /// süresince tekrar yollanmaz; UI log'una her zaman düşer.
+    pub fn push_alert(
+        &mut self,
+        key: &str,
+        severity: crate::robot::infra::telegram_notifier::Severity,
+        msg: String,
+    ) {
+        let formatted = crate::robot::infra::telegram_notifier::format_message(severity, &msg);
+        self.push_log(formatted);
+        if let Some(n) = self.notifier.as_ref() {
+            n.notify(key, severity, &msg);
         }
     }
 

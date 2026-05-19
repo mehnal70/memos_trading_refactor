@@ -262,7 +262,7 @@ pub fn spawn_trade_summary(
                 errors.push(format!("weekly: {:?}", e));
             }
 
-            // İlk tick'te başlama log'u; sonra sadece hata varsa
+            // İlk tick'te başlama log'u; sonra sadece hata varsa (Telegram'a da yolla)
             if tick == 0 {
                 if let Ok(mut st) = state.lock() {
                     if errors.is_empty() {
@@ -271,15 +271,20 @@ pub fn spawn_trade_summary(
                             reports_dir, interval_secs,
                         ));
                     } else {
-                        st.push_log(format!(
-                            "⚠️ Trade summary yazma hatası: {}",
-                            errors.join(" · "),
-                        ));
+                        st.push_alert(
+                            "TRADE-SUMMARY-IO",
+                            crate::robot::infra::telegram_notifier::Severity::Warning,
+                            format!("[TRADE-SUMMARY-IO] yazma hatası: {}", errors.join(" · ")),
+                        );
                     }
                 }
             } else if !errors.is_empty() {
                 if let Ok(mut st) = state.lock() {
-                    st.push_log(format!("⚠️ Trade summary: {}", errors.join(" · ")));
+                    st.push_alert(
+                        "TRADE-SUMMARY-IO",
+                        crate::robot::infra::telegram_notifier::Severity::Warning,
+                        format!("[TRADE-SUMMARY-IO] {}", errors.join(" · ")),
+                    );
                 }
             }
 
