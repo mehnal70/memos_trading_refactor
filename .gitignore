@@ -28,3 +28,6 @@ Thumbs.db
 liste.txt
 src_rs_files.txt
 Cargo_v1.toml
+git_tokens.txt
+ssh_key
+ssh_key.pub
