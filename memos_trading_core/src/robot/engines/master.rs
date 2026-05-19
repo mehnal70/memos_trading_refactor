@@ -1228,7 +1228,15 @@ impl Engine {
 
             let signal = match strategy.generate_signal(&candles, &strat_params, None, None) {
                 Ok(s) => s,
-                Err(_) => return,
+                Err(e) => {
+                    if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
+                        let ev = crate::robot::infra::logger::TradeEvent::error(
+                            &format!("{} sinyal üretim hatası: {:?}", symbol, e),
+                        );
+                        let _ = logger.log_event(&ev);
+                    }
+                    return;
+                }
             };
 
             // 4) Edge skoru: momentum + ML confidence uyumu. Yön uyuşmazsa edge düşer.
@@ -1243,6 +1251,14 @@ impl Engine {
             let signal_label = match signal {
                 Signal::Buy => "BUY", Signal::Sell => "SELL", Signal::Hold => "HOLD",
             };
+
+            // SIGNAL eventi: yalnız Buy/Sell için logla (HOLD spam yapmasın).
+            if matches!(signal, Signal::Buy | Signal::Sell) {
+                if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
+                    let ev = crate::robot::infra::logger::TradeEvent::signal(symbol, signal, live_price);
+                    let _ = logger.log_event(&ev);
+                }
+            }
 
             match (signal, has_position) {
                 // Pozisyon yokken: yalnız yüksek edge'de açılış denenir.
@@ -1265,14 +1281,21 @@ impl Engine {
                     let req_notional = snap.finance.total_equity * 0.10;
                     let decision = risk_manager.authorize(&signal, snap, edge, req_notional);
                     if let crate::robot::risk::risk_gate::RiskDecision::Deny { reasons, enter_safe_mode, halt } = decision {
+                        let mode = if halt { "HALT" }
+                            else if enter_safe_mode { "SAFE-MODE" }
+                            else { "DENY" };
+                        let block_reason = format!("[{}] {}", mode, reasons.join(" · "));
                         if let Ok(mut st) = state.lock() {
-                            let mode = if halt { "HALT" }
-                                else if enter_safe_mode { "SAFE-MODE" }
-                                else { "DENY" };
                             st.push_log(format!(
                                 "🛡️ {} {} edge={:.2} ✓ ama RiskManager [{}]: {}",
                                 symbol, signal_label, edge, mode, reasons.join(" · "),
                             ));
+                        }
+                        if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
+                            let ev = crate::robot::infra::logger::TradeEvent::risk_block(
+                                &block_reason, symbol,
+                            );
+                            let _ = logger.log_event(&ev);
                         }
                         return;
                     }
@@ -1617,6 +1640,17 @@ impl Engine {
             kelly_fraction, risk_appetite, ml_conf, tp_pct, sl_pct,
             regime.as_str(), strategy_name,
         ));
+        // 📝 Periyodik dosya logu: TRADE_OPEN. Logger Arc'ını lock altında clone'la,
+        // unlock sonrası IO yap.
+        let logger_for_event = st.trading_logger.clone();
+        let equity_now = st.finance.equity;
+        drop(st);
+        if let Some(logger) = logger_for_event {
+            let ev = crate::robot::infra::logger::TradeEvent::trade_open(
+                symbol, &strategy_name, is_long, entry, qty_val, equity_now,
+            );
+            let _ = logger.log_event(&ev);
+        }
         let _ = live_order_id; // ileride pos_id ↔ order_id eşlemesi için saklanabilir
     }
 
@@ -1999,7 +2033,22 @@ impl Engine {
                 }
             }
 
+            // 📝 Periyodik dosya logu: TRADE_CLOSE. Logger Arc'ını clone'la, IO için
+            // mutex'i bırakmadan önce gerekli alanları kopyala.
+            let logger_for_event = st.trading_logger.clone();
+            let equity_now = st.finance.equity;
+            let strategy_name = st.brain.live_strategy.read()
+                .map(|s| s.clone()).unwrap_or_else(|_| "?".to_string());
+
             drop(st); // Q-Table alt işçisi çağrılmadan önce ana kilit tamamen imha edilir (Fail-Safe)
+
+            if let Some(logger) = logger_for_event {
+                let ev = crate::robot::infra::logger::TradeEvent::trade_close(
+                    symbol, &strategy_name, pos.is_long, exit_price, pos.qty,
+                    pnl_val, equity_now, reason.as_str(),
+                );
+                let _ = logger.log_event(&ev);
+            }
             Self::update_cognitive_memory(state, &closed_trade);
         }
     }

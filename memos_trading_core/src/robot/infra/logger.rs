@@ -38,7 +38,7 @@ impl TradeEvent {
         }
     }
 
-    /// Trade eventi oluştur
+    /// Trade eventi oluştur (eski API — Trade tipi üzerinden)
     pub fn trade(trade: &Trade, pnl: f64, equity: f64) -> Self {
         Self {
             timestamp: Utc::now().to_rfc3339(),
@@ -52,6 +52,60 @@ impl TradeEvent {
             message: format!(
                 "{} {} @ ${:.2} | PnL: ${:.2} | Equity: ${:.2}",
                 trade.strategy, trade.amount, trade.entry_price, pnl, equity
+            ),
+        }
+    }
+
+    /// Pozisyon AÇILIŞ eventi (TRADE_OPEN). PnL açılışta 0.
+    pub fn trade_open(
+        symbol: &str,
+        strategy: &str,
+        is_long: bool,
+        price: f64,
+        qty: f64,
+        equity: f64,
+    ) -> Self {
+        let side = if is_long { "LONG" } else { "SHORT" };
+        Self {
+            timestamp: Utc::now().to_rfc3339(),
+            event_type: "TRADE_OPEN".to_string(),
+            symbol: symbol.to_string(),
+            signal: side.to_string(),
+            price,
+            quantity: qty,
+            pnl: 0.0,
+            equity,
+            message: format!(
+                "OPEN {} {} qty={:.6} @ ${:.4} | Strat={} | Equity: ${:.2}",
+                side, symbol, qty, price, strategy, equity,
+            ),
+        }
+    }
+
+    /// Pozisyon KAPANIŞ eventi (TRADE_CLOSE).
+    pub fn trade_close(
+        symbol: &str,
+        strategy: &str,
+        is_long: bool,
+        exit_price: f64,
+        qty: f64,
+        pnl: f64,
+        equity: f64,
+        reason: &str,
+    ) -> Self {
+        let side = if is_long { "LONG" } else { "SHORT" };
+        Self {
+            timestamp: Utc::now().to_rfc3339(),
+            event_type: "TRADE_CLOSE".to_string(),
+            symbol: symbol.to_string(),
+            signal: side.to_string(),
+            price: exit_price,
+            quantity: qty,
+            pnl,
+            equity,
+            message: format!(
+                "CLOSE {} {} qty={:.6} @ ${:.4} | Reason={} | PnL: ${:.4} | Strat={} | Equity: ${:.2}",
+                side, symbol, qty, exit_price, reason, pnl, strategy, equity,
             ),
         }
     }
@@ -226,5 +280,56 @@ mod tests {
         let event = TradeEvent::risk_block("Max drawdown exceeded", "ETHUSDT");
         assert_eq!(event.event_type, "RISK_BLOCK");
         assert!(event.message.contains("RISK BLOCKED"));
+    }
+
+    #[test]
+    fn test_trade_open_event_long() {
+        let ev = TradeEvent::trade_open(
+            "BTCUSDT", "MA_CROSSOVER", true, 50_000.0, 0.01, 10_000.0,
+        );
+        assert_eq!(ev.event_type, "TRADE_OPEN");
+        assert_eq!(ev.signal, "LONG");
+        assert_eq!(ev.price, 50_000.0);
+        assert_eq!(ev.quantity, 0.01);
+        assert_eq!(ev.pnl, 0.0);
+        assert_eq!(ev.equity, 10_000.0);
+        assert!(ev.message.contains("OPEN LONG BTCUSDT"));
+        assert!(ev.message.contains("MA_CROSSOVER"));
+    }
+
+    #[test]
+    fn test_trade_open_event_short() {
+        let ev = TradeEvent::trade_open(
+            "ETHUSDT", "BOLLINGER", false, 3_000.0, 0.5, 9_500.0,
+        );
+        assert_eq!(ev.event_type, "TRADE_OPEN");
+        assert_eq!(ev.signal, "SHORT");
+        assert!(ev.message.contains("OPEN SHORT ETHUSDT"));
+    }
+
+    #[test]
+    fn test_trade_close_event_profit() {
+        let ev = TradeEvent::trade_close(
+            "BTCUSDT", "MA_CROSSOVER", true, 51_500.0, 0.01, 15.0, 10_015.0, "TAKE_PROFIT",
+        );
+        assert_eq!(ev.event_type, "TRADE_CLOSE");
+        assert_eq!(ev.signal, "LONG");
+        assert_eq!(ev.price, 51_500.0);
+        assert_eq!(ev.pnl, 15.0);
+        assert_eq!(ev.equity, 10_015.0);
+        assert!(ev.message.contains("CLOSE LONG BTCUSDT"));
+        assert!(ev.message.contains("TAKE_PROFIT"));
+        assert!(ev.message.contains("MA_CROSSOVER"));
+    }
+
+    #[test]
+    fn test_trade_close_event_loss() {
+        let ev = TradeEvent::trade_close(
+            "ETHUSDT", "BOLLINGER", false, 3_050.0, 0.5, -25.0, 9_475.0, "STOP_LOSS",
+        );
+        assert_eq!(ev.event_type, "TRADE_CLOSE");
+        assert_eq!(ev.signal, "SHORT");
+        assert_eq!(ev.pnl, -25.0);
+        assert!(ev.message.contains("STOP_LOSS"));
     }
 }

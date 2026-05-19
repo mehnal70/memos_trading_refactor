@@ -182,6 +182,11 @@ pub struct AppState {
     /// TELEGRAM_CHAT_ID set değilse None — kod sessizce çalışmaya devam eder.
     pub notifier: Option<Arc<crate::robot::infra::telegram_notifier::TelegramNotifier>>,
 
+    /// 📝 Periyodik dosya logu (logs/robotic_trading.log + logs/trades.jsonl).
+    /// `TRADING_LOGGER_DISABLE=1` set ise None; aksi halde her zaman aktif.
+    /// SIGNAL/TRADE_OPEN/TRADE_CLOSE/RISK_BLOCK/ERROR olayları için kullanılır.
+    pub trading_logger: Option<Arc<crate::robot::infra::logger::TradingLogger>>,
+
     // Global Durdurma Sinyalleri
     pub app_stop_signal: Arc<AtomicBool>,
     pub pause_signal: Arc<AtomicBool>,
@@ -322,6 +327,32 @@ impl AppState {
             log::info!(target:"STATE_INIT", "📣 Telegram notifier devre dışı (env yok)");
         }
 
+        // 📝 TradingLogger — runtime SIGNAL/TRADE/RISK_BLOCK olayları için kalıcı dosya logu.
+        // `TRADING_LOGGER_DISABLE=1` veya `=true` ise devre dışı bırakılır.
+        let trading_logger_disabled = std::env::var("TRADING_LOGGER_DISABLE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let trading_logger = if trading_logger_disabled {
+            log::info!(target:"STATE_INIT", "📝 TradingLogger devre dışı (TRADING_LOGGER_DISABLE)");
+            None
+        } else {
+            match crate::robot::infra::logger::TradingLogger::new(
+                "logs/robotic_trading.log",
+                "logs/trades.jsonl",
+            ) {
+                Ok(lg) => {
+                    log::info!(target:"STATE_INIT",
+                        "📝 TradingLogger aktif: logs/robotic_trading.log + logs/trades.jsonl");
+                    Some(Arc::new(lg))
+                }
+                Err(e) => {
+                    log::warn!(target:"STATE_INIT",
+                        "📝 TradingLogger kurulamadı ({:?}) — dosya logu devre dışı", e);
+                    None
+                }
+            }
+        };
+
         Self {
             config,
             finance,
@@ -332,6 +363,7 @@ impl AppState {
             live_dry_run,
             live_max_notional_usd,
             notifier,
+            trading_logger,
             app_stop_signal: stop_sig,
             pause_signal: Arc::new(AtomicBool::new(false)),
         }
