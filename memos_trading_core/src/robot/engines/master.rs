@@ -1532,7 +1532,25 @@ impl Engine {
             // compute_edge_score momentum'u ATR ile normalize edip ML confidence ile harmanlar;
             // başka indikatör/feature hesapları (S/R, regime classify) cycle dışında periyodik
             // task'larda yapılır. Bu nokta tek atımlık feature extraction'ı temsil eder.
-            let edge = Self::compute_edge_score(&candles, &signal, ml_confidence);
+            //
+            // GBT inference (cycle başına dinamik ml_confidence): IntelligenceHub.gbt
+            // hazırsa son ~50 mumdan FeatureVector → predict_confidence(fv, signal)
+            // hibrit conf üretir; yoksa eski statik brain.ml_confidence yolu.
+            // Sinyal yönü + GBT skoru uyumu cycle bazında değişir → her sembolde
+            // farklı conf üretebilir.
+            let ml_conf_used: f64 = {
+                let gbt_conf = if candles.len() >= 30 {
+                    let tail = &candles[candles.len().saturating_sub(200)..];
+                    let fv = crate::robot::ml_engine::FeatureExtractor::extract(tail);
+                    state.lock().ok().and_then(|st| {
+                        st.brain.intelligence_hub.read().ok()
+                            .and_then(|hub| hub.predict_confidence(&fv, &signal))
+                    })
+                } else { None };
+                gbt_conf.unwrap_or(ml_confidence)
+            };
+
+            let edge = Self::compute_edge_score(&candles, &signal, ml_conf_used);
             Self::mark_pipeline_stage(state, PipelineStage::FeatureExtract, StepStatus::Done);
             // ML henüz hazır değilse (cold-start) gevşek eşik; modele güven arttıkça katılaşır.
             // Faz 2 c4: edge_threshold rejim-bazlı override'a açık.
@@ -1543,8 +1561,8 @@ impl Engine {
             Self::observe_regime_drift(state, regime.as_str());
             let edge_threshold = state.lock().ok()
                 .and_then(|st| st.brain.parameters.read().ok()
-                    .map(|p| p.edge_threshold_for(regime.as_str(), ml_confidence)))
-                .unwrap_or_else(|| Self::dynamic_edge_threshold(ml_confidence));
+                    .map(|p| p.edge_threshold_for(regime.as_str(), ml_conf_used)))
+                .unwrap_or_else(|| Self::dynamic_edge_threshold(ml_conf_used));
             // Aday log eşiği: kabul edilen edge'in %75'inin altındaki sinyaller spam sayılır.
             let edge_log_floor = edge_threshold * 0.75;
 
@@ -2692,6 +2710,51 @@ impl Engine {
                 result.best_result.sharpe_ratio,
                 result.total_tested,
             ));
+        }
+
+        // 2b) GBT (Gradient Boosted Trees) eğitimi — cycle başına dinamik
+        //     ml_confidence için. build_training_set forward-return işaretini
+        //     hedef alır; gbt_grid_search hyperparam'i seçer; final model
+        //     `IntelligenceHub.gbt`'ye yazılır. Yetersiz veri/eğitim
+        //     başarısızlığı sessiz fallback: statik ml_confidence yolunda kalınır.
+        let gbt_window_bars: usize = std::env::var("GBT_WINDOW_BARS").ok()
+            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(50);
+        let gbt_forward_bars: usize = std::env::var("GBT_FORWARD_BARS").ok()
+            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(5);
+        let gbt_ds = crate::robot::ml_engine::build_training_set(
+            &candles, gbt_window_bars, gbt_forward_bars,
+        );
+        if gbt_ds.len() < 20 {
+            if let Ok(mut st) = state.lock() {
+                st.push_log(format!(
+                    "🌲 GBT atlandı: yetersiz training örneği ({} < 20)", gbt_ds.len(),
+                ));
+            }
+        } else {
+            use crate::robot::ml_engine::{gbt_grid_search, GradientBoostedTrees};
+            let tune = gbt_grid_search(&gbt_ds);
+            let (n_est, lr, depth, oos_acc) = match tune {
+                Some(r) => (r.n_estimators, r.learning_rate, r.max_depth, r.oos_accuracy),
+                None    => (5, 0.10, 3, f64::NAN),
+            };
+            let mut gbt = GradientBoostedTrees::new(n_est, lr, depth);
+            gbt.train(&gbt_ds);
+            let ready = gbt.is_ready();
+            if ready {
+                if let Ok(mut st) = state.lock() {
+                    if let Ok(mut hub) = st.brain.intelligence_hub.write() {
+                        hub.gbt = gbt;
+                    }
+                    let acc_str = if oos_acc.is_nan() { "-".into() }
+                                  else { format!("{:.1}%", oos_acc) };
+                    st.push_log(format!(
+                        "🌲 GBT ✓ n_est={n_est} lr={lr:.2} depth={depth} | OOS acc={acc_str} | {} örnek",
+                        gbt_ds.len(),
+                    ));
+                }
+            } else if let Ok(mut st) = state.lock() {
+                st.push_log("🌲 GBT eğitim başarısız (is_ready=false)".into());
+            }
         }
 
         // 3) Diske atomik mühürle (BestParamsCache → seal_config_to_disk).

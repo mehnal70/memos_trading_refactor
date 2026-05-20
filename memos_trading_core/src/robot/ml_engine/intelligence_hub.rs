@@ -9,8 +9,10 @@ use crate::prelude::*; // Evrensel çekirdek kontratları ve AdaptiveThresholds 
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 use crate::evolution::AutonomousController;
-use crate::robot::ml_engine::{DriftDetector, TradePatternClassifier, StrategyScorer};
-use crate::core::types::PositionId;
+use crate::robot::ml_engine::{
+    DriftDetector, FeatureVector, GradientBoostedTrees, StrategyScorer, TradePatternClassifier,
+};
+use crate::core::types::{PositionId, Signal};
 
 //use crate::robot::{App};
 
@@ -38,6 +40,12 @@ pub struct IntelligenceHub {
     /// kadar bekleme tutar. Process restart'ta None'a döner (kasıtlı —
     /// yeniden başlatma drift'i tekrar değerlendirsin).
     pub last_drift_retrain_at: Option<Instant>,
+
+    /// Cycle başına dinamik ml_confidence üreten GBT modeli.
+    /// `run_ml_retrain_job` `build_training_set + gbt_grid_search` ile eğitir
+    /// ve burayı doldurur. `is_ready()` false ise cycle eski statik
+    /// `brain.ml_confidence`'a düşer (Optional inference yolu).
+    pub gbt: GradientBoostedTrees,
 }
 
 impl IntelligenceHub {
@@ -54,7 +62,28 @@ impl IntelligenceHub {
             thresholds: AdaptiveThresholds::default(),
             drift_history: VecDeque::with_capacity(100), // Maksimum 100 döngü kapasiteli temiz kuyruk
             last_drift_retrain_at: None,
+            gbt: GradientBoostedTrees::with_defaults(),
         }
+    }
+
+    // ── GBT inference yolu (per-cycle dinamik ml_confidence) ─────────────
+    //
+    // `predict_confidence` GBT eğitilmediyse None döner; cycle eski statik
+    // `brain.ml_confidence`'a düşer. Eğitildiyse signal yönü ile GBT skoru
+    // (-1..1) simetrik şekilde [0, 1] güvene çevrilir:
+    //   - Buy + score=+1 → 1.0; Buy + score=-1 → 0.0
+    //   - Sell + score=-1 → 1.0; Sell + score=+1 → 0.0
+    //   - Hold → 0.5 (nötr; cycle edge eşikleriyle tabii hareket etsin)
+
+    pub fn predict_confidence(&self, fv: &FeatureVector, signal: &Signal) -> Option<f64> {
+        if !self.gbt.is_ready() { return None; }
+        let score = self.gbt.predict(fv); // [-1, 1]
+        let raw = match signal {
+            Signal::Buy  => (score + 1.0) / 2.0,
+            Signal::Sell => ((-score) + 1.0) / 2.0,
+            Signal::Hold => 0.5,
+        };
+        Some(raw.clamp(0.0, 1.0))
     }
 
     // ── Drift-tetikli retrain cooldown yardımcıları ──────────────────────
@@ -202,6 +231,64 @@ mod tests {
         // cooldown=0 → her zaman armed (cooldown devre dışı modu).
         assert!(hub.drift_retrain_armed_at(t0, 0),
             "cooldown=0 ile her tick fire edebilmeli");
+    }
+
+    // ── predict_confidence (GBT inference) ──────────────────────────────
+
+    #[test]
+    fn predict_confidence_none_when_gbt_not_ready() {
+        let hub = fresh_hub();
+        let fv = crate::robot::ml_engine::FeatureExtractor::extract(
+            &(0..30).map(|i| crate::core::types::Candle {
+                open: 100.0 + i as f64, high: 100.5 + i as f64,
+                low: 99.5 + i as f64, close: 100.0 + i as f64,
+                volume: 100.0, ..Default::default()
+            }).collect::<Vec<_>>()
+        );
+        assert!(hub.predict_confidence(&fv, &Signal::Buy).is_none(),
+            "eğitilmemiş GBT → None");
+    }
+
+    #[test]
+    fn predict_confidence_hold_signal_returns_neutral_when_ready() {
+        let mut hub = fresh_hub();
+        // GBT eğit: deterministik tek yön (sürekli pozitif target).
+        use crate::robot::ml_engine::build_training_set;
+        let candles: Vec<crate::core::types::Candle> = (0..60).map(|i| crate::core::types::Candle {
+            open: 100.0 + i as f64, high: 100.5 + i as f64,
+            low: 99.5 + i as f64, close: 100.0 + i as f64,
+            volume: 100.0, ..Default::default()
+        }).collect();
+        let ds = build_training_set(&candles, 20, 5);
+        hub.gbt.train(&ds);
+        assert!(hub.gbt.is_ready());
+        let fv = crate::robot::ml_engine::FeatureExtractor::extract(&candles[40..]);
+        let c = hub.predict_confidence(&fv, &Signal::Hold).unwrap();
+        assert!((c - 0.5).abs() < 1e-9, "Hold → 0.5 nötr, geldi: {c}");
+    }
+
+    #[test]
+    fn predict_confidence_buy_signal_aligns_with_positive_gbt_score() {
+        let mut hub = fresh_hub();
+        use crate::robot::ml_engine::build_training_set;
+        // Monoton yukarı seri → GBT score pozitif olmalı (sign target = +1).
+        let candles: Vec<crate::core::types::Candle> = (0..120).map(|i| crate::core::types::Candle {
+            open: 100.0 + i as f64, high: 100.5 + i as f64,
+            low: 99.5 + i as f64, close: 100.0 + i as f64,
+            volume: 100.0, ..Default::default()
+        }).collect();
+        let ds = build_training_set(&candles, 20, 5);
+        hub.gbt.train(&ds);
+        let fv = crate::robot::ml_engine::FeatureExtractor::extract(&candles[80..]);
+        let conf_buy = hub.predict_confidence(&fv, &Signal::Buy).unwrap();
+        let conf_sell = hub.predict_confidence(&fv, &Signal::Sell).unwrap();
+        assert!(conf_buy > 0.5,
+            "Buy + yukarı eğilim → conf > 0.5, geldi: {conf_buy}");
+        assert!(conf_sell < 0.5,
+            "Sell + yukarı eğilim → conf < 0.5 (simetri), geldi: {conf_sell}");
+        // Simetri: Buy + Sell ≈ 1
+        assert!((conf_buy + conf_sell - 1.0).abs() < 1e-9,
+            "Buy/Sell güvenleri simetrik olmalı: {conf_buy} + {conf_sell}");
     }
 
     #[test]

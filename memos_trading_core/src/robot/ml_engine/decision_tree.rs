@@ -10,7 +10,8 @@
 // robot/ml_engine/decision_tree.rs - Otonom GBRT Tahmin ve Optimizasyon Motoru
 
 use itertools::Itertools as _;
-use super::feature_extractor::FeatureVector;
+use crate::core::types::Candle;
+use super::feature_extractor::{FeatureExtractor, FeatureVector};
 use super::linear_regressor::N_FEATURES;
 
 // --- 1. DÜĞÜM YAPISI ---
@@ -178,6 +179,88 @@ pub struct GbtTuneResult {
     pub learning_rate: f64,
     pub max_depth:     usize,
     pub oos_accuracy:  f64,
+}
+
+/// Mum dizisinden GBT eğitim seti üretir.
+///
+/// Akış: i = window_bars..(len - forward_bars), her i için:
+///   - FeatureVector = FeatureExtractor::extract(&candles[i-window_bars..i]) → normalize → to_array
+///   - target = sign(forward_return), forward_return = (close[i+forward_bars] - close[i]) / close[i]
+///     (sign: yukarı +1, aşağı -1, sıfırsa 0; GBT regresyonu için sürekli bir yön sinyali)
+///
+/// `window_bars` < 5 veya `forward_bars` < 1 veya `candles.len() < window_bars + forward_bars + 1`
+/// olursa boş Vec döner — eğitim için çağıran erken bail edebilsin.
+pub fn build_training_set(
+    candles: &[Candle],
+    window_bars: usize,
+    forward_bars: usize,
+) -> Vec<([f64; N_FEATURES], f64)> {
+    if window_bars < 5 || forward_bars < 1 { return Vec::new(); }
+    let need = window_bars + forward_bars + 1;
+    if candles.len() < need { return Vec::new(); }
+
+    let mut out = Vec::with_capacity(candles.len().saturating_sub(need));
+    let last = candles.len().saturating_sub(forward_bars);
+    for i in window_bars..last {
+        let entry = candles[i].close;
+        if entry <= 0.0 { continue; }
+        let exit = candles[i + forward_bars].close;
+        let fwd = (exit - entry) / entry;
+        let target = if fwd > 0.0 { 1.0 } else if fwd < 0.0 { -1.0 } else { 0.0 };
+        let fv = FeatureExtractor::extract(&candles[i - window_bars..i]).normalize();
+        out.push((fv.to_array(), target));
+    }
+    out
+}
+
+#[cfg(test)]
+mod build_set_tests {
+    use super::*;
+
+    fn cs(closes: &[f64]) -> Vec<Candle> {
+        closes.iter().map(|&c| Candle {
+            open: c, high: c + 0.5, low: c - 0.5, close: c, volume: 100.0,
+            ..Default::default()
+        }).collect()
+    }
+
+    #[test]
+    fn empty_when_window_or_forward_invalid() {
+        let c = cs(&(0..50).map(|i| 100.0 + i as f64).collect::<Vec<_>>());
+        assert!(build_training_set(&c, 4, 5).is_empty(), "window<5 → boş");
+        assert!(build_training_set(&c, 20, 0).is_empty(), "forward<1 → boş");
+    }
+
+    #[test]
+    fn empty_when_data_too_short() {
+        let c = cs(&[100.0, 101.0, 102.0]);
+        assert!(build_training_set(&c, 20, 5).is_empty());
+    }
+
+    #[test]
+    fn monotonic_up_yields_all_positive_targets() {
+        let c = cs(&(0..60).map(|i| 100.0 + i as f64).collect::<Vec<_>>());
+        let ds = build_training_set(&c, 20, 5);
+        assert!(!ds.is_empty());
+        assert!(ds.iter().all(|(_, t)| *t > 0.0),
+            "tek yön yukarı → tüm targetler +1 olmalı");
+    }
+
+    #[test]
+    fn monotonic_down_yields_all_negative_targets() {
+        let c = cs(&(0..60).map(|i| 200.0 - i as f64).collect::<Vec<_>>());
+        let ds = build_training_set(&c, 20, 5);
+        assert!(!ds.is_empty());
+        assert!(ds.iter().all(|(_, t)| *t < 0.0));
+    }
+
+    #[test]
+    fn dataset_size_matches_window_geometry() {
+        // 60 mum, window=20, forward=5 → i ∈ [20, 60-5) = [20, 55) → 35 örnek
+        let c = cs(&(0..60).map(|i| 100.0 + i as f64).collect::<Vec<_>>());
+        let ds = build_training_set(&c, 20, 5);
+        assert_eq!(ds.len(), 35);
+    }
 }
 
 pub fn gbt_grid_search(data: &[([f64; N_FEATURES], f64)]) -> Option<GbtTuneResult> {

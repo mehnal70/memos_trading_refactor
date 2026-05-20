@@ -18,7 +18,7 @@ pub mod adaptive_params;
 pub use feature_extractor::{FeatureExtractor, FeatureVector};
 pub use linear_regressor::{LinearRegressor, Prediction};
 pub use signal_predictor::{MLSignalPredictor, MLSignalPrediction, FeatureImportance};
-pub use decision_tree::{DecisionTree, GradientBoostedTrees, gbt_grid_search, GbtTuneResult};
+pub use decision_tree::{DecisionTree, GradientBoostedTrees, build_training_set, gbt_grid_search, GbtTuneResult};
 pub use drift_detector::DriftDetector;
 pub use trade_classifier::{TradePatternClassifier, ClassifierInput};
 pub use strategy_scorer::StrategyScorer; // robotic_loop'u hafifleten ana parça
