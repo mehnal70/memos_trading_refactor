@@ -38,8 +38,10 @@ docs/*.odt
 docs/yapılacaklar
 
 # Defense-in-depth: env, anahtar, kimlik bilgileri
+# Not: .env globu her seviyede yakalar (kök ve memos_trading_core/.env dahil).
 .env
 .env.*
+memos_trading_core/.env
 *.key
 *.pem
 credentials.json
