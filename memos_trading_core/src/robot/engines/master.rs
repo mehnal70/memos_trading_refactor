@@ -2700,10 +2700,23 @@ impl Engine {
             ));
         }
 
+        // Walk-Forward konfigürasyonu — env'den override edilebilir.
+        // Varsayılan IS=200 / OOS=50 / step=50: 1500 mumda ~26 pencere.
+        let wf_is   = std::env::var("WALK_FORWARD_IS_BARS").ok()
+            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(200);
+        let wf_oos  = std::env::var("WALK_FORWARD_OOS_BARS").ok()
+            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(50);
+        let wf_step = std::env::var("WALK_FORWARD_STEP_BARS").ok()
+            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(50);
+        let wf_min  = wf_is + wf_oos;
+
         let candles = crate::persistence::reader::read_candles(&db_path, &symbol, &interval, 1500)
             .map_err(|e| format!("read_candles: {}", e))?;
-        if candles.len() < 100 {
-            return Err(format!("yetersiz mum verisi: {} mum", candles.len()));
+        if candles.len() < wf_min {
+            return Err(format!(
+                "yetersiz mum verisi: {} mum (walk-forward için ≥{} gerekli)",
+                candles.len(), wf_min,
+            ));
         }
 
         // Aday strateji pool'u StrategyRegistry'den otomatik genişler (Faz 4 c2):
@@ -2711,53 +2724,75 @@ impl Engine {
         // değişiklik gerektirmez. Alias'lar dahil edilmez (canonical_pool).
         let strat_pool: Vec<String> =
             crate::robot::strategies::default_registry().canonical_pool();
-        // Grid: TP 6 × SL 4 × PS 3 = 72 senaryo (aşağıdaki optimize_parallel
-        // çağrısının sınırlarıyla aynı).
-        const SCENARIOS_PER_STRATEGY: usize = 6 * 4 * 3;
+        let est_windows = candles.len().saturating_sub(wf_min) / wf_step.max(1) + 1;
         if let Ok(mut st) = state.lock() {
             st.push_log(format!(
-                "🔬 Backtest: {} mum yüklendi, {} strateji × {} parametre = {} senaryo",
-                candles.len(),
-                strat_pool.len(),
-                SCENARIOS_PER_STRATEGY,
-                strat_pool.len() * SCENARIOS_PER_STRATEGY,
+                "🔬 Backtest (Walk-Forward): {} mum, {} strateji × ~{} pencere (IS={} OOS={} step={})",
+                candles.len(), strat_pool.len(), est_windows, wf_is, wf_oos, wf_step,
             ));
         }
 
-        // Çoklu stratejide aday seç — rejime göre.
-        let mut best_overall: Option<(String, f64,
-            crate::robot::backtester::parameter_optimizer::OptimizationResult)> = None;
+        // ─── 1) Strateji aday seçimi: her aday için Walk-Forward → OOS sharpe + tutarlılık ───
+        //
+        // wf_score = avg_oos_sharpe * 0.7 + consistency * 0.3
+        // (consistency = kârlı OOS pencerelerinin oranı 0..1)
+        // OOS metrikleri overfitting'i engeller; in-sample sharpe'a göre seçim yapılmıyor.
+        use crate::robot::backtester::walk_forward::{WalkForwardConfig, WalkForwardTester};
+        const WF_CONSISTENCY_WEIGHT: f64 = 0.3;
+
+        let mut best_wf: Option<(String, f64,
+            crate::robot::backtester::walk_forward::WalkForwardResult)> = None;
 
         for name in &strat_pool {
-            let opt = crate::robot::backtester::parameter_optimizer::ParameterOptimizer::new(
-                symbol.clone(), interval.clone(), capital, name.clone());
-            // TP, SL, PositionSize gridleri
-            let res = opt.optimize_parallel(
-                &candles,
-                (2.0, 8.0, 1.0),       // TP %2 → %8, step 1
-                (1.0, 4.0, 1.0),       // SL %1 → %4, step 1
-                (0.1, 0.4, 0.1),       // PS  0.1 → 0.4
-            );
-            if let Ok(r) = res {
-                let score = r.best_result.sharpe_ratio;
-                let win_rate = r.best_result.win_rate;
-                let pf = r.best_result.profit_factor;
+            let wf_cfg = WalkForwardConfig {
+                in_sample_bars: wf_is,
+                out_of_sample_bars: wf_oos,
+                step_bars: wf_step,
+                initial_balance: capital,
+                strategy_name: name.clone(),
+                symbol: symbol.clone(),
+                interval: interval.clone(),
+                commission_pct: 0.001,
+            };
+            let Some(wf_res) = WalkForwardTester::new(wf_cfg).run(&candles) else {
                 if let Ok(mut st) = state.lock() {
-                    st.push_log(format!(
-                        "🔬   aday {} → Sharpe={:.2} WR={:.1}% PF={:.2}",
-                        name, score, win_rate, pf,
-                    ));
+                    st.push_log(format!("🔬   aday {} → WF sonuç alınamadı", name));
                 }
-                if best_overall.as_ref().map(|(_, s, _)| *s).unwrap_or(f64::NEG_INFINITY) < score {
-                    best_overall = Some((name.clone(), score, r));
-                }
-            } else if let Ok(mut st) = state.lock() {
-                st.push_log(format!("🔬   aday {} → sonuç alınamadı", name));
+                continue;
+            };
+
+            let wf_score = wf_res.avg_oos_sharpe * (1.0 - WF_CONSISTENCY_WEIGHT)
+                         + wf_res.consistency_score * WF_CONSISTENCY_WEIGHT;
+            if let Ok(mut st) = state.lock() {
+                st.push_log(format!(
+                    "🔬   aday {} → OOS Sharpe={:.2} Tutarlılık={:.0}% ({} pencere) skor={:.3}",
+                    name, wf_res.avg_oos_sharpe,
+                    wf_res.consistency_score * 100.0,
+                    wf_res.windows.len(),
+                    wf_score,
+                ));
+            }
+            if best_wf.as_ref().map(|(_, s, _)| *s).unwrap_or(f64::NEG_INFINITY) < wf_score {
+                best_wf = Some((name.clone(), wf_score, wf_res));
             }
         }
 
-        let (best_name, best_score, best_res) = best_overall
-            .ok_or_else(|| "Hiçbir strateji aday sonuç üretemedi".to_string())?;
+        let (best_name, best_wf_score, best_wf_res) = best_wf
+            .ok_or_else(|| "Hiçbir strateji walk-forward sonuç üretemedi".to_string())?;
+
+        // ─── 2) Kazanan strateji için PS dahil final parametre optimizasyonu (tüm veri) ───
+        //
+        // Walk-Forward'da quick_optimize sadece TP/SL üzerinde tarıyor; pozisyon boyutu
+        // (PS) burada belirlenir ki best_params üç ekseni de kapsasın.
+        let final_opt = crate::robot::backtester::parameter_optimizer::ParameterOptimizer::new(
+            symbol.clone(), interval.clone(), capital, best_name.clone(),
+        );
+        let final_res = final_opt.optimize_parallel(
+            &candles,
+            (2.0, 8.0, 1.0),       // TP %2 → %8, step 1
+            (1.0, 4.0, 1.0),       // SL %1 → %4, step 1
+            (0.1, 0.4, 0.1),       // PS  0.1 → 0.4
+        ).map_err(|e| format!("final optimize_parallel: {:?}", e))?;
 
         // brain.live_strategy + best_params + ParameterStore.trade_risk güncellenir.
         {
@@ -2766,23 +2801,32 @@ impl Engine {
                 *s = best_name.clone();
             }
             st.brain.best_params.insert("take_profit_pct".into(),
-                best_res.best_parameters.take_profit_pct);
+                final_res.best_parameters.take_profit_pct);
             st.brain.best_params.insert("stop_loss_pct".into(),
-                best_res.best_parameters.stop_loss_pct);
+                final_res.best_parameters.stop_loss_pct);
             st.brain.best_params.insert("max_position_size".into(),
-                best_res.best_parameters.max_position_size);
+                final_res.best_parameters.max_position_size);
+            st.brain.best_params.insert("wf_score".into(), best_wf_score);
+            st.brain.best_params.insert("oos_sharpe".into(), best_wf_res.avg_oos_sharpe);
+            st.brain.best_params.insert("oos_consistency".into(), best_wf_res.consistency_score);
             if let Ok(mut params) = st.brain.parameters.write() {
                 params.apply_optimization(
-                    best_res.best_parameters.take_profit_pct,
-                    best_res.best_parameters.stop_loss_pct,
-                    best_res.best_parameters.max_position_size,
+                    final_res.best_parameters.take_profit_pct,
+                    final_res.best_parameters.stop_loss_pct,
+                    final_res.best_parameters.max_position_size,
                 );
             }
-            st.brain.hyperopt_score = best_score;
+            // hyperopt_score WF skoruna mühürlenir — UI/legacy okuyucular için
+            // overfitting-koruyucu seçim ölçütü.
+            st.brain.hyperopt_score = best_wf_score;
             st.push_log(format!(
-                "🔬 Backtest ✓ aktif strateji '{}' (Sharpe={:.2}, WR={:.1}%, PF={:.2})",
-                best_name, best_score,
-                best_res.best_result.win_rate, best_res.best_result.profit_factor,
+                "🔬 Backtest ✓ aktif '{}' (WF skor={:.3} | OOS Sharpe={:.2} Tutarlılık={:.0}% | final TP={:.1}% SL={:.1}% PS={:.2})",
+                best_name, best_wf_score,
+                best_wf_res.avg_oos_sharpe,
+                best_wf_res.consistency_score * 100.0,
+                final_res.best_parameters.take_profit_pct,
+                final_res.best_parameters.stop_loss_pct,
+                final_res.best_parameters.max_position_size,
             ));
         }
 
@@ -2792,7 +2836,13 @@ impl Engine {
             serde_json::json!({
                 "active_strategy": best_name,
                 "params": st.brain.best_params,
-                "score": best_score,
+                "wf_score": best_wf_score,
+                "oos_sharpe": best_wf_res.avg_oos_sharpe,
+                "oos_consistency": best_wf_res.consistency_score,
+                "oos_windows": best_wf_res.windows.len(),
+                "in_sample_bars": wf_is,
+                "out_of_sample_bars": wf_oos,
+                "step_bars": wf_step,
                 "sealed_at": chrono::Utc::now().to_rfc3339(),
             })
         };
