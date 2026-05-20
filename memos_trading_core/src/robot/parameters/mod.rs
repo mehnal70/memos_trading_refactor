@@ -183,6 +183,10 @@ pub struct ParameterStore {
     /// `apply_trade_feedback` bunu okuyup patch'i rafine eder.
     #[serde(default)]
     pub regime_feedback: HashMap<String, RegimeFeedback>,
+    /// Faz 3 c3: en son cycle'da gözlenen rejim. `observe_regime` drift
+    /// tespiti yapıp değişimde patch'i otomatik sıkılaştırır.
+    #[serde(default)]
+    pub last_observed_regime: Option<String>,
 }
 
 impl Default for ParameterStore {
@@ -195,6 +199,7 @@ impl Default for ParameterStore {
             sr_update_every_secs:      30,
             regime_overrides: HashMap::new(),
             regime_feedback:  HashMap::new(),
+            last_observed_regime: None,
         }
     }
 }
@@ -296,17 +301,11 @@ impl ParameterStore {
     /// Faz 3 c2: bir trade kapanışında rejim+pnl_pct geri beslemesini işler.
     ///
     /// Kuyruğu günceller (`RegimeFeedback::record`); rejim için WINDOW kadar
-    /// trade biriktiyse ve win_rate eşik altına düştüyse patch'i sıkılaştırır:
-    ///   - edge_thresholds her katmanı *1.15 (eşiği yükselt → daha az sinyal)
-    ///   - trade_risk.max_position_size *0.7 (pozisyonu küçült)
-    ///   - take_profit_pct *0.85, stop_loss_pct *0.85 (kısa hedef + dar stop)
+    /// trade biriktiyse ve win_rate eşik altına düştüyse patch'i sıkılaştırır
+    /// (`tighten_regime_patch`).
     ///
     /// Eşik default 0.40 (10 trade'in en az 4'ü kazançlı olmalı); ileride
     /// HyperOpt'tan ayarlanabilir hale getirilir.
-    ///
-    /// Patch zaten o rejim için varsa override edilen alanları sıkılaştırır;
-    /// yoksa base'in üstüne yeni bir patch yapılır (adaptive heuristic'i
-    /// bypass etmez — rejim daha önce ensure_regime_patch ile dolmuş olabilir).
     ///
     /// Döner: tighten gerçekten uygulandı mı (true) / koşul oluşmadı (false).
     pub fn apply_trade_feedback(&mut self, regime: &str, pnl_pct: f64) -> bool {
@@ -320,7 +319,36 @@ impl ParameterStore {
         let trigger_threshold = 0.40;
         if win_rate >= trigger_threshold { return false; }
 
-        // Sıkılaştırma uygula. Mevcut patch varsa onu temel al; yoksa base'i.
+        self.tighten_regime_patch(regime);
+        true
+    }
+
+    /// Faz 3 c3: rejim değişimi gözlemi.
+    ///
+    /// Engine cycle her tur bu metodu çağırır. Önceki rejimden farklı bir rejime
+    /// geçilmişse:
+    ///   - `last_observed_regime` güncellenir.
+    ///   - Yeni rejim için patch'i bir basamak sıkılaştırır (drift sonrası
+    ///     savunmacı duruş — eski parametreler artık geçerli olmayabilir).
+    ///   - true döner (çağıran taraf push_alert atabilir).
+    /// İlk gözlem değişim sayılmaz (cold start için yumuşak).
+    pub fn observe_regime(&mut self, regime: &str) -> bool {
+        let changed = match &self.last_observed_regime {
+            Some(prev) => prev != regime,
+            None => false,
+        };
+        self.last_observed_regime = Some(regime.to_string());
+        if changed {
+            self.tighten_regime_patch(regime);
+        }
+        changed
+    }
+
+    /// Rejim patch'ini tek bir basamak sıkılaştırır. apply_trade_feedback ve
+    /// observe_regime tek bir mantık üstüne çalışsın diye paylaşılmış helper.
+    /// Mevcut patch varsa onun üstüne, yoksa base'in üstüne uygulanır.
+    /// Katsayılar deneyimsel: edge *1.15, TP/SL *0.85, max_pos *0.70.
+    fn tighten_regime_patch(&mut self, regime: &str) {
         let existing = self.regime_overrides.get(regime).cloned().unwrap_or_default();
         let base_edge = existing.edge_thresholds.unwrap_or(self.edge_thresholds);
         let base_risk = existing.trade_risk.unwrap_or(self.trade_risk);
@@ -341,7 +369,6 @@ impl ParameterStore {
             RegimePatch::empty()
                 .with_edge(tightened_edge)
                 .with_trade_risk(tightened_risk));
-        true
     }
 }
 
@@ -452,6 +479,39 @@ mod tests {
         assert_eq!(s.trade_risk.take_profit_pct,   5.0);
         assert_eq!(s.trade_risk.stop_loss_pct,     1.5); // default kaldı
         assert_eq!(s.trade_risk.max_position_size, 0.5); // default kaldı
+    }
+
+    #[test]
+    fn observe_regime_first_call_does_not_report_change() {
+        let mut s = ParameterStore::default();
+        let changed = s.observe_regime("Ranging");
+        assert!(!changed, "ilk gözlem değişim sayılmamalı");
+        assert_eq!(s.last_observed_regime.as_deref(), Some("Ranging"));
+        // Patch yazılmamış olmalı (ilk gözlem)
+        assert!(s.regime_overrides.is_empty());
+    }
+
+    #[test]
+    fn observe_regime_change_triggers_tighten_and_reports_true() {
+        let mut s = ParameterStore::default();
+        s.observe_regime("Ranging"); // ilk gözlem, seed
+        let changed = s.observe_regime("HighVolatility");
+        assert!(changed, "rejim değişimi true dönmeli");
+        let patch = s.regime_overrides.get("HighVolatility")
+            .expect("HV patch yazılmalı");
+        assert!(patch.edge_thresholds.is_some());
+        assert!(patch.trade_risk.is_some());
+        // Base 0.50 → 0.50 * 0.70 = 0.35
+        assert!(patch.trade_risk.unwrap().max_position_size < 0.50);
+    }
+
+    #[test]
+    fn observe_regime_same_regime_back_to_back_no_tighten() {
+        let mut s = ParameterStore::default();
+        s.observe_regime("StrongUptrend"); // seed
+        let changed = s.observe_regime("StrongUptrend");
+        assert!(!changed);
+        assert!(s.regime_overrides.is_empty());
     }
 
     #[test]

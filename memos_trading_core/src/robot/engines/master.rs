@@ -1529,10 +1529,11 @@ impl Engine {
             Self::mark_pipeline_stage(state, PipelineStage::FeatureExtract, StepStatus::Done);
             // ML henüz hazır değilse (cold-start) gevşek eşik; modele güven arttıkça katılaşır.
             // Faz 2 c4: edge_threshold rejim-bazlı override'a açık.
-            // Faz 3 c1: rejim ilk kez görülüyorsa adaptive heuristic patch otomatik
-            // yerleştirilir — store yeni rejime "akıllı başlangıç" değerleriyle açılır.
+            // Faz 3 c1: rejim ilk kez görülüyorsa adaptive heuristic patch otomatik.
+            // Faz 3 c3: rejim drift değişimi → ekstra savunmacı tighten + bildirim.
             let regime = Self::classify_regime(&candles);
             Self::ensure_regime_patch(state, regime.as_str());
+            Self::observe_regime_drift(state, regime.as_str());
             let edge_threshold = state.lock().ok()
                 .and_then(|st| st.brain.parameters.read().ok()
                     .map(|p| p.edge_threshold_for(regime.as_str(), ml_confidence)))
@@ -1672,6 +1673,30 @@ impl Engine {
         if ml_confidence < 0.05 { 0.20 }
         else if ml_confidence < 0.30 { 0.35 }
         else { 0.55 }
+    }
+
+    /// Faz 3 c3: rejim drift gözlemi. Önceki cycle'dan farklı bir rejime
+    /// geçildiyse store kendi içinde patch'i bir basamak daha sıkılaştırır;
+    /// burada push_alert ile kullanıcıya bildirim gönderiyoruz (Telegram + UI log).
+    /// İlk gözlem değişim sayılmaz (cold start).
+    fn observe_regime_drift(state: &Arc<Mutex<AppState>>, regime: &str) {
+        let drift = {
+            let st = match state.lock() { Ok(s) => s, Err(_) => return };
+            st.brain.parameters.write().ok().map(|mut p| p.observe_regime(regime)).unwrap_or(false)
+        };
+        if !drift { return; }
+        if let Ok(mut st) = state.lock() {
+            let key = format!("REGIME-DRIFT-{}", regime);
+            let msg = format!(
+                "🌪️ Rejim drift: '{}' → patch sıkılaştırıldı (savunmacı duruş)",
+                regime,
+            );
+            st.push_alert(
+                &key,
+                crate::robot::infra::telegram_notifier::Severity::Warning,
+                msg,
+            );
+        }
     }
 
     /// Faz 3 c1: ilk kez görülen rejim için ParameterStore'da otomatik heuristic
