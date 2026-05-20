@@ -114,6 +114,20 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
 
     let market_fleet: Vec<MarketAnalysisModel> = st.fleet.live_sr_zones.read().ok().map(|zones_map| {
         zones_map.iter().map(|(sym, zones)| {
+            let current_price = live_price_map.get(sym).copied().unwrap_or(0.0);
+            // En yakın destek: midpoint ≤ price (mevcut fiyatın altındaki en yüksek destek).
+            // En yakın direnç: midpoint ≥ price (mevcut fiyatın üstündeki en düşük direnç).
+            // Fiyat 0 ise (henüz live price yok) en yüksek destek / en düşük direnç fallback.
+            let nearest_support = zones.iter()
+                .filter(|z| matches!(z.zone_type, crate::robot::sr_detector::ZoneType::Support)
+                    && (current_price <= 0.0 || z.midpoint <= current_price))
+                .max_by(|a, b| a.midpoint.partial_cmp(&b.midpoint).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|z| z.midpoint);
+            let nearest_resistance = zones.iter()
+                .filter(|z| matches!(z.zone_type, crate::robot::sr_detector::ZoneType::Resistance)
+                    && (current_price <= 0.0 || z.midpoint >= current_price))
+                .min_by(|a, b| a.midpoint.partial_cmp(&b.midpoint).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|z| z.midpoint);
             let zones_converted = zones.iter().map(|z| SrZoneModel {
                 zone_type:   format!("{:?}", z.zone_type),
                 price_low:   z.price_low,
@@ -123,11 +137,11 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
             }).collect();
             MarketAnalysisModel {
                 symbol: sym.clone(),
-                current_price: live_price_map.get(sym).copied().unwrap_or(0.0),
+                current_price,
                 change_24h: 0.0,
                 zones: zones_converted,
-                nearest_support: None,
-                nearest_resistance: None,
+                nearest_support,
+                nearest_resistance,
             }
         }).collect()
     }).unwrap_or_default();

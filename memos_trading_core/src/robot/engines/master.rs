@@ -665,6 +665,97 @@ impl Engine {
         crate::robot::infra::reporting::trade_summary::spawn_trade_summary(
             Arc::clone(&state), reports_dir, report_every,
         );
+
+        // ── Task 10: Periyodik S/R bölge tespiti (mode-agnostik).
+        //
+        // Aktif sembol seti × son N candle → SrDetector::detect → fleet.live_sr_zones.
+        // TUI "Market Gözetimi" (tuş 5) ve Engine'in S/R bağlam sorgusu bu state'i
+        // okuyor; daha önce dolduran bir bağlantı yoktu, panel boş kalıyordu.
+        // SR_UPDATER_DISABLE=1 ile kapatılabilir, SR_UPDATE_EVERY_SECS (default 30)
+        // ile aralık ayarlanır.
+        Self::spawn_sr_updater(Arc::clone(&state));
+    }
+
+    /// 📐 Periyodik S/R updater — aktif sembol setini gezer, son 200 candle üzerinden
+    /// `SrDetector::detect` çağırıp `fleet.live_sr_zones` HashMap'ini günceller.
+    ///
+    /// Aktif sembol seti: `config.symbol` + `config.pinned_symbols` + orchestrator
+    /// worker'ları (yinelemeler atılır). DB'de yeterli candle yoksa sembol atlanır.
+    /// İlk turda warmup yok — bot ilk açıldığında TUI hemen dolu görünür.
+    fn spawn_sr_updater(state: Arc<Mutex<AppState>>) {
+        tokio::spawn(async move {
+            if std::env::var("SR_UPDATER_DISABLE").ok().as_deref() == Some("1") {
+                if let Ok(mut st) = state.lock() {
+                    st.push_log("📐 SR updater: SR_UPDATER_DISABLE=1, task pasif".into());
+                }
+                return;
+            }
+            let interval_secs: u64 = std::env::var("SR_UPDATE_EVERY_SECS")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+            let detector = crate::robot::sr_detector::SrDetector::new(
+                crate::robot::sr_detector::SrDetectorConfig::default()
+            );
+            let mut first_run_logged = false;
+
+            loop {
+                let stop = state.lock().map(|s| s.app_stop_signal.load(Ordering::Relaxed)).unwrap_or(true);
+                if stop { break; }
+
+                // 1) Aktif sembolleri topla.
+                let (db_path, interval, symbols) = {
+                    let st = match state.lock() { Ok(s) => s, Err(_) => break };
+                    let mut symbols: Vec<String> = vec![];
+                    if !st.config.symbol.is_empty() && !symbols.contains(&st.config.symbol) {
+                        symbols.push(st.config.symbol.clone());
+                    }
+                    for s in &st.config.pinned_symbols {
+                        if !symbols.contains(s) { symbols.push(s.clone()); }
+                    }
+                    if let Ok(orch) = st.fleet.symbol_orchestrator.read() {
+                        for w in orch.get_worker_status() {
+                            if !symbols.contains(&w.symbol) { symbols.push(w.symbol); }
+                        }
+                    }
+                    (st.config.db_path.clone(), st.config.interval.clone(), symbols)
+                };
+
+                // 2) Her sembol için candles oku, SR detect — IO/CPU lock dışında yapılır.
+                let mut zones_map: std::collections::HashMap<String, Vec<crate::robot::sr_detector::SrZone>>
+                    = Default::default();
+                let mut total_zones = 0usize;
+                for sym in &symbols {
+                    if let Ok(candles) = crate::persistence::reader::read_candles(&db_path, sym, &interval, 200) {
+                        // Detect lookback=5 default; en az ~11 candle gerekir, güvenli alt sınır 20.
+                        if candles.len() >= 20 {
+                            let zones = detector.detect(&candles);
+                            if !zones.is_empty() {
+                                total_zones += zones.len();
+                                zones_map.insert(sym.clone(), zones);
+                            }
+                        }
+                    }
+                }
+
+                // 3) Yaz — kısa scope'lu write lock.
+                if let Ok(st) = state.lock() {
+                    if let Ok(mut guard) = st.fleet.live_sr_zones.write() {
+                        *guard = zones_map;
+                    }
+                }
+
+                if !first_run_logged {
+                    if let Ok(mut st) = state.lock() {
+                        st.push_log(format!(
+                            "📐 SR updater: {} sembol, {} bölge, her {}sn",
+                            symbols.len(), total_zones, interval_secs,
+                        ));
+                    }
+                    first_run_logged = true;
+                }
+
+                sleep(Duration::from_secs(interval_secs)).await;
+            }
+        });
     }
 
     /// 💰 Periyodik hesap bakiye senkronu — Live mode için.
