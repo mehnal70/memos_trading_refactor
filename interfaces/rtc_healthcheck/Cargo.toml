@@ -1,0 +1,10 @@
+[package]
+name = "rtc_healthcheck"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+memos_trading_core = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

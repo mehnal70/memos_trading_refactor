@@ -5,6 +5,7 @@
 #   ./run_rtc.sh --release             # TUI · release
 #   ./run_rtc.sh --headless            # Headless servis (rtc_headless)
 #   ./run_rtc.sh --headless --release  # Headless · release
+#   ./run_rtc.sh --healthcheck         # Çift kol smoke (paper + live dry-run)
 #   ./run_rtc.sh --build-only          # Sadece derle, çalıştırma
 #   BINANCE_API_KEY=xxx BINANCE_API_SECRET=yyy ./run_rtc.sh
 # ──────────────────────────────────────────────────────────────────────────────
@@ -22,10 +23,11 @@ BUILD_ONLY=false
 # Argüman parse
 for arg in "$@"; do
     case "$arg" in
-        --release)    BUILD_MODE="release" ;;
-        --headless)   TARGET_BIN="rtc_headless" ;;
-        --tui)        TARGET_BIN="rtc_tui" ;;
-        --build-only) BUILD_ONLY=true ;;
+        --release)     BUILD_MODE="release" ;;
+        --headless)    TARGET_BIN="rtc_headless" ;;
+        --tui)         TARGET_BIN="rtc_tui" ;;
+        --healthcheck) TARGET_BIN="rtc_healthcheck" ;;
+        --build-only)  BUILD_ONLY=true ;;
         -h|--help)
             sed -n '2,11p' "$0"
             exit 0

@@ -3,6 +3,7 @@ members = [
     "memos_trading_core",
     "interfaces/rtc_tui",
     "interfaces/rtc_headless",
+    "interfaces/rtc_healthcheck",
 ]
 resolver = "2"
 

@@ -1826,6 +1826,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtc_healthcheck"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "memos_trading_core",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rtc_tui"
 version = "0.1.0"
 dependencies = [
