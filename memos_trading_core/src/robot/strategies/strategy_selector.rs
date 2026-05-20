@@ -3,11 +3,15 @@
 // `simulate_score`: walk-forward mantığında her bar için stratejiyi çalıştırır,
 // bir sonraki barın getirisini sinyal yönüne göre toplayarak ortalama
 // işlem getirisini döndürür. Eski "son 3 bar yükseldi mi" dummy'sinin yerine.
+//
+// Faz 4 c2: Aday strateji listesi artık `StrategyRegistry`'den geliyor. Varsayılan
+// `new()` kompakt bir aday seti üretir (MA/RSI/MACD/BB); özel kullanım için
+// `from_registry(names…)` veya `with_strategies(vec)` ile başka kombinasyonlar
+// kurulabilir → engine ya da test buradan plug-in zincirini değiştirir,
+// kaynak kod modifikasyonu gerekmez.
 
 use crate::core::types::{Candle, StrategyParams, Signal};
-use crate::robot::strategies::{
-    Strategy, MaCrossoverStrategy, RsiStrategy, MacdStrategy, BollingerBandsStrategy,
-};
+use crate::robot::strategies::{default_registry, Strategy, StrategyRegistry};
 
 /// Strateji seçici: walk-forward skoru en yüksek stratejiyi seçer.
 pub struct StrategySelector {
@@ -24,17 +28,26 @@ impl Default for StrategySelector {
 }
 
 impl StrategySelector {
+    /// Varsayılan kompakt aday seti (MA / RSI / MACD / BB) registry'den çözülür.
     pub fn new() -> Self {
-        Self {
-            strategies: vec![
-                Box::new(MaCrossoverStrategy),
-                Box::new(RsiStrategy),
-                Box::new(MacdStrategy),
-                Box::new(BollingerBandsStrategy),
-            ],
-            lookback: 30,
-            min_trades: 3,
-        }
+        Self::from_registry(
+            &default_registry(),
+            &["MA_CROSSOVER", "RSI", "MACD", "BB"],
+        )
+    }
+
+    /// Verilen registry'den belirtilen isimleri toplar. Bilinmeyen isim
+    /// registry'nin fallback davranışına düşer — selector çağrı yerinde
+    /// yeniden panik üretmez.
+    pub fn from_registry(registry: &StrategyRegistry, names: &[&str]) -> Self {
+        let strategies = names.iter().map(|n| registry.make(n)).collect();
+        Self { strategies, lookback: 30, min_trades: 3 }
+    }
+
+    /// Hazır strateji vektörüyle kurma — testlerde özel/dummy strateji
+    /// enjekte etmek için kullanışlı.
+    pub fn with_strategies(strategies: Vec<Box<dyn Strategy>>) -> Self {
+        Self { strategies, lookback: 30, min_trades: 3 }
     }
 
     /// Hepsini dener, walk-forward skoru en yüksek stratejiyi ve onun şu anki

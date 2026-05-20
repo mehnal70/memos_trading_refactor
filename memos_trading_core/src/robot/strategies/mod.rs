@@ -11,10 +11,14 @@ pub mod funding;
 pub mod trend;
 pub mod oscillator;
 pub mod ensemble;
+pub mod registry;
 pub mod strategy_selector;
 
 // Ortak sözleşme
 pub use base::Strategy;
+
+// Plug-in registry (Faz 4 c2)
+pub use registry::{default_registry, StrategyFactory, StrategyRegistry};
 
 // Yardımcılar (HTF filter, optimizer)
 pub use utils::{htf_trend_filter, grid_search_optimization};

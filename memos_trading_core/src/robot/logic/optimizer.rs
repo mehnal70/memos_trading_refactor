@@ -194,26 +194,20 @@ fn forward_bars_for_interval(interval: &str) -> usize {
 }
 
 /// 🧠 STRATEJİ FABRİKASI (Srivastava Factory Method Kalıbı)
-/// İsmi dize (string) olarak verilen stratejiyi, projenin kurallarına göre 
+/// İsmi dize (string) olarak verilen stratejiyi, projenin kurallarına göre
 /// otonom çalışabilecek somut nesneye dönüştürür.
+///
+/// Faz 4 c2: Çözüm artık `StrategyRegistry`'ye delege ediliyor. Process-genelinde
+/// tek sefer kurulan `default_registry()` cache'lenir; yeni strateji eklemek
+/// için artık burada `match` yazmak gerekmez, `registry::default_registry()`
+/// içine satır eklemek yeterli.
 pub fn make_strategy_pub(name: &str) -> Box<dyn Strategy + Send + Sync> {
-    match name.to_uppercase().as_str() {
-        "RSI" => Box::new(RsiStrategy),
-        "MACD" => Box::new(MacdStrategy),
-        "BOLLINGER_BANDS" | "BB" => Box::new(BollingerBandsStrategy),
-        "SUPERTREND" => Box::new(SupertrendStrategy),
-        "EMA_CROSSOVER" => Box::new(EmaCrossoverStrategy),
-        "STOCH_RSI" | "STOCHASTIC_RSI" => Box::new(StochasticRsiStrategy),
-        "CCI" => Box::new(CciStrategy),
-        "PRICE_ACTION" => Box::new(PriceActionStrategy),
-        "ICT_FVG" => Box::new(IctFvgStrategy),
-        "SMC" => Box::new(SmcStrategy),
-        "MA_CROSSOVER" | "DEFAULT" => Box::new(MaCrossoverStrategy),
-        _ => {
-            // Safe Fallback: Bilinmeyen bir strateji gelirse sistemi çökertme, varsayılan MA'yı dön.
-            Box::new(MaCrossoverStrategy)
-        }
-    }
+    use std::sync::OnceLock;
+    use crate::robot::strategies::StrategyRegistry;
+
+    static REGISTRY: OnceLock<StrategyRegistry> = OnceLock::new();
+    let registry = REGISTRY.get_or_init(crate::robot::strategies::default_registry);
+    registry.make(name)
 }
 
 /// Interval tümdengeline göre ağırlıklı strateji sıralaması.
