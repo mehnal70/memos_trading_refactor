@@ -23,9 +23,9 @@ pub fn draw_logs(f: &mut ratatui::Frame, area: Rect, snap: &MissionControl, scro
         .collect();
 
     let title = if scroll > 0 {
-        format!(" 📋 Olay Günlüğü [Geçmişte: {}] ", scroll)
+        format!(" 📋 Olay Günlüğü [Geçmişte: {} · Home: canlıya dön] ", scroll)
     } else {
-        " 📋 Olay Günlüğü [Canlı] ".to_string()
+        " 📋 Olay Günlüğü [Canlı · ↑/↓ geçmişi kaydır] ".to_string()
     };
 
     let list = List::new(log_items)

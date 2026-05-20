@@ -111,6 +111,8 @@ impl TuiManager {
                                 self.log_scroll = self.log_scroll.saturating_sub(1);
                             }
                         }
+                        // Home: olay günlüğünde canlı kuyruğa hızlı dönüş (scroll=0).
+                        KeyCode::Home => self.log_scroll = 0,
                         KeyCode::Esc  => self.settings_open = false,
 
                         // --- Operasyonel Komutlar (AppState'e iletilir) ---

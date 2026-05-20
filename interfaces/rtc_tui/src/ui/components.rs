@@ -89,17 +89,23 @@ pub fn render_pipeline_status(area: Rect, f: &mut ratatui::Frame, steps: &[Pipel
     f.render_widget(p, area);
 }
 
-/// Sermaye Verimlilik Çubuğu (Equity Gauge)
+/// Sermaye Verimlilik Çubuğu (Equity Gauge).
+///
+/// Anlık sermaye değeri zaten `render_finance_header`'da basıldığı için gauge label'ında
+/// tekrar etmiyoruz — iki yerde aynı rakam snapshot tickleriyle güncellenince "altında
+/// başka bir rakam belirip kayboluyor" flicker izlenimi doğuyordu. Burada sadece
+/// portföy/başlangıç yüzdesi gösterilir.
 pub fn render_equity_gauge(area: Rect, f: &mut ratatui::Frame, snap: &FinanceSnapshot) {
-    let pct = if snap.starting_capital > 0.0 {
-        ((snap.total_equity / snap.starting_capital) * 100.0).clamp(0.0, 100.0) as u16
-    } else { 0 };
+    let ratio = if snap.starting_capital > 0.0 {
+        (snap.total_equity / snap.starting_capital) * 100.0
+    } else { 0.0 };
+    let pct_clamped = ratio.clamp(0.0, 100.0) as u16;
 
     let gauge = Gauge::default()
         .block(Block::default().title(" Portföy Sağlığı ").borders(Borders::ALL))
         .gauge_style(Style::default().fg(Color::LightBlue).bg(Color::DarkGray))
-        .percent(pct)
-        .label(format!("${:.2} / Başlangıç: ${:.2}", snap.total_equity, snap.starting_capital));
+        .percent(pct_clamped)
+        .label(format!("%{:.1}  ·  Başlangıç ${:.2}", ratio, snap.starting_capital));
 
     f.render_widget(gauge, area);
 }
