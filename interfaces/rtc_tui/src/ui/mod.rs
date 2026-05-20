@@ -26,7 +26,13 @@ use ratatui::Frame;
 ///   7 → Varlık Performansı  (tab 6)
 ///   8 → Pipeline            (tab 7)
 ///   9 → Scalp/Swing         (tab 8)
-pub fn render_main(f: &mut Frame, snap: &MissionControl, active_tab: usize, log_scroll: usize) {
+pub fn render_main(
+    f: &mut Frame,
+    snap: &MissionControl,
+    active_tab: usize,
+    log_scroll: usize,
+    market_symbol_index: usize,
+) {
     let area = f.size();
 
     match active_tab {
@@ -34,7 +40,7 @@ pub fn render_main(f: &mut Frame, snap: &MissionControl, active_tab: usize, log_
         1 => ai_center::draw(f, area, snap),
         2 => archives::draw_logs(f, area, snap, log_scroll),
         3 => archives::draw_trade_history(f, area, snap),
-        4 => market_watch::draw(f, area, snap),
+        4 => market_watch::draw(f, area, snap, market_symbol_index),
         5 => risk_center::draw(f, area, snap),
         6 => charts::draw(f, area, snap),
         7 => pipeline::draw(f, area, snap),

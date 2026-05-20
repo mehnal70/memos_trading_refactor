@@ -21,6 +21,9 @@ use crate::ui;
 pub struct TuiManager {
     pub active_tab: usize,
     pub log_scroll: usize,
+    /// Market Gözetimi sekmesinde (tab 4) seçili sembolün index'i. Up/Down ile değişir,
+    /// market_fleet uzunluğuna her render'da clamp edilir.
+    pub market_symbol_index: usize,
     pub settings_open: bool,
 }
 
@@ -32,7 +35,7 @@ impl TuiManager {
             .and_then(|v| v.parse::<usize>().ok())
             .map(|n| n.min(8))
             .unwrap_or(0);
-        Self { active_tab: initial, log_scroll: 0, settings_open: false }
+        Self { active_tab: initial, log_scroll: 0, market_symbol_index: 0, settings_open: false }
     }
 
     pub async fn spawn_tui_loop(&mut self, state: Arc<Mutex<AppState>>) -> io::Result<()> {
@@ -69,8 +72,13 @@ impl TuiManager {
             };
 
             // 2. ÇİZİM YAP (Kilit yok, tam performans)
+            // Market Gözetimi seçim index'i her render öncesi fleet uzunluğuna clamp.
+            let fleet_len = snapshot.market_fleet.len();
+            if fleet_len > 0 && self.market_symbol_index >= fleet_len {
+                self.market_symbol_index = fleet_len - 1;
+            }
             terminal.draw(|f| {
-                ui::render_main(f, &snapshot, self.active_tab, self.log_scroll);
+                ui::render_main(f, &snapshot, self.active_tab, self.log_scroll, self.market_symbol_index);
             })?;
 
             // 3. INPUT İŞLEMLERİ (Event Poll)
@@ -83,8 +91,26 @@ impl TuiManager {
                                 self.active_tab = (digit as usize).saturating_sub(1);
                             }
                         }
-                        KeyCode::Up   => self.log_scroll = self.log_scroll.saturating_add(1),
-                        KeyCode::Down => self.log_scroll = self.log_scroll.saturating_sub(1),
+                        // Up/Down sekme-aware: Market Gözetimi (tab 4) iken sembol seçer;
+                        // diğer sekmelerde log scroll'unu hareket ettirir.
+                        KeyCode::Up => {
+                            if self.active_tab == 4 {
+                                self.market_symbol_index = self.market_symbol_index.saturating_sub(1);
+                            } else {
+                                self.log_scroll = self.log_scroll.saturating_add(1);
+                            }
+                        }
+                        KeyCode::Down => {
+                            if self.active_tab == 4 {
+                                let n = snapshot.market_fleet.len();
+                                if n > 0 {
+                                    self.market_symbol_index =
+                                        (self.market_symbol_index + 1).min(n - 1);
+                                }
+                            } else {
+                                self.log_scroll = self.log_scroll.saturating_sub(1);
+                            }
+                        }
                         KeyCode::Esc  => self.settings_open = false,
 
                         // --- Operasyonel Komutlar (AppState'e iletilir) ---
