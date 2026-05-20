@@ -1522,7 +1522,11 @@ impl Engine {
             let edge = Self::compute_edge_score(&candles, &signal, ml_confidence);
             Self::mark_pipeline_stage(state, PipelineStage::FeatureExtract, StepStatus::Done);
             // ML henüz hazır değilse (cold-start) gevşek eşik; modele güven arttıkça katılaşır.
-            let edge_threshold = Self::dynamic_edge_threshold(ml_confidence);
+            // Faz 2: sabit 0.20/0.35/0.55 eşikleri yerine brain.parameters.edge_thresholds'tan
+            // okunuyor — runtime'da HyperOpt veya manuel env update'i ile değişebilir.
+            let edge_threshold = state.lock().ok()
+                .and_then(|st| st.brain.parameters.read().ok().map(|p| p.edge_threshold(ml_confidence)))
+                .unwrap_or_else(|| Self::dynamic_edge_threshold(ml_confidence));
             // Aday log eşiği: kabul edilen edge'in %75'inin altındaki sinyaller spam sayılır.
             let edge_log_floor = edge_threshold * 0.75;
 

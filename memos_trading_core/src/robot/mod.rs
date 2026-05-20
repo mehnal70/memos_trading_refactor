@@ -25,6 +25,7 @@ pub mod ml_engine;
 pub mod portfolio_manager;
 pub mod symbol_manager;
 pub mod risk;
+pub mod parameters;  // Faz 2: dinamik parametre store'u (HyperOpt + IntelligenceHub yazar, engine okur)
 //pub mod market_regime;      //dosya
 pub mod signal_evaluator;   //dosya
 

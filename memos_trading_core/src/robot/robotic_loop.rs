@@ -72,6 +72,11 @@ pub struct BrainBox {
     /// 🧠 Otonom Öğrenme Merkezi (drift, pattern, post-trade learning, evolution).
     /// Ana döngü her tur drift güncellemesi ve periyodik evrim için bu hub'a yazar.
     pub intelligence_hub: Arc<RwLock<crate::robot::ml_engine::intelligence_hub::IntelligenceHub>>,
+
+    /// Faz 2: dinamik parametre store'u. `from_env` ile boot'ta default + env override
+    /// olarak doldurulur; HyperOpt/IntelligenceHub runtime'da güncelleyebilir.
+    /// Edge eşikleri başta olmak üzere sabit sayılan değerler buradan akıyor.
+    pub parameters: Arc<RwLock<crate::robot::parameters::ParameterStore>>,
 }
 
 /// 🧠 OTONOM DEĞERLENDİRME: `ml_engine::IntelligenceHub`'dan gelen ham 
@@ -229,6 +234,10 @@ impl AppState {
             thresholds: AdaptiveThresholds { drift_baseline: 0.15, volatility_regime: 1.0 },
             drift_history: VecDeque::with_capacity(100),
             intelligence_hub: Arc::new(RwLock::new(intelligence_hub)),
+            // Faz 2: parametre store'u boot'ta env override'larıyla beslenir.
+            parameters: Arc::new(RwLock::new(
+                crate::robot::parameters::ParameterStore::from_env(),
+            )),
         };
 
         // --- 🧬 F1: ORKESTRATÖRÜNÜN SAFİLEŞTİRİLMESİ VE FİLO KAYDI ---
