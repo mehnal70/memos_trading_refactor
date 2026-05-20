@@ -14,6 +14,7 @@ pub mod state; // state/mod.rs veya state.rs dosyasını tanır
 // Tier 1: Veri ve İnfaz (Core Execution)
 pub mod data_fetcher;
 pub mod data_pipeline;
+pub mod diagnostics;     // Faz 4 c4: plug-in keşfedilebilirlik snapshot'ı
 pub mod execution;       // Faz 4 c3: yürütme öncesi policy plug-in zinciri
 pub mod order_management;
 //pub mod indicators_v2_ek;

@@ -1497,8 +1497,15 @@ impl Engine {
                 live_strategy.to_string()
             };
 
-            // "IDLE_PROTECT" / "IDLE" gibi savunma rejimlerinde sinyal üretme.
-            if strategy_name.to_uppercase().starts_with("IDLE") { return; }
+            // Savunma rejimleri (IDLE_PROTECT vb.) — kural IdleStrategyPolicy'de;
+            // master.rs ve RoboticTradeExecutor aynı kararı tek source of truth
+            // üzerinden okur (Faz 4 c4).
+            if !crate::robot::execution::IdleStrategyPolicy
+                .evaluate_name(Some(&strategy_name))
+                .is_allow()
+            {
+                return;
+            }
 
             let strategy = crate::robot::logic::optimizer::make_strategy_pub(&strategy_name);
             let strat_params = crate::core::types::StrategyParams::default();
