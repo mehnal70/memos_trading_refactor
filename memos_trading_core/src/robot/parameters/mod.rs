@@ -14,6 +14,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod adaptive;
+
 /// Rejim-bazlı parametre patch'i. Yalnızca override edilmek istenen alanlar `Some`
 /// olur; diğerleri base ParameterStore değerlerini korur (sparse override).
 /// Key olarak `MarketRegime::as_str()` çıktısı kullanılır
@@ -37,6 +39,12 @@ impl RegimePatch {
     pub fn with_trade_risk(mut self, t: TradeRiskParams) -> Self {
         self.trade_risk = Some(t);
         self
+    }
+
+    /// Patch hiçbir alanı override etmiyor mu? Engine boş patch'leri store'a
+    /// koymaktan kaçınmak için bunu kontrol eder.
+    pub fn is_empty(&self) -> bool {
+        self.edge_thresholds.is_none() && self.trade_risk.is_none()
     }
 }
 

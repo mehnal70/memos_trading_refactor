@@ -1528,9 +1528,11 @@ impl Engine {
             let edge = Self::compute_edge_score(&candles, &signal, ml_confidence);
             Self::mark_pipeline_stage(state, PipelineStage::FeatureExtract, StepStatus::Done);
             // ML henüz hazır değilse (cold-start) gevşek eşik; modele güven arttıkça katılaşır.
-            // Faz 2 c4: edge_threshold rejim-bazlı override'a açık — store'da o rejim için
-            // patch varsa o eşikler, yoksa base parametreler kullanılır.
+            // Faz 2 c4: edge_threshold rejim-bazlı override'a açık.
+            // Faz 3 c1: rejim ilk kez görülüyorsa adaptive heuristic patch otomatik
+            // yerleştirilir — store yeni rejime "akıllı başlangıç" değerleriyle açılır.
             let regime = Self::classify_regime(&candles);
+            Self::ensure_regime_patch(state, regime.as_str());
             let edge_threshold = state.lock().ok()
                 .and_then(|st| st.brain.parameters.read().ok()
                     .map(|p| p.edge_threshold_for(regime.as_str(), ml_confidence)))
@@ -1670,6 +1672,31 @@ impl Engine {
         if ml_confidence < 0.05 { 0.20 }
         else if ml_confidence < 0.30 { 0.35 }
         else { 0.55 }
+    }
+
+    /// Faz 3 c1: ilk kez görülen rejim için ParameterStore'da otomatik heuristic
+    /// patch yerleştirir. Patch zaten varsa (manuel ya da önceki cycle'da yazıldı)
+    /// dokunmaz — HyperOpt veya manuel override'ın ezilmesini önler.
+    /// Boş heuristic patch ise (Weak* / Unknown) hiç yazılmaz.
+    fn ensure_regime_patch(state: &Arc<Mutex<AppState>>, regime: &str) {
+        let needs_patch = state.lock().ok()
+            .and_then(|st| st.brain.parameters.read().ok()
+                .map(|p| !p.regime_overrides.contains_key(regime)))
+            .unwrap_or(false);
+        if !needs_patch { return; }
+
+        let patch = crate::robot::parameters::adaptive::default_patch_for_regime(regime);
+        if patch.is_empty() { return; }
+
+        if let Ok(mut st) = state.lock() {
+            if let Ok(mut params) = st.brain.parameters.write() {
+                params.set_regime_patch(regime, patch);
+            }
+            st.push_log(format!(
+                "📐 Rejim '{}' ilk kez görüldü → adaptive patch uygulandı (Faz 3)",
+                regime,
+            ));
+        }
     }
 
     /// Pipeline canon aşamasını "bitti" olarak işaretler ve Failed/Skipped
