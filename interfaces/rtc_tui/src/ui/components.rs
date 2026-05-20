@@ -5,21 +5,41 @@ use ratatui::style::{Color, Style, Modifier};
 use memos_trading_core::core::model::{PositionModel, FinanceSnapshot, PipelineStep};
 use ratatui::text::{Line, Span};
 
-/// Srivastava ATP - Evrensel Finansal Üst Bilgi
-/// main.rs içinde her sekmede tekrarlanan bakiye çizimlerini bitirir.
+/// Srivastava ATP - Evrensel Finansal Üst Bilgi.
+///
+/// Üç bölüm aynı satırda:
+///   - **SERMAYE (gerçekleşen)**: starting_capital + realize_pnl. Açık pozisyon
+///     kapanana kadar değişmez → "stabil tutamak" gözle hızlı okunur.
+///   - **Açık PnL (kümüle)**: tüm açık pozisyonların mark-to-market PnL toplamı;
+///     fiyatla anlık dalgalanır ama ayrı sütunda olduğu için sermaye flicker
+///     yapmıyor görünür.
+///   - **NET**: SERMAYE + Açık PnL = anlık portföy değeri.
+///
 /// `phase` boş geçilebilir; doluysa sağ tarafa renkli rozet düşer.
 pub fn render_finance_header(area: Rect, f: &mut ratatui::Frame, snap: &FinanceSnapshot, phase: &str) {
-    let pnl = snap.net_pnl();
-    let pnl_color = if pnl >= 0.0 { Color::LightGreen } else { Color::LightRed };
+    let stable_equity = snap.starting_capital + snap.realize_pnl;
+    let open_color = if snap.open_pnl >= 0.0 { Color::LightGreen } else { Color::LightRed };
+    let net_color  = if snap.total_equity >= snap.starting_capital { Color::LightGreen } else { Color::LightRed };
 
-    let body = format!(
-        " 💰 SERMAYE: ${:.2} | Realize: {:+.2} | Açık PnL: {:+.2} | NET: {:+.2}   ",
-        snap.total_equity, snap.realize_pnl, snap.open_pnl, pnl
-    );
+    let mut spans = vec![
+        Span::styled(
+            format!(" 💰 SERMAYE: ${:.2}", stable_equity),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  ·  "),
+        Span::styled(
+            format!("Açık PnL (kümüle): {:+.2}", snap.open_pnl),
+            Style::default().fg(open_color),
+        ),
+        Span::raw("  ·  "),
+        Span::styled(
+            format!("NET: ${:.2}", snap.total_equity),
+            Style::default().fg(net_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("   "),
+    ];
 
     let (phase_emoji, phase_color) = phase_badge(phase);
-    let mut spans = vec![Span::styled(body,
-        Style::default().fg(pnl_color).add_modifier(Modifier::BOLD))];
     if !phase.is_empty() {
         spans.push(Span::styled(
             format!("{} {}", phase_emoji, phase),
@@ -91,18 +111,18 @@ pub fn render_pipeline_status(area: Rect, f: &mut ratatui::Frame, steps: &[Pipel
 
 /// Sermaye Verimlilik Çubuğu (Equity Gauge).
 ///
-/// Anlık sermaye değeri zaten `render_finance_header`'da basıldığı için gauge label'ında
-/// tekrar etmiyoruz — iki yerde aynı rakam snapshot tickleriyle güncellenince "altında
-/// başka bir rakam belirip kayboluyor" flicker izlenimi doğuyordu. Burada sadece
-/// portföy/başlangıç yüzdesi gösterilir.
+/// Yüzde stable sermayeye (gerçekleşmiş = starting + realize_pnl) göre hesaplanır
+/// → açık pozisyonun mark-to-market'i gauge'u titretmez. Anlık NET değer zaten
+/// header'da görünüyor; burada sadece "gerçekleşen portföy sağlığı" izlenir.
 pub fn render_equity_gauge(area: Rect, f: &mut ratatui::Frame, snap: &FinanceSnapshot) {
+    let stable_equity = snap.starting_capital + snap.realize_pnl;
     let ratio = if snap.starting_capital > 0.0 {
-        (snap.total_equity / snap.starting_capital) * 100.0
+        (stable_equity / snap.starting_capital) * 100.0
     } else { 0.0 };
     let pct_clamped = ratio.clamp(0.0, 100.0) as u16;
 
     let gauge = Gauge::default()
-        .block(Block::default().title(" Portföy Sağlığı ").borders(Borders::ALL))
+        .block(Block::default().title(" Portföy Sağlığı (gerçekleşen) ").borders(Borders::ALL))
         .gauge_style(Style::default().fg(Color::LightBlue).bg(Color::DarkGray))
         .percent(pct_clamped)
         .label(format!("%{:.1}  ·  Başlangıç ${:.2}", ratio, snap.starting_capital));
