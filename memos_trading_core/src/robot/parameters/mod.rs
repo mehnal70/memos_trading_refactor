@@ -183,11 +183,25 @@ pub struct ParameterStore {
     /// `apply_trade_feedback` bunu okuyup patch'i rafine eder.
     #[serde(default)]
     pub regime_feedback: HashMap<String, RegimeFeedback>,
-    /// Faz 3 c3: en son cycle'da gözlenen rejim. `observe_regime` drift
-    /// tespiti yapıp değişimde patch'i otomatik sıkılaştırır.
+    /// Faz 3 c3: en son cycle'da gözlenen (confirmed) rejim. `observe_regime`
+    /// drift tespiti yapıp değişimde patch'i otomatik sıkılaştırır.
     #[serde(default)]
     pub last_observed_regime: Option<String>,
+    /// Hysteresis için aday rejim: anlık sallanmaları drift saymadan önce
+    /// `DRIFT_CONFIRMATION_TURNS` kez üst üste görülmesi gerekir.
+    /// (regime, ardışık sayım). Confirmed olunca None.
+    #[serde(default)]
+    pub pending_regime: Option<(String, u32)>,
+    /// Cooldown'ı sürdürmek için son confirmed drift'in epoch saniyesi.
+    /// 0 = hiç drift yok. Aynı 60 sn içinde tekrar drift tetiklenmez.
+    #[serde(default)]
+    pub last_drift_at_secs: u64,
 }
+
+/// Hysteresis: yeni rejim drift sayılmadan önce kaç ardışık cycle gözlemlenmeli.
+pub const DRIFT_CONFIRMATION_TURNS: u32 = 3;
+/// Cooldown: iki ardışık drift arasında en az kaç saniye geçmeli (saniye, epoch).
+pub const DRIFT_COOLDOWN_SECS: u64 = 60;
 
 impl Default for ParameterStore {
     fn default() -> Self {
@@ -200,6 +214,8 @@ impl Default for ParameterStore {
             regime_overrides: HashMap::new(),
             regime_feedback:  HashMap::new(),
             last_observed_regime: None,
+            pending_regime: None,
+            last_drift_at_secs: 0,
         }
     }
 }
@@ -323,25 +339,71 @@ impl ParameterStore {
         true
     }
 
-    /// Faz 3 c3: rejim değişimi gözlemi.
+    /// Faz 3 c3: rejim değişimi gözlemi (hysteresis + cooldown'lı).
     ///
-    /// Engine cycle her tur bu metodu çağırır. Önceki rejimden farklı bir rejime
-    /// geçilmişse:
+    /// Engine cycle her tur bu metodu çağırır. Anlık rejim sallanmaları drift
+    /// saymaz; bir rejimin "confirmed drift" olması için iki koşul gerekir:
+    ///   1. Yeni rejim üst üste `DRIFT_CONFIRMATION_TURNS` cycle aynı kalmalı (hysteresis).
+    ///   2. Son confirmed drift'ten en az `DRIFT_COOLDOWN_SECS` geçmiş olmalı (cooldown).
+    ///
+    /// Confirmed drift'te:
     ///   - `last_observed_regime` güncellenir.
-    ///   - Yeni rejim için patch'i bir basamak sıkılaştırır (drift sonrası
-    ///     savunmacı duruş — eski parametreler artık geçerli olmayabilir).
-    ///   - true döner (çağıran taraf push_alert atabilir).
+    ///   - `last_drift_at_secs` şimdiki epoch'a sabitlenir.
+    ///   - Yeni rejim için patch bir basamak sıkılaştırılır.
+    ///   - `true` döner (çağıran taraf push_alert atabilir).
     /// İlk gözlem değişim sayılmaz (cold start için yumuşak).
     pub fn observe_regime(&mut self, regime: &str) -> bool {
-        let changed = match &self.last_observed_regime {
-            Some(prev) => prev != regime,
-            None => false,
+        self.observe_regime_with_now(regime, now_epoch_secs())
+    }
+
+    /// `observe_regime`'in deterministik çekirdeği — `now_secs` parametre olarak
+    /// alındığı için unit testlerde zaman sahteleştirilebilir.
+    pub fn observe_regime_with_now(&mut self, regime: &str, now_secs: u64) -> bool {
+        // İlk gözlem: cold-start; sadece kaydet ve geçiş bildirme.
+        let prev = match self.last_observed_regime.as_deref() {
+            Some(p) => p.to_string(),
+            None => {
+                self.last_observed_regime = Some(regime.to_string());
+                self.pending_regime = None;
+                return false;
+            }
         };
-        self.last_observed_regime = Some(regime.to_string());
-        if changed {
-            self.tighten_regime_patch(regime);
+
+        // Aynı rejim devam ediyor → aday sıfırlanır, drift yok.
+        if prev == regime {
+            self.pending_regime = None;
+            return false;
         }
-        changed
+
+        // Yeni bir rejim aday olarak görünüyor → ardışık sayımı arttır.
+        let count = match self.pending_regime.take() {
+            Some((cand, n)) if cand == regime => n.saturating_add(1),
+            _ => 1,
+        };
+
+        // Hysteresis: yeterince üst üste görüldü mü?
+        if count < DRIFT_CONFIRMATION_TURNS {
+            self.pending_regime = Some((regime.to_string(), count));
+            return false;
+        }
+
+        // Cooldown: önceki drift üstünden yeterli süre geçti mi?
+        if self.last_drift_at_secs != 0
+            && now_secs.saturating_sub(self.last_drift_at_secs) < DRIFT_COOLDOWN_SECS
+        {
+            // Aday kararlı ama henüz cooldown bitmedi — sayımı tutmaya devam et,
+            // ancak tighten/log tetiklemiyoruz. Cooldown sonunda bir sonraki
+            // çağrıda confirmed olacak.
+            self.pending_regime = Some((regime.to_string(), count));
+            return false;
+        }
+
+        // Onaylı drift.
+        self.last_observed_regime = Some(regime.to_string());
+        self.last_drift_at_secs = now_secs;
+        self.pending_regime = None;
+        self.tighten_regime_patch(regime);
+        true
     }
 
     /// Rejim patch'ini tek bir basamak sıkılaştırır. apply_trade_feedback ve
@@ -374,6 +436,15 @@ impl ParameterStore {
 
 fn parse_env_f64(key: &str) -> Option<f64> {
     std::env::var(key).ok().and_then(|v| v.parse().ok())
+}
+
+/// Sistemden epoch saniyesini okur; SystemTime hatasında 0 döner (cooldown
+/// kapanır → güvenli taraf: hiç drift atma değil, eski davranışla aynı).
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -494,9 +565,12 @@ mod tests {
     #[test]
     fn observe_regime_change_triggers_tighten_and_reports_true() {
         let mut s = ParameterStore::default();
-        s.observe_regime("Ranging"); // ilk gözlem, seed
-        let changed = s.observe_regime("HighVolatility");
-        assert!(changed, "rejim değişimi true dönmeli");
+        s.observe_regime_with_now("Ranging", 1000); // ilk gözlem, seed
+        // Hysteresis: yeni rejim için ardışık 3 cycle gerek.
+        assert!(!s.observe_regime_with_now("HighVolatility", 1001), "1. tur henüz drift sayılmaz");
+        assert!(!s.observe_regime_with_now("HighVolatility", 1002), "2. tur henüz drift sayılmaz");
+        let changed = s.observe_regime_with_now("HighVolatility", 1003);
+        assert!(changed, "3. ardışık görüşte drift confirmed olmalı");
         let patch = s.regime_overrides.get("HighVolatility")
             .expect("HV patch yazılmalı");
         assert!(patch.edge_thresholds.is_some());
@@ -508,10 +582,52 @@ mod tests {
     #[test]
     fn observe_regime_same_regime_back_to_back_no_tighten() {
         let mut s = ParameterStore::default();
-        s.observe_regime("StrongUptrend"); // seed
-        let changed = s.observe_regime("StrongUptrend");
+        s.observe_regime_with_now("StrongUptrend", 1000); // seed
+        let changed = s.observe_regime_with_now("StrongUptrend", 1001);
         assert!(!changed);
         assert!(s.regime_overrides.is_empty());
+    }
+
+    #[test]
+    fn observe_regime_oscillation_does_not_drift() {
+        // Rejim her tur A↔B arasında salınıyor: hiçbir aday DRIFT_CONFIRMATION_TURNS'a
+        // ulaşamaz → drift yok, patch yazılmaz.
+        let mut s = ParameterStore::default();
+        s.observe_regime_with_now("Ranging", 1000); // seed
+        for t in 1..30 {
+            let r = if t % 2 == 0 { "HighVolatility" } else { "Ranging" };
+            let changed = s.observe_regime_with_now(r, 1000 + t);
+            assert!(!changed, "sallanan rejim drift sayılmamalı (t={}): {}", t, r);
+        }
+        assert!(s.regime_overrides.is_empty(),
+            "sallanma sırasında patch yazılmamalı: {:?}", s.regime_overrides);
+    }
+
+    #[test]
+    fn observe_regime_cooldown_suppresses_back_to_back_drifts() {
+        // İlk drift confirmed olsun.
+        let mut s = ParameterStore::default();
+        s.observe_regime_with_now("Ranging", 1000); // seed
+        for t in 1..=3 { s.observe_regime_with_now("HighVolatility", 1000 + t); }
+        assert_eq!(s.last_observed_regime.as_deref(), Some("HighVolatility"));
+        let first_drift_at = s.last_drift_at_secs;
+        assert!(first_drift_at >= 1003);
+        let patches_after_first = s.regime_overrides.len();
+
+        // Hemen ardından yeni bir rejime geçiş — cooldown içinde olduğu için drift
+        // confirmed olmaz, sayım toplansa bile tighten/log yok.
+        for t in 4..=10 {
+            let changed = s.observe_regime_with_now("StrongUptrend", 1000 + t);
+            assert!(!changed, "cooldown içinde drift bastırılmalı (t={})", t);
+        }
+        assert_eq!(s.regime_overrides.len(), patches_after_first,
+            "cooldown içinde yeni patch yazılmamalı");
+
+        // Cooldown sonrası bir tur daha → confirmed.
+        let after_cd = first_drift_at + DRIFT_COOLDOWN_SECS + 1;
+        let changed = s.observe_regime_with_now("StrongUptrend", after_cd);
+        assert!(changed, "cooldown bittikten sonra aday onaylanmalı");
+        assert!(s.regime_overrides.contains_key("StrongUptrend"));
     }
 
     #[test]
