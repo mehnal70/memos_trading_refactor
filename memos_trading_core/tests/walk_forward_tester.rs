@@ -9,6 +9,7 @@ use memos_trading_core::core::types::Candle;
 use memos_trading_core::robot::backtester::{
     WalkForwardConfig, WalkForwardTester,
 };
+use memos_trading_core::robot::backtester::walk_forward::aggregate_windows_by_regime;
 
 /// Deterministik salınımlı seri: trend stratejilerinin (MA/SUPERTREND)
 /// gerçekten işlem üretmesi için yukarı/aşağı dalga oluşturur.
@@ -88,6 +89,54 @@ fn avg_oos_metrics_match_window_sample_mean() {
     assert!((res.avg_oos_pnl_pct - manual_pnl).abs() < 1e-9,
         "avg_oos_pnl_pct pencere ortalamasıyla aynı olmalı");
     assert!((res.avg_oos_sharpe - manual_sharpe).abs() < 1e-9);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rejim-bazlı agregasyon — run_backtest_job buradan beslenir
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn aggregate_groups_real_wf_windows_by_classify_closure() {
+    // Gerçek WF çalıştır, sonra pencereleri "kapanış > giriş mi" testiyle iki
+    // sentetik rejime böl. Agregasyon median TP/SL üretmeli ve sample_count'u
+    // pencere dağılımına oransal olmalı.
+    let candles = synthetic_wave(500);
+    let wf = WalkForwardTester::new(cfg("RSI", 200, 50, 50))
+        .run(&candles)
+        .expect("yeterli veride sonuç");
+
+    let classify = |s: &[Candle]| {
+        let first = s.first().map(|c| c.close).unwrap_or(0.0);
+        let last  = s.last().map(|c| c.close).unwrap_or(0.0);
+        if last >= first { "Up".to_string() } else { "Down".to_string() }
+    };
+    let agg = aggregate_windows_by_regime(&candles, &wf.windows, classify, 1);
+    let total_samples: usize = agg.values().map(|a| a.sample_count).sum();
+    assert_eq!(total_samples, wf.windows.len(),
+        "agregasyon tüm pencereleri içermeli");
+    for (regime, a) in &agg {
+        assert!(a.median_tp_pct > 0.0, "{regime} medyan TP > 0 olmalı: {a:?}");
+        assert!(a.median_sl_pct > 0.0, "{regime} medyan SL > 0 olmalı: {a:?}");
+    }
+}
+
+#[test]
+fn aggregate_min_samples_filters_noisy_regimes() {
+    // 6 pencere üreten WF; eşiği yüksek tut → çıktı ya boş ya tek rejim olur.
+    let candles = synthetic_wave(500);
+    let wf = WalkForwardTester::new(cfg("RSI", 200, 50, 50))
+        .run(&candles)
+        .expect("yeterli veride sonuç");
+    let agg_high = aggregate_windows_by_regime(
+        &candles, &wf.windows, |_| "Single".into(), 100,
+    );
+    assert!(agg_high.is_empty(),
+        "min_samples=100 → hiçbir rejim yazılmamalı, ama: {:?}", agg_high);
+    let agg_low = aggregate_windows_by_regime(
+        &candles, &wf.windows, |_| "Single".into(), 1,
+    );
+    let single = agg_low.get("Single").expect("Single rejimi yazılmalı");
+    assert_eq!(single.sample_count, wf.windows.len());
 }
 
 #[test]

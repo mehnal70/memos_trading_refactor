@@ -181,3 +181,159 @@ impl WalkForwardTester {
         })
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rejim-bazlı parametre agregasyonu
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Walk-Forward her pencere için (best_tp, best_sl) bulur. Bu pencereyi rejime
+// göre sınıflandırıp her rejim için ortanca TP/SL'i çıkartabiliriz —
+// `run_backtest_job` bu agregasyonu kullanıp ParameterStore.regime_overrides'a
+// yazar, böylece engine cycle rejime özgü parametrelerle çalışır.
+
+use std::collections::HashMap;
+
+/// Bir rejim için Walk-Forward pencerelerinden çıkartılan agreged parametreler.
+/// `sample_count` agregasyona katılan pencere sayısı (azlık halinde yazma
+/// kararı çağırana bırakılır).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegimeAggregate {
+    pub median_tp_pct: f64,
+    pub median_sl_pct: f64,
+    pub sample_count: usize,
+}
+
+/// Pencereleri rejime göre grupla; her rejim için (median TP, median SL) hesapla.
+/// `classify` fonksiyonu pencerenin OOS dilimini alır ve rejim adını döndürür
+/// (motor `Engine::classify_regime` → `MarketRegime::as_str()` chain'iyle).
+/// `min_samples` altındaki rejimler atlanır (gürültü → yanlış patch yazımı önlenir).
+pub fn aggregate_windows_by_regime<F>(
+    candles: &[Candle],
+    windows: &[WindowResult],
+    classify: F,
+    min_samples: usize,
+) -> HashMap<String, RegimeAggregate>
+where
+    F: Fn(&[Candle]) -> String,
+{
+    let mut buckets: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
+    for w in windows {
+        let (start, end) = w.oos_range;
+        if end > candles.len() || start >= end {
+            continue;
+        }
+        let regime = classify(&candles[start..end]);
+        buckets.entry(regime).or_default()
+            .push((w.best_tp_pct, w.best_sl_pct));
+    }
+
+    let mut out: HashMap<String, RegimeAggregate> = HashMap::new();
+    for (regime, samples) in buckets {
+        if samples.len() < min_samples {
+            continue;
+        }
+        let mut tps: Vec<f64> = samples.iter().map(|(t, _)| *t).collect();
+        let mut sls: Vec<f64> = samples.iter().map(|(_, s)| *s).collect();
+        tps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sls.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = |xs: &[f64]| -> f64 {
+            let m = xs.len() / 2;
+            if xs.len() % 2 == 0 { (xs[m - 1] + xs[m]) / 2.0 } else { xs[m] }
+        };
+        out.insert(regime, RegimeAggregate {
+            median_tp_pct: median(&tps),
+            median_sl_pct: median(&sls),
+            sample_count: samples.len(),
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wnd(start: usize, end: usize, tp: f64, sl: f64) -> WindowResult {
+        WindowResult {
+            window_idx: 0,
+            in_sample_range: (0, start),
+            oos_range: (start, end),
+            best_tp_pct: tp,
+            best_sl_pct: sl,
+            oos_metrics: BacktestMetrics::default(),
+        }
+    }
+
+    #[test]
+    fn aggregate_groups_by_regime_and_computes_median() {
+        // 6 pencere: 3'ü "Ranging", 3'ü "Trending"
+        let candles: Vec<Candle> = (0..100).map(|i| Candle {
+            close: 100.0 + i as f64,
+            ..Default::default()
+        }).collect();
+        let windows = vec![
+            wnd(0,  10, 2.0, 1.0),
+            wnd(10, 20, 3.0, 1.5),
+            wnd(20, 30, 4.0, 2.0),
+            wnd(30, 40, 5.0, 2.5),
+            wnd(40, 50, 6.0, 3.0),
+            wnd(50, 60, 7.0, 3.5),
+        ];
+        // İlk 3 pencere Ranging, kalan 3 Trending
+        let classify = |s: &[Candle]| {
+            if s.first().map(|c| c.close).unwrap_or(0.0) < 130.0 { "Ranging".into() }
+            else { "Trending".into() }
+        };
+        let agg = aggregate_windows_by_regime(&candles, &windows, classify, 1);
+        assert_eq!(agg.len(), 2);
+        let r = agg.get("Ranging").unwrap();
+        assert_eq!(r.sample_count, 3);
+        assert!((r.median_tp_pct - 3.0).abs() < 1e-9);
+        assert!((r.median_sl_pct - 1.5).abs() < 1e-9);
+        let t = agg.get("Trending").unwrap();
+        assert_eq!(t.sample_count, 3);
+        assert!((t.median_tp_pct - 6.0).abs() < 1e-9);
+        assert!((t.median_sl_pct - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_skips_regimes_below_min_samples() {
+        let candles: Vec<Candle> = (0..40).map(|i| Candle {
+            close: 100.0 + i as f64,
+            ..Default::default()
+        }).collect();
+        let windows = vec![
+            wnd(0,  10, 2.0, 1.0),
+            wnd(10, 20, 3.0, 1.5),
+            // Aşağıdaki tek pencere Trending — min_samples=2 ile elenir.
+            wnd(20, 30, 5.0, 2.5),
+        ];
+        let classify = |s: &[Candle]| {
+            if s.first().map(|c| c.close).unwrap_or(0.0) < 120.0 { "Ranging".into() }
+            else { "Trending".into() }
+        };
+        let agg = aggregate_windows_by_regime(&candles, &windows, classify, 2);
+        assert!(agg.contains_key("Ranging"));
+        assert!(!agg.contains_key("Trending"),
+            "tek örnekli rejim yazılmamalı, min_samples=2");
+    }
+
+    #[test]
+    fn aggregate_handles_empty_windows() {
+        let candles: Vec<Candle> = (0..10).map(|_| Candle::default()).collect();
+        let agg = aggregate_windows_by_regime(&candles, &[], |_| "Any".into(), 1);
+        assert!(agg.is_empty());
+    }
+
+    #[test]
+    fn aggregate_skips_out_of_range_windows() {
+        let candles: Vec<Candle> = (0..10).map(|_| Candle::default()).collect();
+        let bad = vec![
+            wnd(0, 5, 2.0, 1.0),
+            wnd(8, 100, 3.0, 1.5), // end > len
+        ];
+        let agg = aggregate_windows_by_regime(&candles, &bad, |_| "Test".into(), 1);
+        let t = agg.get("Test").unwrap();
+        assert_eq!(t.sample_count, 1, "sınır dışı pencere atlanmalı");
+    }
+}

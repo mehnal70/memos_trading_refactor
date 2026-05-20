@@ -2794,6 +2794,22 @@ impl Engine {
             (0.1, 0.4, 0.1),       // PS  0.1 → 0.4
         ).map_err(|e| format!("final optimize_parallel: {:?}", e))?;
 
+        // ─── 3) Rejim-bazlı parametre katmanları ──────────────────────────
+        //
+        // Her WF penceresinin OOS dilimi `classify_regime` ile sınıflandırılır;
+        // rejim başına ortanca TP/SL hesaplanır (PS final_res'ten — global).
+        // Sonuç ParameterStore.regime_overrides'a yazılır → engine cycle
+        // rejime özgü TradeRiskParams ile çalışır (Faz 2 c4 + Faz 3 patch
+        // kanalı). REGIME_MIN_SAMPLES env ile override edilebilir, default 2.
+        let regime_min_samples: usize = std::env::var("REGIME_MIN_SAMPLES").ok()
+            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(2);
+        let regime_agg = crate::robot::backtester::walk_forward::aggregate_windows_by_regime(
+            &candles,
+            &best_wf_res.windows,
+            |oos_slice| Self::classify_regime(oos_slice).as_str().to_string(),
+            regime_min_samples,
+        );
+
         // brain.live_strategy + best_params + ParameterStore.trade_risk güncellenir.
         {
             let mut st = state.lock().map_err(|e| format!("state lock: {}", e))?;
@@ -2815,6 +2831,18 @@ impl Engine {
                     final_res.best_parameters.stop_loss_pct,
                     final_res.best_parameters.max_position_size,
                 );
+                // Rejim katmanları — PS global, TP/SL rejime özgü.
+                for (regime, agg) in &regime_agg {
+                    let trade_risk = crate::robot::parameters::TradeRiskParams {
+                        take_profit_pct:   agg.median_tp_pct,
+                        stop_loss_pct:     agg.median_sl_pct,
+                        max_position_size: final_res.best_parameters.max_position_size,
+                    };
+                    params.set_regime_patch(
+                        regime.clone(),
+                        crate::robot::parameters::RegimePatch::empty().with_trade_risk(trade_risk),
+                    );
+                }
             }
             // hyperopt_score WF skoruna mühürlenir — UI/legacy okuyucular için
             // overfitting-koruyucu seçim ölçütü.
@@ -2828,9 +2856,32 @@ impl Engine {
                 final_res.best_parameters.stop_loss_pct,
                 final_res.best_parameters.max_position_size,
             ));
+            // Rejim katmanları log'una tek satırlık özet.
+            if regime_agg.is_empty() {
+                st.push_log(
+                    "🎚  Rejim katmanı yazılmadı — min örneklem altında veya sınıflandırma boş".into(),
+                );
+            } else {
+                let mut entries: Vec<String> = regime_agg.iter()
+                    .map(|(r, a)| format!(
+                        "{r}(n={}) TP={:.1}% SL={:.1}%",
+                        a.sample_count, a.median_tp_pct, a.median_sl_pct,
+                    ))
+                    .collect();
+                entries.sort();
+                st.push_log(format!("🎚  Rejim katmanları yazıldı: {}", entries.join(" | ")));
+            }
         }
 
         // Profil de diske mühürlenir.
+        let regime_breakdown: serde_json::Value = regime_agg.iter()
+            .map(|(r, a)| (r.clone(), serde_json::json!({
+                "median_tp_pct": a.median_tp_pct,
+                "median_sl_pct": a.median_sl_pct,
+                "sample_count": a.sample_count,
+            })))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
         let snapshot = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             serde_json::json!({
@@ -2843,6 +2894,8 @@ impl Engine {
                 "in_sample_bars": wf_is,
                 "out_of_sample_bars": wf_oos,
                 "step_bars": wf_step,
+                "regime_overrides": regime_breakdown,
+                "regime_min_samples": regime_min_samples,
                 "sealed_at": chrono::Utc::now().to_rfc3339(),
             })
         };
