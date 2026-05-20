@@ -1053,11 +1053,11 @@ impl Engine {
         const COMMISSION_RATE: f64 = 0.001; // 0.1% — open/close ile aynı
 
         // 1. Pozisyonu oku, entry vs close sınıflandır.
-        let (is_long, entry_price, local_qty_before) = {
+        let (is_long, entry_price, current_price, local_qty_before) = {
             let st = match state.lock() { Ok(s) => s, Err(_) => return };
             let positions = match st.finance.live_positions.read() { Ok(p) => p, Err(_) => return };
             match positions.get(symbol) {
-                Some(pos) => (pos.is_long, pos.entry_price, pos.qty),
+                Some(pos) => (pos.is_long, pos.entry_price, pos.current_price, pos.qty),
                 None => return, // bot bilmediği bir sembol için event aldı
             }
         };
@@ -1114,6 +1114,105 @@ impl Engine {
                     kind_tag, symbol, fill_pct, side, last_qty, last_price,
                     local_qty_before, new_q, pnl_part, commission,
                 ));
+            }
+
+            // 5. Anomali tespiti → Telegram push_alert.
+            //    Üç kriter; her biri farklı throttle anahtarına bağlandı, sembol başına
+            //    bağımsız cooldown takip eder (BTCUSDT'nin uyarısı ETHUSDT'yi susturmaz).
+            Self::detect_partial_fill_anomalies(
+                state, symbol, side, fill_pct, orig_qty, cum_qty,
+                last_qty, last_price, local_qty_before, entry_price,
+                current_price, is_closing, is_long,
+            );
+        }
+    }
+
+    /// Partial fill anomalilerini değerlendirir; eşik aşıldığında push_alert atar.
+    ///
+    /// 3 kriter:
+    ///   - OVERFILL (Critical): `last_qty > local_qty_before * 1.001`. Borsa local
+    ///     pozisyondan fazla doldurmuş → bot ↔ borsa qty ayrışması. equity ve risk
+    ///     hesabı bozulur; muhasebe için kritik.
+    ///   - CUM_INCONSISTENT (Warning): `cum_qty > orig_qty * 1.001`. Borsa toplam
+    ///     fill'i emrin orig_qty'sinden büyük raporladı; payload tutarsızlığı.
+    ///   - SLIPPAGE (Warning): adverse fiyat sapması eşiği aştı. Beklenen referans
+    ///     CLOSE partial'de pozisyonun `current_price`'ı, ENTRY partial'de
+    ///     `entry_price`. Eşik env `PARTIAL_FILL_MAX_SLIPPAGE_PCT` (default 1.0%).
+    ///     `side` bot tarafından bakılır: BUY → daha pahalıya alındı, SELL → daha
+    ///     ucuza satıldı negatif.
+    #[allow(clippy::too_many_arguments)]
+    fn detect_partial_fill_anomalies(
+        state: &Arc<Mutex<AppState>>,
+        symbol: &str,
+        side: &str,
+        fill_pct: f64,
+        orig_qty: f64,
+        cum_qty: f64,
+        last_qty: f64,
+        last_price: f64,
+        local_qty_before: f64,
+        entry_price: f64,
+        current_price: f64,
+        is_closing: bool,
+        is_long: bool,
+    ) {
+        use crate::robot::infra::telegram_notifier::Severity;
+        const OVERFILL_TOLERANCE: f64 = 0.001; // %0.1 — rounding payı
+        const CUM_TOLERANCE: f64 = 0.001;
+
+        // 1) OVERFILL: borsa pozisyondan fazla doldurmuş (close partial için anlamlı).
+        //    Entry partial'de cum henüz local'in üstüne çıkamaz tanım gereği, ama yine
+        //    de defensive olarak kontrol ediyoruz.
+        if local_qty_before > 0.0
+            && last_qty > local_qty_before * (1.0 + OVERFILL_TOLERANCE)
+        {
+            let key = format!("PARTIAL-ANOMALY-OVERFILL-{}", symbol);
+            let msg = format!(
+                "[PARTIAL-ANOMALY-OVERFILL] {} side={} last_qty={:.6} > local_qty={:.6} \
+                 (cum={:.6}/orig={:.6}) — bot↔borsa qty ayrışması",
+                symbol, side, last_qty, local_qty_before, cum_qty, orig_qty,
+            );
+            if let Ok(mut st) = state.lock() {
+                st.push_alert(&key, Severity::Critical, msg);
+            }
+        }
+
+        // 2) CUM tutarsız: borsa cum'u emrin orig_qty'sinden büyük raporladı.
+        if cum_qty > orig_qty * (1.0 + CUM_TOLERANCE) {
+            let key = format!("PARTIAL-ANOMALY-CUM-{}", symbol);
+            let msg = format!(
+                "[PARTIAL-ANOMALY-CUM] {} cum={:.6} > orig={:.6} (%{:.1}) — borsa payload tutarsız",
+                symbol, cum_qty, orig_qty, fill_pct,
+            );
+            if let Ok(mut st) = state.lock() {
+                st.push_alert(&key, Severity::Warning, msg);
+            }
+        }
+
+        // 3) SLIPPAGE: bot tarafına göre adverse fiyat sapması.
+        if last_price > 0.0 {
+            let expected = if is_closing { current_price } else { entry_price };
+            if expected > 0.0 {
+                let adverse_pct = match side {
+                    "BUY"  => (last_price - expected) / expected * 100.0,
+                    "SELL" => (expected - last_price) / expected * 100.0,
+                    _ => 0.0,
+                };
+                let threshold_pct: f64 = std::env::var("PARTIAL_FILL_MAX_SLIPPAGE_PCT")
+                    .ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                if adverse_pct > threshold_pct {
+                    let kind = if is_closing { "CLOSE" } else { "ENTRY" };
+                    let key = format!("PARTIAL-ANOMALY-SLIPPAGE-{}-{}", kind, symbol);
+                    let dir = if is_long { "LONG" } else { "SHORT" };
+                    let msg = format!(
+                        "[PARTIAL-ANOMALY-SLIPPAGE] {} {} {} side={} fill@{:.6} \
+                         vs beklenen {:.6} → adverse %{:.3} (eşik %{:.2})",
+                        symbol, dir, kind, side, last_price, expected, adverse_pct, threshold_pct,
+                    );
+                    if let Ok(mut st) = state.lock() {
+                        st.push_alert(&key, Severity::Warning, msg);
+                    }
+                }
             }
         }
     }
