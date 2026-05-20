@@ -442,6 +442,27 @@ impl Engine {
                                         final_status = StepStatus::Failed;
                                     }
                                 },
+                                "screener" => {
+                                    log::info!("🔭 E2: Sembol tarayıcısı başladı (otonom multi-symbol seçimi)");
+                                    let st_for_scr = Arc::clone(&state_clone);
+                                    let out = tokio::task::spawn_blocking(move || {
+                                        Self::run_screener_job(&st_for_scr)
+                                    }).await;
+                                    match out {
+                                        Ok(Ok(())) => {}
+                                        Ok(Err(e)) => {
+                                            log::warn!("🔭 Screener başarısız: {}", e);
+                                            if let Ok(mut st) = state_clone.lock() {
+                                                st.push_log(format!("❌ Screener başarısız: {}", e));
+                                            }
+                                            final_status = StepStatus::Failed;
+                                        }
+                                        Err(e) => {
+                                            log::warn!("🔭 Screener join hatası: {}", e);
+                                            final_status = StepStatus::Failed;
+                                        }
+                                    }
+                                },
                                 _ => {
                                     log::warn!("⚠️ Bilinmeyen tetikleyici sinyali alındı: {}", trigger_name);
                                     final_status = StepStatus::Skipped;
@@ -2764,6 +2785,140 @@ impl Engine {
         };
         crate::persistence::writer::seal_config_to_disk("config/best_params.json", &snapshot)
             .map_err(|e| format!("seal: {:?}", e))?;
+        Ok(())
+    }
+
+    /// 🔭 Sembol tarayıcısı ("screener" trigger):
+    ///
+    /// 1) Aday havuzu: SQLite `list_symbols(db_path)` + `SCREENER_EXTRA_SYMBOLS`
+    ///    env (virgülle ayrılmış). Pinned semboller her durumda korunur.
+    /// 2) Her aday için `score_symbol` ile aktif strateji + sabit varsayılan
+    ///    TP/SL/PS kullanarak hızlı backtest → composite skor.
+    /// 3) `select_top_n_diff` orchestrator'ın mevcut worker listesi ile
+    ///    karşılaştırıp eklenecek/düşürülecek sembolleri çıkartır.
+    /// 4) `register` / `stop_symbol` çağrılarıyla uygulanır; özet log basılır.
+    ///
+    /// Env override:
+    ///   - `SCREENER_TOP_N`           (default 8)
+    ///   - `SCREENER_CANDLE_LIMIT`    (default 500)
+    ///   - `SCREENER_MIN_VOLUME`      (default 0.0)
+    ///   - `SCREENER_EXTRA_SYMBOLS`   (örn. "BNBUSDT,ADAUSDT")
+    fn run_screener_job(state: &Arc<Mutex<AppState>>) -> std::result::Result<(), String> {
+        use crate::robot::screener::{score_symbol, select_top_n_diff, ScreenerScore};
+
+        log::info!("🔭 E2: Screener çalışıyor...");
+
+        // 1) State'ten yapı yapısı + kapasite + pinned + strateji.
+        let (db_path, market, interval, pinned, active_strategy, capital, max_workers, current_workers) = {
+            let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
+            let strat = st.brain.live_strategy.read()
+                .map(|s| s.clone()).unwrap_or_else(|_| "MA_CROSSOVER".to_string());
+            let strat = if strat.eq_ignore_ascii_case("default")
+                       || strat.eq_ignore_ascii_case("auto")
+                       || strat.is_empty() { "MA_CROSSOVER".to_string() } else { strat };
+            let (max_w, current) = st.fleet.symbol_orchestrator.read().ok().map(|o| {
+                let cur: Vec<String> = o.workers.keys().cloned().collect();
+                (o.max_workers, cur)
+            }).unwrap_or((16, vec![]));
+            (
+                st.config.db_path.clone(),
+                st.config.market.clone(),
+                st.config.interval.clone(),
+                st.config.pinned_symbols.clone(),
+                strat,
+                st.finance.equity.max(1.0),
+                max_w,
+                current,
+            )
+        };
+
+        // 2) Env override'ları.
+        let top_n: usize = std::env::var("SCREENER_TOP_N").ok()
+            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(8);
+        let limit: usize = std::env::var("SCREENER_CANDLE_LIMIT").ok()
+            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(500);
+        let min_volume: f64 = std::env::var("SCREENER_MIN_VOLUME").ok()
+            .and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let extras: Vec<String> = std::env::var("SCREENER_EXTRA_SYMBOLS").ok()
+            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            .unwrap_or_default();
+
+        // 3) Aday havuzu — SQLite + env extras (dedupe).
+        let mut pool: Vec<String> = crate::persistence::reader::list_symbols(&db_path)
+            .unwrap_or_default();
+        for e in extras {
+            if !pool.contains(&e) { pool.push(e); }
+        }
+        if pool.is_empty() {
+            if let Ok(mut st) = state.lock() {
+                st.push_log("🔭 Screener: havuz boş (DB'de sembol yok ve SCREENER_EXTRA_SYMBOLS verilmedi)".into());
+            }
+            return Ok(());
+        }
+
+        if let Ok(mut st) = state.lock() {
+            st.push_log(format!(
+                "🔭 Screener: havuz={} aday, top_n={} max_workers={} strateji={}",
+                pool.len(), top_n, max_workers, active_strategy,
+            ));
+        }
+
+        // 4) Her aday için skor (paralel — rayon).
+        use rayon::prelude::*;
+        let mut scored: Vec<(String, ScreenerScore)> = pool.par_iter().filter_map(|sym| {
+            let candles = crate::persistence::reader::read_candles(&db_path, sym, &interval, limit).ok()?;
+            if candles.len() < 50 { return None; }
+            let s = score_symbol(&candles, &active_strategy, 4.0, 2.0, 0.3, capital);
+            if s.avg_volume < min_volume { return None; }
+            Some((sym.clone(), s))
+        }).collect();
+
+        // 5) Composite skoruna göre sıralı (büyükten küçüğe).
+        scored.sort_by(|a, b| b.1.composite.partial_cmp(&a.1.composite)
+            .unwrap_or(std::cmp::Ordering::Equal));
+
+        // 6) Selection delta.
+        let diff = select_top_n_diff(&current_workers, &pinned, &scored, top_n, max_workers);
+
+        // 7) Orchestrator'a uygula.
+        let (added_ok, removed_ok) = {
+            let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
+            let mut orch = st.fleet.symbol_orchestrator.write()
+                .map_err(|e| format!("orchestrator lock: {}", e))?;
+            let mut added = 0usize;
+            for sym in &diff.to_add {
+                if orch.register(sym, &market, &interval).is_some() { added += 1; }
+            }
+            let mut removed = 0usize;
+            for sym in &diff.to_remove {
+                if orch.stop_symbol(sym) { removed += 1; }
+            }
+            (added, removed)
+        };
+
+        // 8) Telemetri — özet + top 5 ayrıntı.
+        if let Ok(mut st) = state.lock() {
+            st.push_log(format!(
+                "🔭 Screener ✓ skorlandı={} seçilen={} eklendi={} düşürüldü={}",
+                scored.len(), diff.selected.len(), added_ok, removed_ok,
+            ));
+            let top_brief: Vec<String> = scored.iter().take(5)
+                .map(|(name, s)| format!(
+                    "{name}(c={:.2} sh={:.2} wr={:.0}% n={})",
+                    s.composite, s.sharpe, s.win_rate, s.trades,
+                ))
+                .collect();
+            if !top_brief.is_empty() {
+                st.push_log(format!("🔭 Top: {}", top_brief.join(" | ")));
+            }
+            if !diff.to_add.is_empty() {
+                st.push_log(format!("🔭 + {}", diff.to_add.join(", ")));
+            }
+            if !diff.to_remove.is_empty() {
+                st.push_log(format!("🔭 − {}", diff.to_remove.join(", ")));
+            }
+        }
+
         Ok(())
     }
 

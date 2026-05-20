@@ -57,6 +57,7 @@ pub mod backtester;
 //pub mod monitor;
 //pub mod test_orchestrator;
 pub mod scalp_swing;
+pub mod screener;        // Otonom sembol tarayıcısı ("screener" trigger)
 //pub mod api;        //dosya
 //pub mod dashboard;      //dosya
 pub mod integration_advanced;   //dosya
