@@ -2481,6 +2481,31 @@ impl Engine {
             }
             Self::update_cognitive_memory(state, &closed_trade);
 
+            // ─── Faz 3 c2: rejim-bazlı trade feedback rafinasyonu ───────────
+            // Kapanış candles'tan anlık rejimi hesapla; ParameterStore'a pnl_pct'yi
+            // bildir. Yeterli veri biriktiyse (WINDOW=10) ve win_rate eşiği (0.40)
+            // altına düştüyse o rejim için patch otomatik sıkılaştırılır.
+            let regime_at_close = Self::classify_regime(candles);
+            let regime_key = regime_at_close.as_str().to_string();
+            let tightened = {
+                let st = state.lock().ok();
+                let mut tightened = false;
+                if let Some(st) = st {
+                    if let Ok(mut params) = st.brain.parameters.write() {
+                        tightened = params.apply_trade_feedback(&regime_key, pnl_pct_val);
+                    }
+                }
+                tightened
+            };
+            if tightened {
+                if let Ok(mut st) = state.lock() {
+                    st.push_log(format!(
+                        "🛡️ Adaptive: rejim '{}' düşük win-rate → patch sıkılaştırıldı",
+                        regime_key,
+                    ));
+                }
+            }
+
             // ─── Faz 5 (Execute): kapanış icrası tamamlandı ─────────────────
             // Açılış open_paper_position'da işaretleniyor; kapanış da bir Execute
             // adımı sayılır (cancel_orders + arşivleme + reward feedback).

@@ -48,6 +48,41 @@ impl RegimePatch {
     }
 }
 
+/// Rejim-bazlı trade feedback kuyruğu. Faz 3 c2: her kapanış pnl_pct'sini ilgili
+/// rejim için kayıt altına alır; düşük win_rate görüldüğünde patch otomatik
+/// sıkılaştırılır.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RegimeFeedback {
+    /// Son N kapanışın pnl_pct değerleri (en yeni sonda).
+    #[serde(default)]
+    pub recent_pnl: std::collections::VecDeque<f64>,
+    /// Toplam kayıt sayısı (kuyruk dışı sayım da dahil — rapor için).
+    #[serde(default)]
+    pub total_trades: u32,
+}
+
+impl RegimeFeedback {
+    /// Kuyrukta tutulan son trade sayısı. Çok küçük olursa istatistik gürültülü,
+    /// çok büyük olursa eski rejim sinyallerini geç bırakır.
+    pub const WINDOW: usize = 10;
+
+    /// Win-rate (0.0..=1.0). Kuyruk boşsa 0 döner.
+    pub fn win_rate(&self) -> f64 {
+        if self.recent_pnl.is_empty() { return 0.0; }
+        let wins = self.recent_pnl.iter().filter(|&&p| p > 0.0).count();
+        wins as f64 / self.recent_pnl.len() as f64
+    }
+
+    /// Yeni bir trade pnl kaydını kuyruğa ekler; WINDOW'u aşan eski kayıtları atar.
+    pub fn record(&mut self, pnl_pct: f64) {
+        self.recent_pnl.push_back(pnl_pct);
+        while self.recent_pnl.len() > Self::WINDOW {
+            self.recent_pnl.pop_front();
+        }
+        self.total_trades = self.total_trades.saturating_add(1);
+    }
+}
+
 /// Trade-bazlı risk parametreleri. HyperOpt + ML retrain job'larının çıktısı buraya
 /// yazılır; engine pozisyon açılışta bu store'dan okur (best_params HashMap fallback).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -144,6 +179,10 @@ pub struct ParameterStore {
     /// Boş ise tüm rejimler base parametreleri kullanır.
     #[serde(default)]
     pub regime_overrides: HashMap<String, RegimePatch>,
+    /// Rejim başına son N kapanış pnl_pct geri beslemesi (Faz 3 c2).
+    /// `apply_trade_feedback` bunu okuyup patch'i rafine eder.
+    #[serde(default)]
+    pub regime_feedback: HashMap<String, RegimeFeedback>,
 }
 
 impl Default for ParameterStore {
@@ -155,6 +194,7 @@ impl Default for ParameterStore {
             scalp_swing_threshold_min: 60,
             sr_update_every_secs:      30,
             regime_overrides: HashMap::new(),
+            regime_feedback:  HashMap::new(),
         }
     }
 }
@@ -251,6 +291,57 @@ impl ParameterStore {
     /// Belirli bir rejim için patch yerleştirir (HyperOpt rejim-aware tuning sonucu).
     pub fn set_regime_patch(&mut self, regime: impl Into<String>, patch: RegimePatch) {
         self.regime_overrides.insert(regime.into(), patch);
+    }
+
+    /// Faz 3 c2: bir trade kapanışında rejim+pnl_pct geri beslemesini işler.
+    ///
+    /// Kuyruğu günceller (`RegimeFeedback::record`); rejim için WINDOW kadar
+    /// trade biriktiyse ve win_rate eşik altına düştüyse patch'i sıkılaştırır:
+    ///   - edge_thresholds her katmanı *1.15 (eşiği yükselt → daha az sinyal)
+    ///   - trade_risk.max_position_size *0.7 (pozisyonu küçült)
+    ///   - take_profit_pct *0.85, stop_loss_pct *0.85 (kısa hedef + dar stop)
+    ///
+    /// Eşik default 0.40 (10 trade'in en az 4'ü kazançlı olmalı); ileride
+    /// HyperOpt'tan ayarlanabilir hale getirilir.
+    ///
+    /// Patch zaten o rejim için varsa override edilen alanları sıkılaştırır;
+    /// yoksa base'in üstüne yeni bir patch yapılır (adaptive heuristic'i
+    /// bypass etmez — rejim daha önce ensure_regime_patch ile dolmuş olabilir).
+    ///
+    /// Döner: tighten gerçekten uygulandı mı (true) / koşul oluşmadı (false).
+    pub fn apply_trade_feedback(&mut self, regime: &str, pnl_pct: f64) -> bool {
+        let fb = self.regime_feedback.entry(regime.to_string())
+            .or_insert_with(RegimeFeedback::default);
+        fb.record(pnl_pct);
+
+        // Sıkılaştırma için yeterli veri yoksa çık.
+        if fb.recent_pnl.len() < RegimeFeedback::WINDOW { return false; }
+        let win_rate = fb.win_rate();
+        let trigger_threshold = 0.40;
+        if win_rate >= trigger_threshold { return false; }
+
+        // Sıkılaştırma uygula. Mevcut patch varsa onu temel al; yoksa base'i.
+        let existing = self.regime_overrides.get(regime).cloned().unwrap_or_default();
+        let base_edge = existing.edge_thresholds.unwrap_or(self.edge_thresholds);
+        let base_risk = existing.trade_risk.unwrap_or(self.trade_risk);
+
+        let tightened_edge = EdgeThresholds {
+            cold: (base_edge.cold * 1.15).min(0.95),
+            warm: (base_edge.warm * 1.15).min(0.95),
+            hot:  (base_edge.hot  * 1.15).min(0.95),
+            cold_until: base_edge.cold_until,
+            warm_until: base_edge.warm_until,
+        };
+        let tightened_risk = TradeRiskParams {
+            take_profit_pct:   (base_risk.take_profit_pct * 0.85).max(0.5),
+            stop_loss_pct:     (base_risk.stop_loss_pct   * 0.85).max(0.3),
+            max_position_size: (base_risk.max_position_size * 0.70).max(0.10),
+        };
+        self.regime_overrides.insert(regime.to_string(),
+            RegimePatch::empty()
+                .with_edge(tightened_edge)
+                .with_trade_risk(tightened_risk));
+        true
     }
 }
 
@@ -361,6 +452,66 @@ mod tests {
         assert_eq!(s.trade_risk.take_profit_pct,   5.0);
         assert_eq!(s.trade_risk.stop_loss_pct,     1.5); // default kaldı
         assert_eq!(s.trade_risk.max_position_size, 0.5); // default kaldı
+    }
+
+    #[test]
+    fn feedback_record_appends_and_bounds_window() {
+        let mut fb = RegimeFeedback::default();
+        for i in 0..(RegimeFeedback::WINDOW + 5) {
+            fb.record(i as f64);
+        }
+        assert_eq!(fb.recent_pnl.len(), RegimeFeedback::WINDOW);
+        assert_eq!(fb.total_trades, (RegimeFeedback::WINDOW + 5) as u32);
+        // Kuyruğun en yeni elemanı son record olmalı (push_back)
+        assert_eq!(*fb.recent_pnl.back().unwrap(), (RegimeFeedback::WINDOW + 4) as f64);
+    }
+
+    #[test]
+    fn feedback_win_rate_counts_only_positive_pnl() {
+        let mut fb = RegimeFeedback::default();
+        for v in [1.0, -2.0, 0.5, -1.0, 0.0] { fb.record(v); }
+        // 5 trade'den 2'si > 0 → win_rate 0.4
+        assert!((fb.win_rate() - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn apply_feedback_holds_off_until_window_fills() {
+        let mut s = ParameterStore::default();
+        // İlk 9 kayıp — WINDOW=10 dolmadığı için tighten yok.
+        for _ in 0..9 {
+            assert!(!s.apply_trade_feedback("Ranging", -1.0));
+        }
+        assert!(s.regime_overrides.is_empty(),
+            "WINDOW dolmadan tighten olmamalı");
+    }
+
+    #[test]
+    fn apply_feedback_tightens_after_low_winrate() {
+        let mut s = ParameterStore::default();
+        // 10 trade, 8'i kayıp → win_rate 0.2, eşik 0.40 altında → tighten.
+        for v in [-1.0, -1.0, -1.0, 0.5, -1.0, -1.0, -1.0, 0.3, -1.0, -1.0] {
+            s.apply_trade_feedback("Ranging", v);
+        }
+        let patch = s.regime_overrides.get("Ranging").expect("tighten patch yazılmalı");
+        let e = patch.edge_thresholds.expect("edge tightened");
+        let r = patch.trade_risk.expect("risk tightened");
+        // Base 0.20 → 0.20*1.15 = 0.23
+        assert!(e.cold > 0.20);
+        // Base 0.5 → 0.5*0.70 = 0.35
+        assert!(r.max_position_size < 0.5);
+        // Base 3.0 → 3.0*0.85 = 2.55
+        assert!(r.take_profit_pct < 3.0);
+    }
+
+    #[test]
+    fn apply_feedback_no_tighten_when_winrate_high() {
+        let mut s = ParameterStore::default();
+        // 10 trade, 7'si kazanç → win_rate 0.7 > 0.40, tighten yok.
+        for v in [1.0, 1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, 1.0] {
+            s.apply_trade_feedback("Ranging", v);
+        }
+        assert!(s.regime_overrides.get("Ranging").is_none(),
+            "yüksek win_rate'te patch yazılmamalı");
     }
 
     #[test]
