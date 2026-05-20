@@ -12,6 +12,28 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Trade-bazlı risk parametreleri. HyperOpt + ML retrain job'larının çıktısı buraya
+/// yazılır; engine pozisyon açılışta bu store'dan okur (best_params HashMap fallback).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TradeRiskParams {
+    /// Take-profit yüzdesi (entry'den uzaklık).
+    pub take_profit_pct: f64,
+    /// Stop-loss yüzdesi.
+    pub stop_loss_pct: f64,
+    /// Equity'nin tek pozisyona ayrılabilecek maksimum payı (0..1, örn 0.5 = %50).
+    pub max_position_size: f64,
+}
+
+impl Default for TradeRiskParams {
+    fn default() -> Self {
+        Self {
+            take_profit_pct:   3.0,
+            stop_loss_pct:     1.5,
+            max_position_size: 0.5,
+        }
+    }
+}
+
 /// Partial fill anomali tespiti eşikleri (master.rs::detect_partial_fill_anomalies).
 /// Overfill ve cum-tutarsızlık için rounding payı + adverse slipaj limiti.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -77,6 +99,7 @@ impl EdgeThresholds {
 pub struct ParameterStore {
     pub edge_thresholds: EdgeThresholds,
     pub partial_fill:    PartialFillParams,
+    pub trade_risk:      TradeRiskParams,
     /// Scalp/Swing ayrımı eşiği (dakika). Holding < bu eşik → SCALP, üstü → SWING.
     pub scalp_swing_threshold_min: i64,
     /// Periyodik S/R updater task'ının yenileme aralığı (saniye).
@@ -88,6 +111,7 @@ impl Default for ParameterStore {
         Self {
             edge_thresholds: EdgeThresholds::default(),
             partial_fill:    PartialFillParams::default(),
+            trade_risk:      TradeRiskParams::default(),
             scalp_swing_threshold_min: 60,
             sr_update_every_secs:      30,
         }
@@ -142,6 +166,19 @@ impl ParameterStore {
     /// Engine cycle'ları ParameterStore tutarken bu method'a doğrudan ulaşır.
     pub fn edge_threshold(&self, ml_confidence: f64) -> f64 {
         self.edge_thresholds.for_confidence(ml_confidence)
+    }
+
+    /// HyperOpt veya ML retrain job'larının ürettiği `OptimizationParameters`'ı
+    /// store'un trade_risk alanına yazar. `f64` üçlüsü olarak iletilir ki
+    /// modül bağımsızlığı korunsun (ParameterStore başka modüllere bağlı
+    /// olmadan kendi başına test edilebilir).
+    pub fn apply_optimization(&mut self, take_profit_pct: f64, stop_loss_pct: f64, max_position_size: f64) {
+        // Sıfır/negatif değerler kabul edilmez; default'a düş.
+        if take_profit_pct > 0.0   { self.trade_risk.take_profit_pct   = take_profit_pct; }
+        if stop_loss_pct   > 0.0   { self.trade_risk.stop_loss_pct     = stop_loss_pct; }
+        if max_position_size > 0.0 && max_position_size <= 1.0 {
+            self.trade_risk.max_position_size = max_position_size;
+        }
     }
 }
 
@@ -215,6 +252,43 @@ mod tests {
         let s = ParameterStore::default();
         assert_eq!(s.scalp_swing_threshold_min, 60);
         assert_eq!(s.sr_update_every_secs,      30);
+    }
+
+    #[test]
+    fn default_trade_risk_matches_legacy_fallbacks() {
+        let s = ParameterStore::default();
+        assert_eq!(s.trade_risk.take_profit_pct,   3.0);
+        assert_eq!(s.trade_risk.stop_loss_pct,     1.5);
+        assert_eq!(s.trade_risk.max_position_size, 0.5);
+    }
+
+    #[test]
+    fn apply_optimization_writes_trade_risk_fields() {
+        let mut s = ParameterStore::default();
+        s.apply_optimization(4.5, 2.0, 0.75);
+        assert!((s.trade_risk.take_profit_pct - 4.5).abs() < 1e-9);
+        assert!((s.trade_risk.stop_loss_pct   - 2.0).abs() < 1e-9);
+        assert!((s.trade_risk.max_position_size - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn apply_optimization_rejects_invalid_values() {
+        let mut s = ParameterStore::default();
+        s.apply_optimization(-1.0, 0.0, 2.0); // hepsi geçersiz
+        // Default'ta kalmalı
+        assert_eq!(s.trade_risk.take_profit_pct,   3.0);
+        assert_eq!(s.trade_risk.stop_loss_pct,     1.5);
+        assert_eq!(s.trade_risk.max_position_size, 0.5);
+    }
+
+    #[test]
+    fn apply_optimization_partial_keeps_unspecified_alone() {
+        let mut s = ParameterStore::default();
+        // Sadece TP geçerli, SL=0 (skip), max_pos > 1 (skip).
+        s.apply_optimization(5.0, 0.0, 1.5);
+        assert_eq!(s.trade_risk.take_profit_pct,   5.0);
+        assert_eq!(s.trade_risk.stop_loss_pct,     1.5); // default kaldı
+        assert_eq!(s.trade_risk.max_position_size, 0.5); // default kaldı
     }
 
     #[test]

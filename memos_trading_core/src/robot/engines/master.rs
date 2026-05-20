@@ -1767,8 +1767,15 @@ impl Engine {
             let qty_val = (alloc_capital / entry).max(0.0);
             if qty_val <= 0.0 { return; }
 
-            let tp_pct = st.brain.best_params.get("take_profit_pct").copied().unwrap_or(3.0).max(0.1);
-            let sl_pct = st.brain.best_params.get("stop_loss_pct").copied().unwrap_or(1.5).max(0.1);
+            // Faz 2: TP/SL artık ParameterStore canonical kaynaktan okunuyor; HyperOpt
+            // (run_backtest_job / run_ml_retrain_job) her başarılı turda store'u günceller.
+            // Store default'ta (3.0/1.5) kalsa bile değer dolu — best_params fallback
+            // gereksiz (her iki yer de aynı update'i alıyor).
+            let (tp_pct, sl_pct) = st.brain.parameters.read()
+                .map(|p| (p.trade_risk.take_profit_pct, p.trade_risk.stop_loss_pct))
+                .unwrap_or((3.0, 1.5));
+            let tp_pct = tp_pct.max(0.1);
+            let sl_pct = sl_pct.max(0.1);
             let (stop_loss, take_profit) = if is_long {
                 (entry * (1.0 - sl_pct / 100.0), entry * (1.0 + tp_pct / 100.0))
             } else {
@@ -2546,7 +2553,9 @@ impl Engine {
         let result = opt.random_search(&candles, 60)
             .map_err(|e| format!("random_search: {:?}", e))?;
 
-        // 2) brain.best_params'a yaz + ml_confidence güncelle (sharpe normalize).
+        // 2) brain.best_params + ParameterStore.trade_risk'e yaz + ml_confidence güncelle.
+        //    best_params HashMap legacy okuyucular için kalır; store yeni canonical
+        //    kaynaktır (engine cycle pozisyon açılışta önce store'a bakar).
         let conf = (result.best_result.sharpe_ratio / 3.0).clamp(0.0, 1.0);
         {
             let mut st = state.lock().map_err(|e| format!("state lock: {}", e))?;
@@ -2554,6 +2563,13 @@ impl Engine {
             st.brain.best_params.insert("stop_loss_pct".into(),   result.best_parameters.stop_loss_pct);
             st.brain.best_params.insert("max_position_size".into(), result.best_parameters.max_position_size);
             st.brain.best_params.insert("ml_score".into(), result.best_result.sharpe_ratio);
+            if let Ok(mut params) = st.brain.parameters.write() {
+                params.apply_optimization(
+                    result.best_parameters.take_profit_pct,
+                    result.best_parameters.stop_loss_pct,
+                    result.best_parameters.max_position_size,
+                );
+            }
             st.brain.ml_confidence = conf;
             st.brain.hyperopt_score = result.best_result.sharpe_ratio;
             st.push_log(format!(
@@ -2645,7 +2661,7 @@ impl Engine {
         let (best_name, best_score, best_res) = best_overall
             .ok_or_else(|| "Hiçbir strateji aday sonuç üretemedi".to_string())?;
 
-        // brain.live_strategy ve best_params güncellenir.
+        // brain.live_strategy + best_params + ParameterStore.trade_risk güncellenir.
         {
             let mut st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             if let Ok(mut s) = st.brain.live_strategy.write() {
@@ -2657,6 +2673,13 @@ impl Engine {
                 best_res.best_parameters.stop_loss_pct);
             st.brain.best_params.insert("max_position_size".into(),
                 best_res.best_parameters.max_position_size);
+            if let Ok(mut params) = st.brain.parameters.write() {
+                params.apply_optimization(
+                    best_res.best_parameters.take_profit_pct,
+                    best_res.best_parameters.stop_loss_pct,
+                    best_res.best_parameters.max_position_size,
+                );
+            }
             st.brain.hyperopt_score = best_score;
             st.push_log(format!(
                 "🔬 Backtest ✓ aktif strateji '{}' (Sharpe={:.2}, WR={:.1}%, PF={:.2})",
