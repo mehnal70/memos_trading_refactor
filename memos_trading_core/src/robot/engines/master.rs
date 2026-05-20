@@ -1528,10 +1528,12 @@ impl Engine {
             let edge = Self::compute_edge_score(&candles, &signal, ml_confidence);
             Self::mark_pipeline_stage(state, PipelineStage::FeatureExtract, StepStatus::Done);
             // ML henüz hazır değilse (cold-start) gevşek eşik; modele güven arttıkça katılaşır.
-            // Faz 2: sabit 0.20/0.35/0.55 eşikleri yerine brain.parameters.edge_thresholds'tan
-            // okunuyor — runtime'da HyperOpt veya manuel env update'i ile değişebilir.
+            // Faz 2 c4: edge_threshold rejim-bazlı override'a açık — store'da o rejim için
+            // patch varsa o eşikler, yoksa base parametreler kullanılır.
+            let regime = Self::classify_regime(&candles);
             let edge_threshold = state.lock().ok()
-                .and_then(|st| st.brain.parameters.read().ok().map(|p| p.edge_threshold(ml_confidence)))
+                .and_then(|st| st.brain.parameters.read().ok()
+                    .map(|p| p.edge_threshold_for(regime.as_str(), ml_confidence)))
                 .unwrap_or_else(|| Self::dynamic_edge_threshold(ml_confidence));
             // Aday log eşiği: kabul edilen edge'in %75'inin altındaki sinyaller spam sayılır.
             let edge_log_floor = edge_threshold * 0.75;
@@ -1767,12 +1769,14 @@ impl Engine {
             let qty_val = (alloc_capital / entry).max(0.0);
             if qty_val <= 0.0 { return; }
 
-            // Faz 2: TP/SL artık ParameterStore canonical kaynaktan okunuyor; HyperOpt
-            // (run_backtest_job / run_ml_retrain_job) her başarılı turda store'u günceller.
-            // Store default'ta (3.0/1.5) kalsa bile değer dolu — best_params fallback
-            // gereksiz (her iki yer de aynı update'i alıyor).
+            // Faz 2 c4: TP/SL artık rejim-bazlı override'a açık. Store'da o rejim için
+            // patch varsa onun trade_risk'i, yoksa base trade_risk kullanılır.
+            // HyperOpt rejim-aware tuning yaptıkça (Faz 3'te) patch'leri besleyecek.
             let (tp_pct, sl_pct) = st.brain.parameters.read()
-                .map(|p| (p.trade_risk.take_profit_pct, p.trade_risk.stop_loss_pct))
+                .map(|p| {
+                    let tr = p.trade_risk_for(regime.as_str());
+                    (tr.take_profit_pct, tr.stop_loss_pct)
+                })
                 .unwrap_or((3.0, 1.5));
             let tp_pct = tp_pct.max(0.1);
             let sl_pct = sl_pct.max(0.1);

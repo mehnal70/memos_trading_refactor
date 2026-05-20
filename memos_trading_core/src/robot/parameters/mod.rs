@@ -10,7 +10,35 @@
 // Bu commit (c1) iskelet: edge_threshold katmanlarını taşıyor. Sonraki commit'lerde
 // (c2) daha çok parametre, (c3) HyperOpt yazımı, (c4) rejim-bazlı katmanlama.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+/// Rejim-bazlı parametre patch'i. Yalnızca override edilmek istenen alanlar `Some`
+/// olur; diğerleri base ParameterStore değerlerini korur (sparse override).
+/// Key olarak `MarketRegime::as_str()` çıktısı kullanılır
+/// ("Ranging", "StrongUptrend", "HighVolatility", ...).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RegimePatch {
+    #[serde(default)]
+    pub edge_thresholds: Option<EdgeThresholds>,
+    #[serde(default)]
+    pub trade_risk: Option<TradeRiskParams>,
+}
+
+impl RegimePatch {
+    pub fn empty() -> Self { Self::default() }
+
+    pub fn with_edge(mut self, e: EdgeThresholds) -> Self {
+        self.edge_thresholds = Some(e);
+        self
+    }
+
+    pub fn with_trade_risk(mut self, t: TradeRiskParams) -> Self {
+        self.trade_risk = Some(t);
+        self
+    }
+}
 
 /// Trade-bazlı risk parametreleri. HyperOpt + ML retrain job'larının çıktısı buraya
 /// yazılır; engine pozisyon açılışta bu store'dan okur (best_params HashMap fallback).
@@ -104,6 +132,10 @@ pub struct ParameterStore {
     pub scalp_swing_threshold_min: i64,
     /// Periyodik S/R updater task'ının yenileme aralığı (saniye).
     pub sr_update_every_secs: u64,
+    /// Rejim-bazlı sparse override'lar. Key `MarketRegime::as_str()` döndürüsüdür.
+    /// Boş ise tüm rejimler base parametreleri kullanır.
+    #[serde(default)]
+    pub regime_overrides: HashMap<String, RegimePatch>,
 }
 
 impl Default for ParameterStore {
@@ -114,6 +146,7 @@ impl Default for ParameterStore {
             trade_risk:      TradeRiskParams::default(),
             scalp_swing_threshold_min: 60,
             sr_update_every_secs:      30,
+            regime_overrides: HashMap::new(),
         }
     }
 }
@@ -179,6 +212,37 @@ impl ParameterStore {
         if max_position_size > 0.0 && max_position_size <= 1.0 {
             self.trade_risk.max_position_size = max_position_size;
         }
+    }
+
+    // ─── Rejim-bazlı getter'lar ─────────────────────────────────────────
+    //
+    // Sparse patch semantiği: rejim için patch yoksa veya patch'in ilgili
+    // alanı None ise base parametre kullanılır. Engine cycle'ları rejimi
+    // her tur sınıflandırıyor (`Engine::classify_regime`); store sorgusunu
+    // o rejim string'iyle yapar.
+
+    /// İlgili rejim için (override varsa o, yoksa base) EdgeThresholds.
+    pub fn edge_thresholds_for(&self, regime: &str) -> EdgeThresholds {
+        self.regime_overrides.get(regime)
+            .and_then(|p| p.edge_thresholds)
+            .unwrap_or(self.edge_thresholds)
+    }
+
+    /// `edge_thresholds_for` üstüne `for_confidence` zinciri — engine direkt çağırır.
+    pub fn edge_threshold_for(&self, regime: &str, ml_confidence: f64) -> f64 {
+        self.edge_thresholds_for(regime).for_confidence(ml_confidence)
+    }
+
+    /// İlgili rejim için (override varsa o, yoksa base) TradeRiskParams.
+    pub fn trade_risk_for(&self, regime: &str) -> TradeRiskParams {
+        self.regime_overrides.get(regime)
+            .and_then(|p| p.trade_risk)
+            .unwrap_or(self.trade_risk)
+    }
+
+    /// Belirli bir rejim için patch yerleştirir (HyperOpt rejim-aware tuning sonucu).
+    pub fn set_regime_patch(&mut self, regime: impl Into<String>, patch: RegimePatch) {
+        self.regime_overrides.insert(regime.into(), patch);
     }
 }
 
@@ -289,6 +353,54 @@ mod tests {
         assert_eq!(s.trade_risk.take_profit_pct,   5.0);
         assert_eq!(s.trade_risk.stop_loss_pct,     1.5); // default kaldı
         assert_eq!(s.trade_risk.max_position_size, 0.5); // default kaldı
+    }
+
+    #[test]
+    fn regime_with_no_override_falls_back_to_base() {
+        let s = ParameterStore::default();
+        // Hiç override yok → base ile aynı
+        let er = s.edge_thresholds_for("Ranging");
+        assert_eq!(er.cold, s.edge_thresholds.cold);
+        assert_eq!(er.hot,  s.edge_thresholds.hot);
+        let tr = s.trade_risk_for("StrongUptrend");
+        assert_eq!(tr.take_profit_pct,   s.trade_risk.take_profit_pct);
+        assert_eq!(tr.max_position_size, s.trade_risk.max_position_size);
+    }
+
+    #[test]
+    fn regime_override_only_replaces_specified_fields() {
+        let mut s = ParameterStore::default();
+        // HighVolatility için sadece edge eşiklerini sıkılaştır; trade_risk patch yok.
+        let strict_edges = EdgeThresholds { cold: 0.50, warm: 0.65, hot: 0.80,
+            cold_until: 0.05, warm_until: 0.30 };
+        s.set_regime_patch("HighVolatility",
+            RegimePatch::empty().with_edge(strict_edges));
+
+        // HighVolatility için edge override aktif
+        assert!((s.edge_threshold_for("HighVolatility", 0.0)  - 0.50).abs() < 1e-9);
+        assert!((s.edge_threshold_for("HighVolatility", 0.99) - 0.80).abs() < 1e-9);
+        // Ama trade_risk hâlâ base
+        let tr = s.trade_risk_for("HighVolatility");
+        assert_eq!(tr.take_profit_pct, 3.0);
+
+        // Patch'siz başka bir rejim base'i kullanır
+        assert!((s.edge_threshold_for("Ranging", 0.99) - 0.55).abs() < 1e-9);
+    }
+
+    #[test]
+    fn regime_trade_risk_override_only_when_set() {
+        let mut s = ParameterStore::default();
+        // Ranging için pos boyutunu kıs, TP daralt.
+        let tight = TradeRiskParams { take_profit_pct: 1.5, stop_loss_pct: 0.8, max_position_size: 0.25 };
+        s.set_regime_patch("Ranging", RegimePatch::empty().with_trade_risk(tight));
+
+        let r = s.trade_risk_for("Ranging");
+        assert_eq!(r.take_profit_pct,   1.5);
+        assert_eq!(r.max_position_size, 0.25);
+        // Diğer rejimler base'de kalmalı
+        let u = s.trade_risk_for("StrongUptrend");
+        assert_eq!(u.take_profit_pct,   3.0);
+        assert_eq!(u.max_position_size, 0.5);
     }
 
     #[test]
