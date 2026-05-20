@@ -291,13 +291,19 @@ impl Engine {
                     ))
                 } else { None };
 
+                // `now_secs` task başlangıcından elapsed; record_step ise bridge.rs
+                // tarafından epoch saniye olarak değerlendiriliyor (now_epoch - last_run).
+                // İki ayrı semantik ayağı karıştırmamak için record_step çağrısına ayrı
+                // bir `now_epoch_secs` geç — yaş gösterimi doğru olur.
+                let now_epoch_secs: u64 = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                 if let Ok(mut st) = st_px.lock() {
                     if let Ok(mut prices) = st.fleet.live_price.write() {
                         for (sym, px) in &new_prices { prices.insert(sym.clone(), *px); }
                     }
                     if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
                         let status = if errors.is_empty() { StepStatus::Done } else { StepStatus::Failed };
-                        pipe.record_step("price_poll", status, now_secs, 0);
+                        pipe.record_step("price_poll", status, now_epoch_secs, 0);
                         for (sym, e) in &errors {
                             pipe.push_anomaly(
                                 AnomalySeverity::Warning,
@@ -317,7 +323,6 @@ impl Engine {
         let st_trig = Arc::clone(&state);
         tokio::spawn(async move {
             use crate::robot::data_pipeline::StepStatus;
-            let started_at = std::time::Instant::now();
             loop {
                 let (fired, stop) = {
                     let st = match st_trig.lock() { Ok(s) => s, Err(_) => break };
@@ -336,7 +341,10 @@ impl Engine {
                 if stop { break; }
 
                 if !fired.is_empty() {
-                    let now_secs = started_at.elapsed().as_secs();
+                    // Aşağıdaki record_step çağrıları için epoch saniye. Bridge.rs
+                    // "X saniye önce" yaşı bu epoch'tan hesaplar.
+                    let now_secs: u64 = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
 
                     for name in &fired {
                         let label = format!("trigger:{}", name);
@@ -391,17 +399,35 @@ impl Engine {
                                         Self::run_backtest_job(&st_for_job)
                                     }).await;
                                     match out {
-                                        Ok(Ok(())) => {}
+                                        Ok(Ok(())) => {
+                                            // ─── Faz 7 (Optimize): walk-forward backtest tamamlandı,
+                                            // best_params/strategy_selector güncellendi.
+                                            Self::mark_pipeline_stage(
+                                                &state_clone,
+                                                crate::robot::data_pipeline::canon::PipelineStage::Optimize,
+                                                crate::robot::data_pipeline::StepStatus::Done,
+                                            );
+                                        }
                                         Ok(Err(e)) => {
                                             log::warn!("🔬 Backtest başarısız: {}", e);
                                             if let Ok(mut st) = state_clone.lock() {
                                                 st.push_log(format!("❌ Backtest başarısız: {}", e));
                                             }
                                             final_status = StepStatus::Failed;
+                                            Self::mark_pipeline_stage(
+                                                &state_clone,
+                                                crate::robot::data_pipeline::canon::PipelineStage::Optimize,
+                                                crate::robot::data_pipeline::StepStatus::Failed,
+                                            );
                                         }
                                         Err(e) => {
                                             log::warn!("🔬 Backtest join hatası: {}", e);
                                             final_status = StepStatus::Failed;
+                                            Self::mark_pipeline_stage(
+                                                &state_clone,
+                                                crate::robot::data_pipeline::canon::PipelineStage::Optimize,
+                                                crate::robot::data_pipeline::StepStatus::Failed,
+                                            );
                                         }
                                     }
                                 },
@@ -440,7 +466,6 @@ impl Engine {
         let st_pipe = Arc::clone(&state);
         tokio::spawn(async move {
             use crate::robot::data_pipeline::StepStatus;
-            let started_at = std::time::Instant::now();
             let mut last_phase = String::new();
             loop {
                 let (current_phase, stop) = {
@@ -454,13 +479,17 @@ impl Engine {
                 if stop { break; }
 
                 if current_phase != last_phase {
-                    let now_secs = started_at.elapsed().as_secs();
+                    // record_step epoch saniye bekler; bridge "now - last_run" yaşı bundan
+                    // hesaplar. Elapsed semantiği vereyim diye eski hesap "1779…" anomalisi
+                    // yaratıyordu.
+                    let now_epoch_secs: u64 = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                     if let Ok(st) = st_pipe.lock() {
                         if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
                             pipe.record_step(
                                 format!("phase:{}", current_phase),
                                 StepStatus::Done,
-                                now_secs,
+                                now_epoch_secs,
                                 0,
                             );
                         }
