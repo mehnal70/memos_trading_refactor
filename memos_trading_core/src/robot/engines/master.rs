@@ -2120,7 +2120,13 @@ impl Engine {
 
         // 2-5) Hub mutasyonu — tek mutex altında
         let mut st = match state.lock() { Ok(s) => s, Err(_) => return };
+        // Drift-tetikli retrain cooldown: sürekli yüksek drift'te her tick'te
+        // yeni trigger basılmasın diye ML_DRIFT_COOLDOWN_SECS (default 600)
+        // boyunca bekle. Cooldown=0 → her tick fire (testing modu).
+        let ml_drift_cooldown: u64 = std::env::var("ML_DRIFT_COOLDOWN_SECS").ok()
+            .and_then(|s| s.parse::<u64>().ok()).unwrap_or(600);
         let mut should_retrain = false;
+        let mut armed = true;
         let mut drift_score = 0.0;
         let mut controller_cycle = 0u64;
         let mut evolved = false;
@@ -2131,6 +2137,10 @@ impl Engine {
                 hub.drift_history.push_back(drift_score);
                 while hub.drift_history.len() > 100 { hub.drift_history.pop_front(); }
                 should_retrain = hub.should_retrain(drift_score);
+                armed = hub.drift_retrain_armed(ml_drift_cooldown);
+                if should_retrain && armed {
+                    hub.mark_drift_retrain_fired();
+                }
             }
 
             // Evrim tick — mum olsa da olmasa da controller cycle ilerler
@@ -2145,20 +2155,33 @@ impl Engine {
         st.brain.drift_history.push_back(drift_score);
         while st.brain.drift_history.len() > 100 { st.brain.drift_history.pop_front(); }
 
-        if should_retrain {
-            if let Some(t) = st.fleet.triggers.get("ml") {
-                t.store(true, Ordering::Relaxed);
+        match (should_retrain, armed) {
+            (true, true) => {
+                if let Some(t) = st.fleet.triggers.get("ml") {
+                    t.store(true, Ordering::Relaxed);
+                }
+                st.push_log(format!(
+                    "🧠 Hub: drift={:.3} eşik aşıldı ⇒ ml retrain tetiklendi (cycle={})",
+                    drift_score, controller_cycle,
+                ));
+                // Repair log'a da düşür — kaynak "drift" olarak işaretli.
+                st.guardian.repair_log.push_back(format!(
+                    "[{}] hub: drift-driven retrain (drift={:.3}, cooldown={}s)",
+                    chrono::Local::now().format("%H:%M:%S"), drift_score, ml_drift_cooldown,
+                ));
+                while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
             }
-            st.push_log(format!(
-                "🧠 Hub: drift={:.3} eşik aşıldı ⇒ ml retrain tetiklendi (cycle={})",
-                drift_score, controller_cycle,
-            ));
-            // Repair log'a da düşür
-            st.guardian.repair_log.push_back(format!(
-                "[{}] hub: drift-driven retrain (drift={:.3})",
-                chrono::Local::now().format("%H:%M:%S"), drift_score,
-            ));
-            while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
+            (true, false) => {
+                // Drift devam ediyor ama cooldown'da — tek satır bilgi log'u
+                // (her tick spam'lemesin diye sadece guardian repair_log'a yaz,
+                // ana UI log'una basma; orada görünmemesi normal akış).
+                st.guardian.repair_log.push_back(format!(
+                    "[{}] hub: drift={:.3} eşik aşıldı ama cooldown'da ({}s) — fire atlandı",
+                    chrono::Local::now().format("%H:%M:%S"), drift_score, ml_drift_cooldown,
+                ));
+                while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
+            }
+            _ => { /* drift normal — sessiz */ }
         }
         if evolved {
             st.push_log(format!(
