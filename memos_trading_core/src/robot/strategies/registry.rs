@@ -29,9 +29,12 @@ use super::{
 pub type StrategyFactory = Arc<dyn Fn() -> Box<dyn Strategy> + Send + Sync>;
 
 /// Plug-in registry. İsim → factory eşlemesi, bilinmeyene düşmek için
-/// `default_name` tutar.
+/// `default_name` tutar. `canonical_keys` her benzersiz strateji için tek
+/// canonical adı insertion order'da saklar; aliases bu listede yer almaz.
+/// Backtest pool'u `canonical_pool()` üzerinden registry'den otomatik genişler.
 pub struct StrategyRegistry {
     entries: HashMap<String, StrategyFactory>,
+    canonical_keys: Vec<String>,
     default_name: String,
 }
 
@@ -40,18 +43,25 @@ impl StrategyRegistry {
     pub fn new(default_name: impl Into<String>) -> Self {
         Self {
             entries: HashMap::new(),
+            canonical_keys: Vec::new(),
             default_name: canonical(&default_name.into()),
         }
     }
 
-    /// Yeni strateji kaydı. Aynı canonical isim üzerinde önceki kayıt
-    /// üzerine yazılır (alias override etmek için kullanılır).
+    /// Tek başlık altında strateji kaydı: registry'ye yeniyse aynı zamanda
+    /// canonical listesine de eklenir. (`register_aliases` ile aynı factory'yi
+    /// ek isimlerden geçirmek istiyorsanız onu kullanın — aliases canonical
+    /// listeye girmez.)
     pub fn register(
         &mut self,
         name: impl Into<String>,
         factory: StrategyFactory,
     ) -> &mut Self {
-        self.entries.insert(canonical(&name.into()), factory);
+        let key = canonical(&name.into());
+        if !self.entries.contains_key(&key) {
+            self.canonical_keys.push(key.clone());
+        }
+        self.entries.insert(key, factory);
         self
     }
 
@@ -64,14 +74,23 @@ impl StrategyRegistry {
         self.register(name, Arc::new(|| Box::new(S::default()) as Box<dyn Strategy>))
     }
 
-    /// Aynı factory'yi birden çok alias altında kaydeder.
+    /// Aynı factory'yi birden çok ad altında kaydeder. İLK ad canonical olarak
+    /// işaretlenir; sonrakiler yalnız alias — `canonical_pool()` çıktısında
+    /// yer almaz, ama `make()` ile yine de aynı stratejiye çözülürler.
+    /// Backtest pool'u benzersiz stratejileri tarar; alias'lar tekrar tekrar
+    /// test edilmez.
     pub fn register_aliases(
         &mut self,
         aliases: &[&str],
         factory: StrategyFactory,
     ) -> &mut Self {
-        for alias in aliases {
-            self.register(*alias, factory.clone());
+        if let Some((first, rest)) = aliases.split_first() {
+            self.register(*first, factory.clone());
+            for alias in rest {
+                let key = canonical(&(*alias).to_string());
+                // Sadece map'e koy, canonical_keys'e EKLEME.
+                self.entries.insert(key, factory.clone());
+            }
         }
         self
     }
@@ -89,11 +108,20 @@ impl StrategyRegistry {
         Box::new(MaCrossoverStrategy)
     }
 
-    /// Kayıtlı tüm canonical isimlerin sıralı listesi (deterministik çıktı).
+    /// Kayıtlı tüm canonical isimlerin sıralı listesi (alias dahil — eski
+    /// davranış, raporlama/diagnostics için kullanılır).
     pub fn names(&self) -> Vec<String> {
         let mut v: Vec<String> = self.entries.keys().cloned().collect();
         v.sort();
         v
+    }
+
+    /// Benzersiz canonical strateji adları (insertion order). Alias'lar bu
+    /// listede yer almaz → backtest/optimizasyon pool'u olarak doğrudan
+    /// kullanılabilir; yeni strateji `default_registry()`'e eklendiğinde pool
+    /// otomatik büyür.
+    pub fn canonical_pool(&self) -> Vec<String> {
+        self.canonical_keys.clone()
     }
 
     /// Bir ismin kayıtlı olup olmadığını söyler (alias dahil).
@@ -119,13 +147,13 @@ fn canonical(name: &str) -> String {
 pub fn default_registry() -> StrategyRegistry {
     let mut r = StrategyRegistry::new("MA_CROSSOVER");
 
-    // Trend ailesi
+    // Trend ailesi (canonical adlar öne — pool listesinde idiomatic isimler)
     r.register_aliases(
-        &["MA", "MA_CROSSOVER", "DEFAULT"],
+        &["MA_CROSSOVER", "MA", "DEFAULT"],
         Arc::new(|| Box::new(MaCrossoverStrategy) as Box<dyn Strategy>),
     );
     r.register_aliases(
-        &["EMA", "EMA_CROSSOVER"],
+        &["EMA_CROSSOVER", "EMA"],
         Arc::new(|| Box::new(EmaCrossoverStrategy) as Box<dyn Strategy>),
     );
     r.register("MACD", Arc::new(|| Box::new(MacdStrategy) as Box<dyn Strategy>));
@@ -249,5 +277,69 @@ mod tests {
         // Hem alias hem canonical aynı listede:
         assert!(names.iter().any(|n| n == "BB"));
         assert!(names.iter().any(|n| n == "BOLLINGER_BANDS"));
+    }
+
+    #[test]
+    fn canonical_pool_excludes_aliases_and_uses_idiomatic_names() {
+        let pool = default_registry().canonical_pool();
+        // Idiomatic canonical adlar pool'da olmalı.
+        for n in &[
+            "MA_CROSSOVER", "EMA_CROSSOVER", "MACD", "SUPERTREND",
+            "RSI", "STOCH_RSI", "CCI",
+            "BB", "DONCHIAN",
+            "PRICE_ACTION", "ICT_FVG", "SMC", "ICT_OB", "ICT_COMPOSITE",
+            "FUNDING_CONTRARIAN",
+        ] {
+            assert!(pool.contains(&n.to_string()), "pool'da eksik canonical: {n}");
+        }
+        // Alias'lar pool'da olmamalı (make() çağrısıyla yine çözülürler).
+        for alias in &["MA", "DEFAULT", "EMA", "STOCHASTIC_RSI", "BOLLINGER_BANDS"] {
+            assert!(!pool.contains(&alias.to_string()),
+                "pool'da alias görünmemeli: {alias}");
+        }
+    }
+
+    #[test]
+    fn canonical_pool_is_insertion_order_not_alphabetical() {
+        // Insertion order: MA_CROSSOVER en başta, sonra EMA_CROSSOVER, sonra MACD…
+        let pool = default_registry().canonical_pool();
+        assert_eq!(pool[0], "MA_CROSSOVER");
+        assert_eq!(pool[1], "EMA_CROSSOVER");
+        assert_eq!(pool[2], "MACD");
+        assert_eq!(pool[3], "SUPERTREND");
+    }
+
+    #[test]
+    fn aliases_still_resolve_after_canonical_refactor() {
+        let r = default_registry();
+        // Alias çağrıları make() ile aynı stratejiye çözülmeye devam etmeli.
+        assert_eq!(r.make("DEFAULT").name(), r.make("MA_CROSSOVER").name());
+        assert_eq!(r.make("BOLLINGER_BANDS").name(), r.make("BB").name());
+        assert_eq!(r.make("STOCHASTIC_RSI").name(), r.make("STOCH_RSI").name());
+        assert_eq!(r.make("EMA").name(), r.make("EMA_CROSSOVER").name());
+    }
+
+    #[test]
+    fn runtime_register_appends_to_canonical_pool() {
+        struct ExtraStrat;
+        impl Strategy for ExtraStrat {
+            fn generate_signal(
+                &self,
+                _candles: &[crate::core::types::Candle],
+                _params: &crate::core::types::StrategyParams,
+                _funding: Option<&[crate::core::types::FundingRatePoint]>,
+                _htf: Option<&[crate::core::types::Candle]>,
+            ) -> crate::Result<crate::core::types::Signal> {
+                Ok(crate::core::types::Signal::Hold)
+            }
+            fn name(&self) -> &str { "extra" }
+        }
+
+        let mut r = default_registry();
+        let before = r.canonical_pool().len();
+        r.register("EXTRA", Arc::new(|| Box::new(ExtraStrat) as Box<dyn Strategy>));
+        let after = r.canonical_pool();
+        assert_eq!(after.len(), before + 1);
+        assert_eq!(after.last().unwrap(), "EXTRA");
     }
 }

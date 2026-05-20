@@ -2706,21 +2706,31 @@ impl Engine {
             return Err(format!("yetersiz mum verisi: {} mum", candles.len()));
         }
 
+        // Aday strateji pool'u StrategyRegistry'den otomatik genişler (Faz 4 c2):
+        // yeni strateji default_registry()'ye eklendiğinde backtest_job ekstra
+        // değişiklik gerektirmez. Alias'lar dahil edilmez (canonical_pool).
+        let strat_pool: Vec<String> =
+            crate::robot::strategies::default_registry().canonical_pool();
+        // Grid: TP 6 × SL 4 × PS 3 = 72 senaryo (aşağıdaki optimize_parallel
+        // çağrısının sınırlarıyla aynı).
+        const SCENARIOS_PER_STRATEGY: usize = 6 * 4 * 3;
         if let Ok(mut st) = state.lock() {
             st.push_log(format!(
-                "🔬 Backtest: {} mum yüklendi, 4 strateji × 18 parametre kombinasyonu = 72 senaryo",
+                "🔬 Backtest: {} mum yüklendi, {} strateji × {} parametre = {} senaryo",
                 candles.len(),
+                strat_pool.len(),
+                SCENARIOS_PER_STRATEGY,
+                strat_pool.len() * SCENARIOS_PER_STRATEGY,
             ));
         }
 
         // Çoklu stratejide aday seç — rejime göre.
-        let strat_pool = ["MA_CROSSOVER", "SUPERTREND", "RSI", "MACD"];
         let mut best_overall: Option<(String, f64,
             crate::robot::backtester::parameter_optimizer::OptimizationResult)> = None;
 
         for name in &strat_pool {
             let opt = crate::robot::backtester::parameter_optimizer::ParameterOptimizer::new(
-                symbol.clone(), interval.clone(), capital, (*name).to_string());
+                symbol.clone(), interval.clone(), capital, name.clone());
             // TP, SL, PositionSize gridleri
             let res = opt.optimize_parallel(
                 &candles,
@@ -2739,7 +2749,7 @@ impl Engine {
                     ));
                 }
                 if best_overall.as_ref().map(|(_, s, _)| *s).unwrap_or(f64::NEG_INFINITY) < score {
-                    best_overall = Some(((*name).to_string(), score, r));
+                    best_overall = Some((name.clone(), score, r));
                 }
             } else if let Ok(mut st) = state.lock() {
                 st.push_log(format!("🔬   aday {} → sonuç alınamadı", name));

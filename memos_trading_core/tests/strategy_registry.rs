@@ -117,6 +117,50 @@ fn selector_with_strategies_accepts_custom_chain() {
 // Runtime'da yeni strateji enjeksiyonu
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// canonical_pool — backtest pool'unun otomatik genişlemesi
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn canonical_pool_includes_all_unique_strategies_without_aliases() {
+    let r = default_registry();
+    let pool = r.canonical_pool();
+    // Bilinen canonical adların hepsi pool'da
+    for n in &[
+        "MA_CROSSOVER", "EMA_CROSSOVER", "MACD", "SUPERTREND",
+        "RSI", "STOCH_RSI", "CCI",
+        "BB", "DONCHIAN",
+        "PRICE_ACTION", "ICT_FVG", "SMC", "ICT_OB", "ICT_COMPOSITE",
+        "FUNDING_CONTRARIAN",
+    ] {
+        assert!(pool.iter().any(|x| x == n), "canonical_pool'da eksik: {n}");
+    }
+    // Alias'lar pool dışında — yine make() ile çözülürler ama backtest tek bir
+    // strateji üzerinde mükerrer iş yapmaz.
+    for a in &["MA", "DEFAULT", "EMA", "STOCHASTIC_RSI", "BOLLINGER_BANDS"] {
+        assert!(!pool.iter().any(|x| x == a),
+            "canonical_pool alias içeremez: {a}");
+    }
+    // En az 15 benzersiz strateji
+    assert!(pool.len() >= 15, "pool ≥ 15 strateji bekleniyor, gelen: {}", pool.len());
+}
+
+#[test]
+fn canonical_pool_grows_when_new_strategy_is_registered() {
+    let mut r = default_registry();
+    let before = r.canonical_pool().len();
+    // Yeni strateji: ICT_BREAKER_BLOCK varsayımı (gerçek struct gerekmez —
+    // closure içinde mevcut bir struct'ı sarmak yeterli; pool sayısının
+    // arttığını doğruluyoruz).
+    r.register("ICT_BREAKER_BLOCK",
+        std::sync::Arc::new(|| Box::new(
+            memos_trading_core::robot::strategies::MaCrossoverStrategy
+        ) as Box<dyn Strategy>));
+    let after = r.canonical_pool();
+    assert_eq!(after.len(), before + 1);
+    assert!(after.iter().any(|x| x == "ICT_BREAKER_BLOCK"));
+}
+
 #[test]
 fn runtime_registration_adds_new_strategy() {
     struct EchoSell;
