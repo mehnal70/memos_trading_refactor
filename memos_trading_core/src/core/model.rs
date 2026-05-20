@@ -382,6 +382,11 @@ pub struct ClosedTradeModel {
     pub pnl_pct: f64,
     pub exit_reason: String,
     pub closed_at: String,
+    /// Pozisyonun açıldığı an (RFC3339). Holding period hesaplamak için close anında
+    /// `PositionModel.opened_at`'tan kopyalanır. Eski serialize'lı kayıtlar için boş
+    /// gelir (serde default) — scalp/swing istatistiklerinde böyle satırlar atlanır.
+    #[serde(default)]
+    pub opened_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

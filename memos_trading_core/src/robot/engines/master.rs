@@ -2264,6 +2264,7 @@ impl Engine {
                 pnl: pnl_val,
                 pnl_pct: pnl_pct_val,
                 closed_at: chrono::Utc::now().to_rfc3339(),
+                opened_at: pos.opened_at.clone(),
             };
 
             // [DÜZELTME]: Arşiv listesine itme işlemi izole skopa alındı

@@ -71,6 +71,7 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
                 pnl_pct: t.pnl_pct,
                 exit_reason: t.exit_reason.clone(),
                 closed_at: t.closed_at.clone(),
+                opened_at: t.opened_at.clone(),
             }
         }).collect();
 
@@ -212,11 +213,15 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
         best_position_size,
     };
 
-    // 6. ÖZEL İSTATİSTİKLER (Placeholder - Lojik Engine'e taşınacak)
-    let (scalp_stats, swing_stats) = (
-        TradeTypeStats { label: "SCALP".into(), win_rate: 65.0, profit_factor: 1.8, avg_win: 12.0, avg_loss: 5.5, current_streak: 3 },
-        TradeTypeStats { label: "SWING".into(), win_rate: 52.0, profit_factor: 2.1, avg_win: 45.0, avg_loss: 20.0, current_streak: -1 }
-    );
+    // 6. ÖZEL İSTATİSTİKLER — closed_trades'ten holding period'a göre Scalp/Swing ayrımı.
+    //    Eşik env `SCALP_SWING_THRESHOLD_MIN` (default 60 dk): bunun altında kapanan trade Scalp,
+    //    eşit veya üstü Swing. opened_at/closed_at parse edilemeyen veya boş kayıtlar atlanır.
+    let (scalp_stats, swing_stats) = st.finance.live_closed_trades.read().ok()
+        .map(|trades| compute_scalp_swing_stats(&trades))
+        .unwrap_or_else(|| (
+            TradeTypeStats { label: "SCALP".into(), win_rate: 0.0, profit_factor: 0.0, avg_win: 0.0, avg_loss: 0.0, current_streak: 0 },
+            TradeTypeStats { label: "SWING".into(), win_rate: 0.0, profit_factor: 0.0, avg_win: 0.0, avg_loss: 0.0, current_streak: 0 },
+        ));
 
     // anomalies aşağıda MissionControl'a move edilmeden önce sayıyı yakala.
     let active_anomalies = anomalies.len();
@@ -238,5 +243,181 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
         charts,
         fleet,
         active_anomalies,
+    }
+}
+
+/// Closed trades listesini holding period'a göre Scalp/Swing'e ayırıp her grup için
+/// (win_rate, profit_factor, avg_win, avg_loss, current_streak) hesaplar.
+///
+/// - Eşik: `SCALP_SWING_THRESHOLD_MIN` env (default 60 dk). Holding < eşik → Scalp.
+/// - opened_at/closed_at boş veya parse edilemeyen kayıtlar atlanır (eski şema toleransı).
+/// - current_streak: en son kayıttan başlayarak ardışık aynı yön (kâr/zarar) sayısı,
+///   kâr → pozitif, zarar → negatif. Yön değişince durur.
+fn compute_scalp_swing_stats(trades: &[ClosedTradeModel]) -> (TradeTypeStats, TradeTypeStats) {
+    let threshold_min: i64 = std::env::var("SCALP_SWING_THRESHOLD_MIN")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    let threshold_secs = threshold_min.saturating_mul(60);
+
+    // Holding period'u hesapla, geçersiz kayıtları atla.
+    let with_holding: Vec<(&ClosedTradeModel, i64)> = trades.iter().filter_map(|t| {
+        if t.opened_at.is_empty() || t.closed_at.is_empty() { return None; }
+        let o = chrono::DateTime::parse_from_rfc3339(&t.opened_at).ok()?;
+        let c = chrono::DateTime::parse_from_rfc3339(&t.closed_at).ok()?;
+        let secs = (c - o).num_seconds();
+        if secs < 0 { return None; } // bozuk sıralama
+        Some((t, secs))
+    }).collect();
+
+    let mut scalp: Vec<&ClosedTradeModel> = vec![];
+    let mut swing: Vec<&ClosedTradeModel> = vec![];
+    for (t, h) in &with_holding {
+        if *h < threshold_secs { scalp.push(*t); } else { swing.push(*t); }
+    }
+    (
+        stats_for_group("SCALP", &scalp),
+        stats_for_group("SWING", &swing),
+    )
+}
+
+fn stats_for_group(label: &str, group: &[&ClosedTradeModel]) -> TradeTypeStats {
+    let n = group.len();
+    if n == 0 {
+        return TradeTypeStats {
+            label: label.into(), win_rate: 0.0, profit_factor: 0.0,
+            avg_win: 0.0, avg_loss: 0.0, current_streak: 0,
+        };
+    }
+    let wins: Vec<f64> = group.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).collect();
+    let losses: Vec<f64> = group.iter().filter(|t| t.pnl < 0.0).map(|t| t.pnl.abs()).collect();
+    let sum_wins: f64 = wins.iter().sum();
+    let sum_losses: f64 = losses.iter().sum();
+
+    let win_rate = wins.len() as f64 / n as f64 * 100.0;
+    // Loss yokken sonsuz olur; UI/JSON'da NaN/inf üretmemek için 100.0'a cap'liyoruz.
+    let profit_factor = if sum_losses > 0.0 { (sum_wins / sum_losses).min(100.0) }
+                        else if sum_wins > 0.0 { 100.0 }
+                        else { 0.0 };
+    let avg_win = if !wins.is_empty() { sum_wins / wins.len() as f64 } else { 0.0 };
+    let avg_loss = if !losses.is_empty() { sum_losses / losses.len() as f64 } else { 0.0 };
+
+    // Streak: en son trade'den geriye, aynı yönde gittiği sürece say.
+    let mut streak: i32 = 0;
+    if let Some(last) = group.last() {
+        let last_sign = last.pnl.signum();
+        if last_sign != 0.0 {
+            for t in group.iter().rev() {
+                if t.pnl.signum() == last_sign {
+                    streak += if last_sign > 0.0 { 1 } else { -1 };
+                } else { break; }
+            }
+        }
+    }
+
+    TradeTypeStats { label: label.into(), win_rate, profit_factor, avg_win, avg_loss, current_streak: streak }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(opened: &str, closed: &str, pnl: f64) -> ClosedTradeModel {
+        ClosedTradeModel {
+            symbol: "BTCUSDT".into(),
+            is_long: true,
+            pnl,
+            pnl_pct: 0.0,
+            exit_reason: "TP".into(),
+            opened_at: opened.into(),
+            closed_at: closed.into(),
+        }
+    }
+
+    #[test]
+    fn empty_trades_yield_zero_stats() {
+        std::env::remove_var("SCALP_SWING_THRESHOLD_MIN");
+        let (s, w) = compute_scalp_swing_stats(&[]);
+        assert_eq!(s.win_rate, 0.0);
+        assert_eq!(w.win_rate, 0.0);
+        assert_eq!(s.label, "SCALP");
+        assert_eq!(w.label, "SWING");
+    }
+
+    #[test]
+    fn short_holding_goes_to_scalp() {
+        std::env::remove_var("SCALP_SWING_THRESHOLD_MIN");
+        // 10 dakikalık holding → SCALP grubu (default eşik 60 dk).
+        let trades = vec![
+            t("2026-05-20T10:00:00+00:00", "2026-05-20T10:10:00+00:00", 5.0),
+            t("2026-05-20T11:00:00+00:00", "2026-05-20T11:10:00+00:00", -2.0),
+        ];
+        let (s, w) = compute_scalp_swing_stats(&trades);
+        assert!((s.win_rate - 50.0).abs() < 1e-9);
+        assert!((s.profit_factor - 2.5).abs() < 1e-9, "5/2=2.5; got={}", s.profit_factor);
+        assert_eq!(w.win_rate, 0.0, "Swing grubu boş kalmalı");
+    }
+
+    #[test]
+    fn long_holding_goes_to_swing() {
+        std::env::remove_var("SCALP_SWING_THRESHOLD_MIN");
+        // 2 saatlik holding → SWING grubu.
+        let trades = vec![
+            t("2026-05-20T10:00:00+00:00", "2026-05-20T12:00:00+00:00", 10.0),
+        ];
+        let (s, w) = compute_scalp_swing_stats(&trades);
+        assert_eq!(s.win_rate, 0.0);
+        assert!((w.win_rate - 100.0).abs() < 1e-9);
+        assert!((w.profit_factor - 100.0).abs() < 1e-9, "loss yok → cap 100; got={}", w.profit_factor);
+    }
+
+    #[test]
+    fn current_streak_counts_consecutive_same_sign() {
+        std::env::remove_var("SCALP_SWING_THRESHOLD_MIN");
+        // Son üç trade kazanç → streak = +3
+        let trades = vec![
+            t("2026-05-20T10:00:00+00:00", "2026-05-20T10:05:00+00:00", -1.0),
+            t("2026-05-20T11:00:00+00:00", "2026-05-20T11:05:00+00:00",  2.0),
+            t("2026-05-20T12:00:00+00:00", "2026-05-20T12:05:00+00:00",  3.0),
+            t("2026-05-20T13:00:00+00:00", "2026-05-20T13:05:00+00:00",  1.0),
+        ];
+        let (s, _) = compute_scalp_swing_stats(&trades);
+        assert_eq!(s.current_streak, 3);
+    }
+
+    #[test]
+    fn current_streak_negative_when_last_trades_are_losses() {
+        std::env::remove_var("SCALP_SWING_THRESHOLD_MIN");
+        let trades = vec![
+            t("2026-05-20T10:00:00+00:00", "2026-05-20T10:05:00+00:00",  5.0),
+            t("2026-05-20T11:00:00+00:00", "2026-05-20T11:05:00+00:00", -2.0),
+            t("2026-05-20T12:00:00+00:00", "2026-05-20T12:05:00+00:00", -1.0),
+        ];
+        let (s, _) = compute_scalp_swing_stats(&trades);
+        assert_eq!(s.current_streak, -2);
+    }
+
+    #[test]
+    fn threshold_env_override_moves_trades_between_groups() {
+        // Eşik 5 dk → 10 dk holding artık SWING'e düşer.
+        std::env::set_var("SCALP_SWING_THRESHOLD_MIN", "5");
+        let trades = vec![
+            t("2026-05-20T10:00:00+00:00", "2026-05-20T10:10:00+00:00", 7.0),
+        ];
+        let (s, w) = compute_scalp_swing_stats(&trades);
+        std::env::remove_var("SCALP_SWING_THRESHOLD_MIN");
+        assert_eq!(s.win_rate, 0.0);
+        assert!((w.win_rate - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn missing_opened_at_is_skipped() {
+        std::env::remove_var("SCALP_SWING_THRESHOLD_MIN");
+        let trades = vec![
+            t("", "2026-05-20T10:10:00+00:00", 5.0),         // opened_at boş → skip
+            t("2026-05-20T11:00:00+00:00", "", -2.0),         // closed_at boş → skip
+            t("2026-05-20T12:00:00+00:00", "2026-05-20T12:05:00+00:00", 3.0),
+        ];
+        let (s, _) = compute_scalp_swing_stats(&trades);
+        // Sadece son trade dahil → win_rate 100
+        assert!((s.win_rate - 100.0).abs() < 1e-9);
     }
 }
