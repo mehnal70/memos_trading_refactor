@@ -1951,6 +1951,13 @@ impl Engine {
             let _ = logger.log_event(&ev);
         }
         let _ = live_order_id; // ileride pos_id ↔ order_id eşlemesi için saklanabilir
+
+        // ─── Faz 5 (Execute): pozisyon başarıyla mühürlendi ───────────────
+        Self::mark_pipeline_stage(
+            state,
+            crate::robot::data_pipeline::canon::PipelineStage::Execute,
+            crate::robot::data_pipeline::StepStatus::Done,
+        );
     }
 
     /// 🧠 IntelligenceHub periyodik tick: drift hesabı + evrim + retrain kararı.
@@ -2315,14 +2322,17 @@ impl Engine {
                 reason.emoji(), mode_tag, reason.as_str(), symbol, exit_price, pos.entry_price, pnl_val, pnl_pct_val,
             ));
 
-            // IntelligenceHub.learn_from_exit — track_trade'de açılışta hangi rejim/strateji ile
-            // mühürlediysek, kazanç/kayıp uçtan uca o eşleştirmeye gider.
+            // ─── Faz 6 (Learn): IntelligenceHub.learn_from_exit ─────────────
+            // track_trade'de açılışta hangi rejim/strateji ile mühürlediysek,
+            // kazanç/kayıp uçtan uca o eşleştirmeye gider.
+            let mut learn_recorded = false;
             if !pos.pos_id.is_empty() {
                 let pid = crate::core::types::PositionId::from_str_or_new(&pos.pos_id);
                 let mut hub_summary: Option<(usize, String)> = None;
                 if let Ok(mut hub) = st.brain.intelligence_hub.write() {
                     hub.learn_from_exit(pid, pnl_pct_val);
                     hub_summary = Some((hub.controller.consecutive_failures, hub.controller.state.to_string()));
+                    learn_recorded = true;
                 }
                 if let Some((cf, controller_state)) = hub_summary {
                     st.push_log(format!(
@@ -2331,6 +2341,15 @@ impl Engine {
                         pnl_pct_val, cf, controller_state,
                     ));
                 }
+            }
+            // Learn mark — pos_id boş olsa bile yapılır mı? Hayır, sadece gerçekten
+            // hub'a yazıldıysa Done; aksi halde Skipped (eski/legacy pozisyon eşleşmedi).
+            if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
+                use crate::robot::data_pipeline::{canon::PipelineStage, StepStatus};
+                pipe.mark_stage_completed(
+                    PipelineStage::Learn,
+                    if learn_recorded { StepStatus::Done } else { StepStatus::Skipped },
+                );
             }
 
             // 📝 Periyodik dosya logu: TRADE_CLOSE. Logger Arc'ını clone'la, IO için
@@ -2350,6 +2369,15 @@ impl Engine {
                 let _ = logger.log_event(&ev);
             }
             Self::update_cognitive_memory(state, &closed_trade);
+
+            // ─── Faz 5 (Execute): kapanış icrası tamamlandı ─────────────────
+            // Açılış open_paper_position'da işaretleniyor; kapanış da bir Execute
+            // adımı sayılır (cancel_orders + arşivleme + reward feedback).
+            Self::mark_pipeline_stage(
+                state,
+                crate::robot::data_pipeline::canon::PipelineStage::Execute,
+                crate::robot::data_pipeline::StepStatus::Done,
+            );
         }
     }
 
