@@ -6,11 +6,9 @@ target/
 logs/
 *.log
 
-# Local data (DB, cache)
-data/trader.db
-data/trader.db-wal
-data/trader.db-shm
-data/*.tmp
+# Runtime data klasörleri (DB binary'leri ~GB ölçeğinde, snapshot, reports, cache)
+data/
+memos_trading_core/data/
 
 # Editor
 .idea/
@@ -21,6 +19,9 @@ data/*.tmp
 .DS_Store
 Thumbs.db
 
+# LibreOffice / OpenOffice geçici lock dosyaları
+.~lock.*#
+
 # Tar yedekler
 *.tar.gz
 
@@ -28,6 +29,18 @@ Thumbs.db
 liste.txt
 src_rs_files.txt
 Cargo_v1.toml
+
+# Hassas: token / SSH anahtar / kişisel notlar
 git_tokens.txt
 ssh_key
 ssh_key.pub
+docs/*.odt
+docs/yapılacaklar
+
+# Defense-in-depth: env, anahtar, kimlik bilgileri
+.env
+.env.*
+*.key
+*.pem
+credentials.json
+secrets.json
