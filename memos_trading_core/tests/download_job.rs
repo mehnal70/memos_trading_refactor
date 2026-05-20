@@ -55,20 +55,23 @@ async fn download_trigger_creates_candle_table_for_symbol() {
                 || logs.iter().any(|l| l.contains("Download başarısız"));
     assert!(saw_done, "Download sonuç logu bulunamadı. Logs: {:#?}", logs);
 
-    // Eğer başarıyla bittiyse → SQLite'a tablo eklenmiş olmalı
+    // Eğer başarıyla bittiyse → ana `candles` tablosunda BTCUSDT/1m satırları olmalı.
+    // (Eski şema: per-symbol `candles_btcusdt_1m`. Yeni şema: tek tablo, symbol+interval kolonu.)
     if logs.iter().any(|l| l.contains("🌐 Download ✓")) {
         let conn = rusqlite::Connection::open(&tmp_db).expect("db açılmadı");
         let table_exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
-            rusqlite::params!["candles_btcusdt_1m"],
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='candles')",
+            [],
             |row| row.get(0),
         ).unwrap_or(false);
-        assert!(table_exists, "candles_btcusdt_1m tablosu DB'de oluşturulmamış");
+        assert!(table_exists, "candles tablosu DB'de oluşturulmamış");
 
         let count: u32 = conn.query_row(
-            "SELECT COUNT(*) FROM candles_btcusdt_1m", [], |row| row.get(0),
+            "SELECT COUNT(*) FROM candles WHERE symbol = ?1 AND interval = ?2",
+            rusqlite::params!["BTCUSDT", "1m"],
+            |row| row.get(0),
         ).unwrap_or(0);
-        assert!(count > 0, "tabloda mum yok (count=0)");
+        assert!(count > 0, "candles tablosunda BTCUSDT/1m mumu yok (count=0)");
     }
 
     // Engine kapat

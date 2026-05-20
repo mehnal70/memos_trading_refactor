@@ -117,64 +117,71 @@ pub fn save_open_positions_snapshot(conn: &Connection, positions: &[PositionMode
     Ok(())
 }
 
-/// 📥 ADLİ MUM KAYDI: Chrono DateTime<Utc> uyumlu, SQL Injection korumalı mühürleyici.
+/// 📥 ADLİ MUM KAYDI: Ana `candles` tablosuna timestamp=INTEGER (ms) formatında yazar.
+/// Eski per-symbol `candles_{symbol}_{interval}` şeması terkedildi; tüm okuyucu/yazıcılar
+/// ana tabloda hizalı. Repository init_schema şemasıyla birebir aynı kolonlar kullanılır;
+/// `exchange`/`market` parametreleri şu an yalnız çağrı kaynağını izlemeye yarar ve tabloya
+/// yazılmaz (legacy şemada bu kolonlar yok, repository ile uyumlu kalmak için).
+///
+/// Şema: candles(id, symbol, interval, timestamp, open, high, low, close, volume, created_at).
+/// Aynı (symbol, interval, timestamp) varsa UPDATE; yoksa INSERT.
 pub fn save_candle(
     conn: &Connection,
     _exchange: &str,
     _market: &str,
     candle: &Candle,
 ) -> Result<()> {
-    // Tablo adını dinamik yapılandır (Örn: candles_btcusdt_1m)
-    let tbl_name = format!(
-        "candles_{}_{}",
-        candle.symbol.to_lowercase(),
-        candle.interval.to_lowercase()
-    );
+    // CandleRepository::new yoluyla gelmemiş bir bağlantı olabilir (örn. download job
+    // doğrudan rusqlite::Connection::open ile açıyor). Defensive olarak tabloyu yarat.
+    ensure_candles_table(conn)?;
 
-    // SQL Injection engellemek için adli karakter kontrolü (Sadece harf, rakam ve alt tire)
-    if !tbl_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(crate::MemosTradingError::Database(
-            "🚨 Adli Güvenlik İhlali: Tablo isminde geçersiz karakter!".to_string(),
-        ));
+    let raw_ms = candle.timestamp.timestamp_millis();
+
+    // Önce UPDATE — varsa OHLCV revize edilir (kapanmamış mumun düzeltilmesi).
+    let updated = conn.execute(
+        "UPDATE candles SET open=?1, high=?2, low=?3, close=?4, volume=?5 \
+         WHERE symbol=?6 AND interval=?7 AND timestamp=?8",
+        params![
+            candle.open, candle.high, candle.low, candle.close, candle.volume,
+            &candle.symbol, &candle.interval, raw_ms,
+        ],
+    ).map_err(|e| crate::MemosTradingError::Database(format!("Mum update hatası: {}", e)))?;
+
+    if updated == 0 {
+        conn.execute(
+            "INSERT INTO candles (symbol, interval, timestamp, open, high, low, close, volume, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                &candle.symbol, &candle.interval, raw_ms,
+                candle.open, candle.high, candle.low, candle.close, candle.volume,
+                Utc::now().to_rfc3339(),
+            ],
+        ).map_err(|e| crate::MemosTradingError::Database(format!("Mum insert hatası: {}", e)))?;
     }
 
-    // Tablo yoksa otonom olarak şemayı ayağa kaldır
-    let create_query = format!(
-        "CREATE TABLE IF NOT EXISTS {} (
-            open_time INTEGER PRIMARY KEY,
+    Ok(())
+}
+
+/// Ana `candles` tablosunu ve gerekli indeksleri defensive olarak yaratır.
+/// Repository::init_schema ile aynı tanım — iki yer ayrışmamalı.
+fn ensure_candles_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS candles (
+            id INTEGER PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            interval TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
             open REAL NOT NULL,
             high REAL NOT NULL,
             low REAL NOT NULL,
             close REAL NOT NULL,
-            volume REAL NOT NULL
-        )",
-        tbl_name
-    );
-    conn.execute(&create_query, [])
-        .map_err(|e| crate::MemosTradingError::Database(format!("Tablo oluşturulamadı: {}", e)))?;
-
-    // Veriyi mühürle (Chrono DateTime<Utc> nesnesi i64 milisaniyeye indirgeniyor)
-    let insert_query = format!(
-        "INSERT OR REPLACE INTO {} (open_time, open, high, low, close, volume) \
-         VALUES (?, ?, ?, ?, ?, ?)",
-        tbl_name
-    );
-
-    let raw_ms = candle.timestamp.timestamp_millis();
-
-    conn.execute(
-        &insert_query,
-        params![
-            raw_ms,
-            candle.open,
-            candle.high,
-            candle.low,
-            candle.close,
-            candle.volume
-        ],
-    )
-    .map_err(|e| crate::MemosTradingError::Database(format!("Mum yazma hatası: {}", e)))?;
-
+            volume REAL NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_symbol_interval_timestamp ON candles(symbol, interval, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_symbol ON candles(symbol);
+        CREATE INDEX IF NOT EXISTS idx_timestamp ON candles(timestamp);"
+    ).map_err(|e| crate::MemosTradingError::Database(format!("candles tablo init hatası: {}", e)))?;
     Ok(())
 }
 

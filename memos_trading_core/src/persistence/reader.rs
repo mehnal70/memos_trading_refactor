@@ -152,54 +152,63 @@ pub fn list_symbols(db_path: &str) -> Result<Vec<String>, crate::MemosTradingErr
 
 /// 🕯️ KRİTİK MUM HASADI: Belirli bir sembol ve interval için geçmiş mum verilerini (`Candle`) RAM'e çeker.
 /// Stratejilerin sinyal üretebilmesi için gereken ana yakıttır.
+///
+/// Ana `candles` tablosunu (symbol, interval, timestamp, open, high, low, close, volume)
+/// symbol+interval filtresi ile sorgular. Timestamp DB'de INTEGER milisaniye olarak saklanıyor;
+/// geriye dönük uyumluluk için RFC3339 string formatı da kabul edilir.
 pub fn read_candles(
     db_path: &str,
     symbol: &str,
     interval: &str,
     limit: usize,
 ) -> Result<Vec<crate::core::types::Candle>, crate::MemosTradingError> {
+    use chrono::{DateTime, TimeZone, Utc};
+    use rusqlite::types::ValueRef;
+
     let conn = Connection::open(db_path)
         .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
 
-    // Tablo adı dinamik yapılandırılıyor (örn: candles_btcusdt_1m)
-    let tbl_name = format!("candles_{}_{}", symbol.to_lowercase(), interval.to_lowercase());
-    
-    // SQL Injection engellemek için tablo adı kontrolü (Sadece harf, rakam ve alt tire)
-    if !tbl_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(crate::MemosTradingError::Database("🚨 Adli Güvenlik İhlali: Geçersiz tablo karakteri!".to_string()));
-    }
+    let query = "SELECT timestamp, open, high, low, close, volume, symbol, interval \
+                 FROM candles \
+                 WHERE symbol = ?1 AND interval = ?2 \
+                 ORDER BY timestamp DESC LIMIT ?3";
 
-    let query = format!(
-        "SELECT open_time, open, high, low, close, volume FROM {} \
-         ORDER BY open_time DESC LIMIT ?",
-        tbl_name
-    );
-
-    let mut stmt = conn.prepare(&query).map_err(|e| {
-        // Tablo henüz yoksa panik yapma, boş mum listesi dönerek stratejiyi koru
-        crate::MemosTradingError::Database(format!("Tablo bulunamadı veya sorgulanamadı: {}", e))
+    let mut stmt = conn.prepare(query).map_err(|e| {
+        crate::MemosTradingError::Database(format!("candles sorgusu hazırlanamadı: {}", e))
     })?;
 
-    let rows = stmt.query_map([limit], |row| {
+    let rows = stmt.query_map(params![symbol, interval, limit as i64], |row| {
+        // timestamp INTEGER (ms) ya da TEXT (RFC3339) olabilir → her ikisini de destekle.
+        let ts: DateTime<Utc> = match row.get_ref(0)? {
+            ValueRef::Integer(ms) => Utc.timestamp_millis_opt(ms).single()
+                .unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().unwrap()),
+            ValueRef::Text(b) => {
+                let s = std::str::from_utf8(b).unwrap_or("");
+                DateTime::parse_from_rfc3339(s)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc.timestamp_opt(0, 0).single().unwrap())
+            }
+            _ => Utc.timestamp_opt(0, 0).single().unwrap(),
+        };
         Ok(crate::core::types::Candle {
-
-            timestamp: row.get(0)?,
-            open: row.get(1)?,
-            high: row.get(2)?,
-            low: row.get(3)?,
-            close: row.get(4)?,
+            timestamp: ts,
+            open:   row.get(1)?,
+            high:   row.get(2)?,
+            low:    row.get(3)?,
+            close:  row.get(4)?,
             volume: row.get(5)?,
             symbol: row.get(6)?,
             interval: row.get(7)?,
-
-            
         })
     }).map_err(|e| crate::MemosTradingError::Database(format!("Mum hasat hatası: {}", e)))?;
 
-    let mut candles = Vec::new();
+    let mut candles = Vec::with_capacity(limit.min(4096));
     for row in rows {
-        if let Ok(candle) = row {
-            candles.push(candle);
+        match row {
+            Ok(candle) => candles.push(candle),
+            Err(e) => {
+                log::warn!("read_candles: bozuk satır atlandı ({}): {}", symbol, e);
+            }
         }
     }
 

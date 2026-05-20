@@ -376,51 +376,60 @@ impl CandleRepository {
         Ok(())
     }
 
-    /// Mum verisini kaydet
+    /// Mum verisini kaydet — timestamp INTEGER (ms), `read_candles` ile aynı şema.
     pub fn insert_candle(&self, candle: &Candle) -> Result<()> {
         let conn = self.connection.lock().unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO candles (symbol, interval, timestamp, open, high, low, close, volume, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        let raw_ms = candle.timestamp.timestamp_millis();
+        let updated = conn.execute(
+            "UPDATE candles SET open=?1, high=?2, low=?3, close=?4, volume=?5 \
+             WHERE symbol=?6 AND interval=?7 AND timestamp=?8",
             params![
-                &candle.symbol,
-                &candle.interval,
-                candle.timestamp.to_rfc3339(),
-                candle.open,
-                candle.high,
-                candle.low,
-                candle.close,
-                candle.volume,
-                Utc::now().to_rfc3339(),
+                candle.open, candle.high, candle.low, candle.close, candle.volume,
+                &candle.symbol, &candle.interval, raw_ms,
             ],
         )?;
-
-        Ok(())
-    }
-
-    /// Toplu mum verisini kaydet
-    pub fn insert_candles(&self, candles: &[Candle]) -> Result<()> {
-        let mut conn = self.connection.lock().unwrap();
-        let tx = conn.transaction()?;
-        
-        for candle in candles {
-            tx.execute(
-                "INSERT OR REPLACE INTO candles (symbol, interval, timestamp, open, high, low, close, volume, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        if updated == 0 {
+            conn.execute(
+                "INSERT INTO candles (symbol, interval, timestamp, open, high, low, close, volume, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
-                    &candle.symbol,
-                    &candle.interval,
-                    candle.timestamp.to_rfc3339(),
-                    candle.open,
-                    candle.high,
-                    candle.low,
-                    candle.close,
-                    candle.volume,
+                    &candle.symbol, &candle.interval, raw_ms,
+                    candle.open, candle.high, candle.low, candle.close, candle.volume,
                     Utc::now().to_rfc3339(),
                 ],
             )?;
         }
-        
+        Ok(())
+    }
+
+    /// Toplu mum verisini kaydet — INSERT OR IGNORE (varsa atla) ile hızlı tx.
+    pub fn insert_candles(&self, candles: &[Candle]) -> Result<()> {
+        let mut conn = self.connection.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        for candle in candles {
+            let raw_ms = candle.timestamp.timestamp_millis();
+            let updated = tx.execute(
+                "UPDATE candles SET open=?1, high=?2, low=?3, close=?4, volume=?5 \
+                 WHERE symbol=?6 AND interval=?7 AND timestamp=?8",
+                params![
+                    candle.open, candle.high, candle.low, candle.close, candle.volume,
+                    &candle.symbol, &candle.interval, raw_ms,
+                ],
+            )?;
+            if updated == 0 {
+                tx.execute(
+                    "INSERT INTO candles (symbol, interval, timestamp, open, high, low, close, volume, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        &candle.symbol, &candle.interval, raw_ms,
+                        candle.open, candle.high, candle.low, candle.close, candle.volume,
+                        Utc::now().to_rfc3339(),
+                    ],
+                )?;
+            }
+        }
+
         tx.commit()?;
         Ok(())
     }
@@ -437,7 +446,7 @@ impl CandleRepository {
             Ok(Candle {
                 symbol: row.get(0)?,
                 interval: row.get(1)?,
-                timestamp: parse_datetime(&row.get::<_, String>(2)?),
+                timestamp: read_timestamp_col(row, 2)?,
                 open: row.get(3)?,
                 high: row.get(4)?,
                 low: row.get(5)?,
@@ -466,7 +475,7 @@ impl CandleRepository {
             Ok(Candle {
                 symbol: row.get(0)?,
                 interval: row.get(1)?,
-                timestamp: parse_datetime(&row.get::<_, String>(2)?),
+                timestamp: read_timestamp_col(row, 2)?,
                 open: row.get(3)?,
                 high: row.get(4)?,
                 low: row.get(5)?,
@@ -504,11 +513,11 @@ impl CandleRepository {
              FROM candles WHERE symbol = ? AND interval = ? AND timestamp BETWEEN ? AND ? ORDER BY timestamp ASC"
         )?;
 
-        let candles = stmt.query_map(params![symbol, interval, start.to_rfc3339(), end.to_rfc3339()], |row| {
+        let candles = stmt.query_map(params![symbol, interval, start.timestamp_millis(), end.timestamp_millis()], |row| {
             Ok(Candle {
                 symbol: row.get(0)?,
                 interval: row.get(1)?,
-                timestamp: parse_datetime(&row.get::<_, String>(2)?),
+                timestamp: read_timestamp_col(row, 2)?,
                 open: row.get(3)?,
                 high: row.get(4)?,
                 low: row.get(5)?,
@@ -531,6 +540,22 @@ fn parse_datetime(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
+}
+
+/// SQLite'taki `timestamp` kolonunu hem INTEGER (ms) hem TEXT (RFC3339) formatından okur.
+/// `save_candle`/`insert_candle` ms yazıyor; legacy satırlar string olabilir.
+fn read_timestamp_col(row: &rusqlite::Row, idx: usize) -> rusqlite::Result<DateTime<Utc>> {
+    use chrono::TimeZone;
+    use rusqlite::types::ValueRef;
+    match row.get_ref(idx)? {
+        ValueRef::Integer(ms) => Ok(Utc.timestamp_millis_opt(ms).single()
+            .unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().unwrap())),
+        ValueRef::Text(b) => {
+            let s = std::str::from_utf8(b).unwrap_or("");
+            Ok(parse_datetime(s))
+        }
+        _ => Ok(Utc.timestamp_opt(0, 0).single().unwrap()),
+    }
 }
 
 #[cfg(test)]
