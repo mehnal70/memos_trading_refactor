@@ -1279,11 +1279,18 @@ impl Engine {
 
             // 4) Edge skoru: momentum + ML confidence uyumu. Yön uyuşmazsa edge düşer.
             let edge = Self::compute_edge_score(&candles, &signal, ml_confidence);
-            const EDGE_THRESHOLD: f64 = 0.55;
+            // ML henüz hazır değilse (cold-start) gevşek eşik; modele güven arttıkça katılaşır.
+            let edge_threshold = Self::dynamic_edge_threshold(ml_confidence);
+            // Aday log eşiği: kabul edilen edge'in %75'inin altındaki sinyaller spam sayılır.
+            let edge_log_floor = edge_threshold * 0.75;
 
-            let has_position = {
+            // Pozisyonun yönü: None = pozisyon yok, Some(true) = LONG, Some(false) = SHORT.
+            // Yön bilgisi kritik; aksi halde aynı yöndeki tekrar sinyalleri pozisyonu kapatır
+            // ve aç/kapa döngüsü oluşur (komisyon erozyonu).
+            let pos_dir: Option<bool> = {
                 let st = match state.lock() { Ok(s) => s, Err(_) => return };
-                st.finance.live_positions.read().map(|p| p.contains_key(symbol)).unwrap_or(false)
+                st.finance.live_positions.read().ok()
+                    .and_then(|p| p.get(symbol).map(|pos| pos.is_long))
             };
 
             let signal_label = match signal {
@@ -1298,16 +1305,16 @@ impl Engine {
                 }
             }
 
-            match (signal, has_position) {
+            match (signal, pos_dir) {
                 // Pozisyon yokken: yalnız yüksek edge'de açılış denenir.
-                (crate::core::types::Signal::Buy, false) | (crate::core::types::Signal::Sell, false) => {
-                    if edge < EDGE_THRESHOLD {
-                        // Spam'i kısmak için sadece eşiğe yakın aday sinyalleri logla (>= 0.40)
-                        if edge >= 0.40 {
+                (crate::core::types::Signal::Buy, None) | (crate::core::types::Signal::Sell, None) => {
+                    if edge < edge_threshold {
+                        // Spam'i kısmak için sadece eşiğe yakın aday sinyalleri logla.
+                        if edge >= edge_log_floor {
                             if let Ok(mut st) = state.lock() {
                                 st.push_log(format!(
                                     "📊 {} {} edge={:.2} eşik={:.2} ⇒ REDDEDİLDİ (zayıf edge, strat={})",
-                                    symbol, signal_label, edge, EDGE_THRESHOLD, strategy_name,
+                                    symbol, signal_label, edge, edge_threshold, strategy_name,
                                 ));
                             }
                         }
@@ -1345,30 +1352,50 @@ impl Engine {
                     }
                     Self::open_paper_position(state, symbol, &signal, &candles).await;
                 }
-                // Pozisyon varken ters sinyal → kapanış (edge filtresi gevşek).
-                (crate::core::types::Signal::Sell, true) | (crate::core::types::Signal::Buy, true) => {
+                // Pozisyon varken TERS yönde sinyal → kapanış (edge filtresi gevşek).
+                // Long + Sell ya da Short + Buy: trend dönmüş demektir.
+                (crate::core::types::Signal::Sell, Some(true))
+                | (crate::core::types::Signal::Buy,  Some(false)) => {
                     if let Ok(mut st) = state.lock() {
                         st.push_log(format!(
-                            "🔄 {} açık pozisyon + {} sinyali (edge={:.2}) ⇒ KAPANIŞ",
+                            "🔄 {} açık pozisyon + ters {} sinyali (edge={:.2}) ⇒ KAPANIŞ",
                             symbol, signal_label, edge,
                         ));
                     }
                     Self::close_paper_position(state, symbol, &candles, ExitReason::StrategySignal).await;
                 }
+                // Aynı yöndeki tekrar sinyaller: pozisyon zaten o yönde, dokunma.
+                // (Aksi halde aç/kapa döngüsü ve komisyon erozyonu doğar.)
+                (crate::core::types::Signal::Buy,  Some(true))
+                | (crate::core::types::Signal::Sell, Some(false)) => {}
                 _ => {}
             }
         }
     }
 
-    /// Edge skoru: son 20 mumun fiyat momentumu (-1..+1) ile ML confidence (0..1) ortalaması.
+    /// Edge skoru: son 20 mumun momentum gücü (ATR'ye göre normalize) ile ML confidence ortalaması.
     /// Sinyal yönü momentum ile uyumlu değilse ceza uygulanır.
+    ///
+    /// Momentum gücü = |ham getiri / ATR%|, 1.0'a clamp'lenir. Yani 20 mum içinde fiyatın ATR'nin
+    /// en az 1 katı yön yapması "tam güç" sayılır. Ham getiriyi kullanmak yerine ATR normalizasyonu
+    /// 1m gibi düşük volatilite timeframe'lerinde edge'in pratik olarak ölçülebilir kalmasını sağlar.
     fn compute_edge_score(candles: &[Candle], signal: &Signal, ml_confidence: f64) -> f64 {
         if candles.len() < 20 { return 0.0; }
         let recent = &candles[candles.len() - 20..];
         let first = recent.first().map(|c| c.close).unwrap_or(0.0);
         let last  = recent.last().map(|c| c.close).unwrap_or(0.0);
-        if first <= 0.0 { return 0.0; }
+        if first <= 0.0 || last <= 0.0 { return 0.0; }
         let mom = ((last - first) / first).clamp(-1.0, 1.0); // göreli getiri
+
+        // Momentum'u ATR%'ye göre normalize et: kaç ATR yön yapıldı?
+        let atr = Self::calc_atr(candles, 14);
+        let atr_pct = if last > 0.0 { (atr / last).max(1e-6) } else { 1e-6 };
+        let mom_strength = if atr_pct > 1e-6 {
+            (mom.abs() / atr_pct).clamp(0.0, 1.0)
+        } else {
+            mom.abs().clamp(0.0, 1.0)
+        };
+
         let dir_match = match signal {
             Signal::Buy  if mom > 0.0  => 1.0,
             Signal::Sell if mom < 0.0  => 1.0,
@@ -1379,7 +1406,15 @@ impl Engine {
         // ML henüz hazır değilse (0.0) momentum tek başına baskın olsun.
         let ml_w = if ml < f64::EPSILON { 0.0 } else { 0.5 };
         let mom_w = 1.0 - ml_w;
-        (dir_match * (mom.abs() * mom_w + ml * ml_w)).clamp(0.0, 1.0)
+        (dir_match * (mom_strength * mom_w + ml * ml_w)).clamp(0.0, 1.0)
+    }
+
+    /// Dinamik edge eşiği: ML modeli henüz hazır değilken (confidence ≈ 0) momentum tek başına
+    /// taşıyıcı, bu yüzden daha gevşek eşik. ML hazırlandıkça daha katı bir filtreye geçilir.
+    fn dynamic_edge_threshold(ml_confidence: f64) -> f64 {
+        if ml_confidence < 0.05 { 0.20 }
+        else if ml_confidence < 0.30 { 0.35 }
+        else { 0.55 }
     }
 
     /// 🧬 FAZ F3: OTONOM POZİSYON AÇILIŞ MOTORU (Paper + Live dispatcher)
