@@ -1,33 +1,56 @@
 #!/usr/bin/env bash
-# ─── Memos RTC CLI — Otonom Trading Konsolu ───────────────────────────────────
+# ─── Memos RTC — Otonom Trading Konsolu ───────────────────────────────────────
 # Kullanım:
-#   ./run_rtc.sh               # Kağıt mod (API key gerekmez)
-#   ./run_rtc.sh --release     # Release binary ile çalıştır
-#   ./run_rtc.sh --build-only  # Sadece derle, çalıştırma
+#   ./run_rtc.sh                       # TUI · debug · kağıt mod
+#   ./run_rtc.sh --release             # TUI · release
+#   ./run_rtc.sh --headless            # Headless servis (rtc_headless)
+#   ./run_rtc.sh --headless --release  # Headless · release
+#   ./run_rtc.sh --build-only          # Sadece derle, çalıştırma
 #   BINANCE_API_KEY=xxx BINANCE_API_SECRET=yyy ./run_rtc.sh
 # ──────────────────────────────────────────────────────────────────────────────
 
 set -e
 
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CORE_DIR="$WORKSPACE_ROOT/memos_trading_core"
-BINARY_DEBUG="$WORKSPACE_ROOT/target/debug/rtc_cli"
-BINARY_RELEASE="$WORKSPACE_ROOT/target/release/rtc_cli"
+cd "$WORKSPACE_ROOT"
 
+# Varsayılanlar
+TARGET_BIN="rtc_tui"
 BUILD_MODE="debug"
 BUILD_ONLY=false
 
 # Argüman parse
 for arg in "$@"; do
     case "$arg" in
-        --release)   BUILD_MODE="release" ;;
+        --release)    BUILD_MODE="release" ;;
+        --headless)   TARGET_BIN="rtc_headless" ;;
+        --tui)        TARGET_BIN="rtc_tui" ;;
         --build-only) BUILD_ONLY=true ;;
+        -h|--help)
+            sed -n '2,11p' "$0"
+            exit 0
+            ;;
+        *)
+            echo "⚠️  Bilinmeyen argüman: $arg (--help için -h)"
+            exit 1
+            ;;
     esac
 done
 
+if [ "$BUILD_MODE" = "release" ]; then
+    BINARY="$WORKSPACE_ROOT/target/release/$TARGET_BIN"
+    CARGO_FLAGS=(--release)
+else
+    BINARY="$WORKSPACE_ROOT/target/debug/$TARGET_BIN"
+    CARGO_FLAGS=()
+fi
+
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║         Memos RTC CLI — Otonom Trading Konsolu               ║"
+echo "║         Memos RTC — Otonom Trading Konsolu                   ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
+echo "  Hedef     : $TARGET_BIN"
+echo "  Profil    : $BUILD_MODE"
+echo "  Workspace : $WORKSPACE_ROOT"
 echo ""
 
 # Ortam değişkenleri bilgisi
@@ -38,16 +61,9 @@ else
 fi
 echo ""
 
-# Derleme
-if [ "$BUILD_MODE" = "release" ]; then
-    echo "🔨 Release binary derleniyor..."
-    cargo build --release --bin rtc_cli --manifest-path "$CORE_DIR/Cargo.toml"
-    BINARY="$BINARY_RELEASE"
-else
-    echo "🔨 Debug binary derleniyor..."
-    cargo build --bin rtc_cli --manifest-path "$CORE_DIR/Cargo.toml"
-    BINARY="$BINARY_DEBUG"
-fi
+# Derleme — workspace kökünden -p <paket> ile
+echo "🔨 $TARGET_BIN ($BUILD_MODE) derleniyor..."
+cargo build "${CARGO_FLAGS[@]}" -p "$TARGET_BIN"
 
 echo "✅ Derleme tamamlandı: $BINARY"
 echo ""
@@ -57,6 +73,11 @@ if [ "$BUILD_ONLY" = true ]; then
     exit 0
 fi
 
-echo "🚀 RTC CLI başlatılıyor..."
+if [ ! -x "$BINARY" ]; then
+    echo "❌ Binary bulunamadı: $BINARY"
+    exit 1
+fi
+
+echo "🚀 $TARGET_BIN başlatılıyor..."
 echo "──────────────────────────────────────────────────────────────"
 exec "$BINARY"
