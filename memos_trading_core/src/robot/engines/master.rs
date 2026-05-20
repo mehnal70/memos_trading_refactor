@@ -1515,8 +1515,12 @@ impl Engine {
                 }
             };
 
-            // 4) Edge skoru: momentum + ML confidence uyumu. Yön uyuşmazsa edge düşer.
+            // ─── Faz 2 (FeatureExtract): edge skoru + ATR + (gerek olursa) ML feature.
+            // compute_edge_score momentum'u ATR ile normalize edip ML confidence ile harmanlar;
+            // başka indikatör/feature hesapları (S/R, regime classify) cycle dışında periyodik
+            // task'larda yapılır. Bu nokta tek atımlık feature extraction'ı temsil eder.
             let edge = Self::compute_edge_score(&candles, &signal, ml_confidence);
+            Self::mark_pipeline_stage(state, PipelineStage::FeatureExtract, StepStatus::Done);
             // ML henüz hazır değilse (cold-start) gevşek eşik; modele güven arttıkça katılaşır.
             let edge_threshold = Self::dynamic_edge_threshold(ml_confidence);
             // Aday log eşiği: kabul edilen edge'in %75'inin altındaki sinyaller spam sayılır.
@@ -1656,18 +1660,40 @@ impl Engine {
         else { 0.55 }
     }
 
-    /// Pipeline canon aşamasını "bitti" olarak işaretler.
+    /// Pipeline canon aşamasını "bitti" olarak işaretler ve Failed/Skipped
+    /// durumlarda otomatik bir Anomaly emit eder (TUI Pipeline sekmesindeki
+    /// "🛡️ Aktif Anomaliler" panelinde gözükür).
+    ///
+    /// - `Done` → sadece chain_steps güncellenir.
+    /// - `Failed` → Critical anomaly + chain_steps.
+    /// - `Skipped` → Warning anomaly + chain_steps (örn. RiskGate Deny; bot
+    ///   sinyali bilerek reddetti, kullanıcının görmesi faydalı).
+    /// - diğer (Idle/Running) → sadece chain_steps; anomaly üretilmez.
+    ///
     /// state.lock() + live_pipeline.write() kısa scope'lu; lock contention yok.
-    /// Faz 1 iskeletinde DataIngest/StrategyEval/RiskGate noktalarından çağrılır;
-    /// sonraki commit'lerde Execute/Learn/Optimize için de aynı helper kullanılır.
     fn mark_pipeline_stage(
         state: &Arc<Mutex<AppState>>,
         stage: crate::robot::data_pipeline::canon::PipelineStage,
         status: crate::robot::data_pipeline::StepStatus,
     ) {
+        use crate::robot::data_pipeline::{AnomalyKind, AnomalySeverity, StepStatus};
         if let Ok(st) = state.lock() {
             if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
                 pipe.mark_stage_completed(stage, status);
+                let (severity, kind, msg) = match status {
+                    StepStatus::Failed => (
+                        AnomalySeverity::Critical,
+                        AnomalyKind::DataStall,
+                        format!("{} fazı başarısız: cycle bu aşamada koptu", stage.label()),
+                    ),
+                    StepStatus::Skipped => (
+                        AnomalySeverity::Warning,
+                        AnomalyKind::RiskBreach,
+                        format!("{} fazı atlandı: koruma/red akışı tetiklendi", stage.label()),
+                    ),
+                    _ => return, // Done / Idle / Running anomaly üretmez
+                };
+                pipe.push_anomaly(severity, kind, msg);
             }
         }
     }
@@ -2371,14 +2397,22 @@ impl Engine {
                     ));
                 }
             }
-            // Learn mark — pos_id boş olsa bile yapılır mı? Hayır, sadece gerçekten
-            // hub'a yazıldıysa Done; aksi halde Skipped (eski/legacy pozisyon eşleşmedi).
+            // Learn mark — hub.write() gerçekten çalıştıysa Done; aksi halde Skipped
+            // (eski/legacy pos_id eşleşmedi). Helper yerine inline yazıyoruz çünkü
+            // `st` lock zaten elde; relock yapmak gereksiz. Skipped durumunda
+            // helper'la aynı anomaly emit edilir (TUI Anomaliler paneline düşer).
             if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
-                use crate::robot::data_pipeline::{canon::PipelineStage, StepStatus};
-                pipe.mark_stage_completed(
-                    PipelineStage::Learn,
-                    if learn_recorded { StepStatus::Done } else { StepStatus::Skipped },
-                );
+                use crate::robot::data_pipeline::{canon::PipelineStage, StepStatus,
+                    AnomalyKind, AnomalySeverity};
+                let status = if learn_recorded { StepStatus::Done } else { StepStatus::Skipped };
+                pipe.mark_stage_completed(PipelineStage::Learn, status);
+                if matches!(status, StepStatus::Skipped) {
+                    pipe.push_anomaly(
+                        AnomalySeverity::Warning,
+                        AnomalyKind::RiskBreach,
+                        format!("{} fazı atlandı: pos_id eşleşmedi (legacy pozisyon)", PipelineStage::Learn.label()),
+                    );
+                }
             }
 
             // 📝 Periyodik dosya logu: TRADE_CLOSE. Logger Arc'ını clone'la, IO için
