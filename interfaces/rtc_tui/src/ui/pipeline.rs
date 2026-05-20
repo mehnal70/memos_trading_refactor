@@ -36,10 +36,15 @@ pub fn draw(f: &mut ratatui::Frame, area: Rect, snap: &MissionControl) {
             "—".to_string()
         };
         let overdue_color = if s.overdue_secs > 0 { Color::Red } else { Color::DarkGray };
+        let last_run_text = if s.last_run_age_secs == 0 {
+            "henüz".to_string()
+        } else {
+            format!("{}s önce", s.last_run_age_secs)
+        };
         Row::new(vec![
             Cell::from(s.label.clone()).style(Style::default().add_modifier(Modifier::BOLD)),
             Cell::from(s.status.clone()).style(Style::default().fg(status_color)),
-            Cell::from(format!("{}s önce", s.last_run_age_secs)),
+            Cell::from(last_run_text),
             Cell::from(overdue_text).style(Style::default().fg(overdue_color)),
         ])
     }).collect();

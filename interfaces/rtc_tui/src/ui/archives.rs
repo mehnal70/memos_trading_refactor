@@ -5,10 +5,14 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Row, Table, Paragraph};
 use ratatui::style::{Color, Style, Modifier};
 use memos_trading_core::core::model::MissionControl;
 
-/// Olay Günlüğü (Tab 3) - Akıllı Kaydırma Destekli
+/// Olay Günlüğü (Tab 3) - Akıllı Kaydırma Destekli.
+/// bridge.rs `snap.logs`'u zaten en yeni başta verir (`iter().rev().take(100)`).
+/// Burada ek `.rev()` yapmıyoruz — çift ters çevirme eski log'u üste atıp yeniyi
+/// ekranın görünmez alt kısmına itiyordu ("ml trigger'da kaldı" gözleminin sebebi).
+/// Mesaj prefix'i `[HH:MM:SS] ...` zaten timestamp taşıyor, LogEntry.timestamp
+/// (snapshot anı) çift gösterim olduğu için basılmıyor.
 pub fn draw_logs(f: &mut ratatui::Frame, area: Rect, snap: &MissionControl, scroll: usize) {
     let log_items: Vec<ListItem> = snap.logs.iter()
-        .rev() // En yeni en üstte
         .skip(scroll)
         .map(|log| {
             let color = match log.level.as_str() {
@@ -17,7 +21,7 @@ pub fn draw_logs(f: &mut ratatui::Frame, area: Rect, snap: &MissionControl, scro
                 "SIGNAL" => Color::Cyan,
                 _        => Color::Gray,
             };
-            ListItem::new(format!(" {} | {} ", log.timestamp, log.message))
+            ListItem::new(format!(" {} ", log.message))
                 .style(Style::default().fg(color))
         })
         .collect();

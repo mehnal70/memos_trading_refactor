@@ -148,12 +148,18 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
     }).unwrap_or_default();
 
     // 5. AI BEYİN, PİPELİNE VE ANOMALİLER
+    // step.last_run_secs aslında Unix epoch saniyesi (record_step çağrılarına
+    // last_tick = SystemTime::now()...as_secs() geçiriliyor). UI'da "X saniye önce"
+    // yaşı göstermek için şimdiyle farkı alıyoruz; 0 → henüz hiç koşulmadı.
+    let now_epoch_secs: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (steps, anomalies): (Vec<PipelineStep>, Vec<AnomalyModel>) = st.guardian.live_pipeline.read().ok()
         .map(|ph| {
             let s = ph.chain_steps.iter().map(|step| PipelineStep {
                 label:             step.label.clone(),
                 status:            format!("{:?}", step.status),
-                last_run_age_secs: step.last_run_secs,
+                last_run_age_secs: if step.last_run_secs == 0 { 0 }
+                                   else { now_epoch_secs.saturating_sub(step.last_run_secs) },
                 overdue_secs:      step.overdue_secs as i64,
             }).collect();
             let a = ph.anomalies.iter().map(|anom| AnomalyModel {

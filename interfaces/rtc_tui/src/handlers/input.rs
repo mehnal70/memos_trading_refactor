@@ -82,7 +82,11 @@ impl TuiManager {
             })?;
 
             // 3. INPUT İŞLEMLERİ (Event Poll)
-            if event::poll(Duration::from_millis(50))? {
+            // 200ms poll: tuş gecikmesi insanca (göz fark etmez), snapshot+render
+            // yenileme hızı 5 fps'e iner → sermaye/PnL alanlarında mark-to-market
+            // dalgalanması artık göze "rakam altında belirip kayboluyor" flicker
+            // üretmez. Daha agresif (50ms) snapshot+lock çevrim maliyetiyle gelirdi.
+            if event::poll(Duration::from_millis(200))? {
                 if let Event::Key(key) = event::read()? {
                     match key.code {
                         // --- UI Navigasyon (Burada halledilir) ---
