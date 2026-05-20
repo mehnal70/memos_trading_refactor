@@ -12,6 +12,28 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Partial fill anomali tespiti eşikleri (master.rs::detect_partial_fill_anomalies).
+/// Overfill ve cum-tutarsızlık için rounding payı + adverse slipaj limiti.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PartialFillParams {
+    /// last_qty > local_qty * (1 + overfill_tolerance) → bot↔borsa qty ayrışması.
+    pub overfill_tolerance: f64,
+    /// cum_qty > orig_qty * (1 + cum_tolerance) → borsa payload tutarsız.
+    pub cum_tolerance: f64,
+    /// Bot tarafına göre adverse fiyat sapması yüzdesi; aşılırsa anomaly emit.
+    pub max_slippage_pct: f64,
+}
+
+impl Default for PartialFillParams {
+    fn default() -> Self {
+        Self {
+            overfill_tolerance: 0.001,
+            cum_tolerance:      0.001,
+            max_slippage_pct:   1.0,
+        }
+    }
+}
+
 /// Sembol/strateji bazlı edge skor eşikleri. ML modelinin güvenine göre üç katmanlı.
 /// `dynamic_edge_threshold` mantığı buradan akıyor.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -54,19 +76,31 @@ impl EdgeThresholds {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParameterStore {
     pub edge_thresholds: EdgeThresholds,
+    pub partial_fill:    PartialFillParams,
+    /// Scalp/Swing ayrımı eşiği (dakika). Holding < bu eşik → SCALP, üstü → SWING.
+    pub scalp_swing_threshold_min: i64,
+    /// Periyodik S/R updater task'ının yenileme aralığı (saniye).
+    pub sr_update_every_secs: u64,
 }
 
 impl Default for ParameterStore {
     fn default() -> Self {
-        Self { edge_thresholds: EdgeThresholds::default() }
+        Self {
+            edge_thresholds: EdgeThresholds::default(),
+            partial_fill:    PartialFillParams::default(),
+            scalp_swing_threshold_min: 60,
+            sr_update_every_secs:      30,
+        }
     }
 }
 
 impl ParameterStore {
     /// Boot anında çağrılır: önce Default, sonra ENV override'ları.
     /// Tanınan env değişkenleri:
-    ///   EDGE_THRESHOLD_COLD, EDGE_THRESHOLD_WARM, EDGE_THRESHOLD_HOT
-    ///   EDGE_COLD_UNTIL, EDGE_WARM_UNTIL
+    ///   EDGE_THRESHOLD_{COLD,WARM,HOT}, EDGE_{COLD,WARM}_UNTIL
+    ///   PARTIAL_FILL_OVERFILL_TOLERANCE, PARTIAL_FILL_CUM_TOLERANCE,
+    ///   PARTIAL_FILL_MAX_SLIPPAGE_PCT
+    ///   SCALP_SWING_THRESHOLD_MIN, SR_UPDATE_EVERY_SECS
     pub fn from_env() -> Self {
         let mut store = Self::default();
         if let Some(v) = parse_env_f64("EDGE_THRESHOLD_COLD") {
@@ -83,6 +117,23 @@ impl ParameterStore {
         }
         if let Some(v) = parse_env_f64("EDGE_WARM_UNTIL") {
             store.edge_thresholds.warm_until = v;
+        }
+        if let Some(v) = parse_env_f64("PARTIAL_FILL_OVERFILL_TOLERANCE") {
+            store.partial_fill.overfill_tolerance = v;
+        }
+        if let Some(v) = parse_env_f64("PARTIAL_FILL_CUM_TOLERANCE") {
+            store.partial_fill.cum_tolerance = v;
+        }
+        if let Some(v) = parse_env_f64("PARTIAL_FILL_MAX_SLIPPAGE_PCT") {
+            store.partial_fill.max_slippage_pct = v;
+        }
+        if let Some(v) = std::env::var("SCALP_SWING_THRESHOLD_MIN").ok()
+            .and_then(|v| v.parse::<i64>().ok()) {
+            store.scalp_swing_threshold_min = v;
+        }
+        if let Some(v) = std::env::var("SR_UPDATE_EVERY_SECS").ok()
+            .and_then(|v| v.parse::<u64>().ok()) {
+            store.sr_update_every_secs = v;
         }
         store
     }
@@ -149,5 +200,36 @@ mod tests {
         let s = ParameterStore::from_env();
         std::env::remove_var("EDGE_THRESHOLD_COLD");
         assert_eq!(s.edge_thresholds.cold, 0.20);
+    }
+
+    #[test]
+    fn default_partial_fill_matches_legacy_constants() {
+        let s = ParameterStore::default();
+        assert_eq!(s.partial_fill.overfill_tolerance, 0.001);
+        assert_eq!(s.partial_fill.cum_tolerance,      0.001);
+        assert_eq!(s.partial_fill.max_slippage_pct,   1.0);
+    }
+
+    #[test]
+    fn default_scalp_swing_and_sr_update_match_legacy() {
+        let s = ParameterStore::default();
+        assert_eq!(s.scalp_swing_threshold_min, 60);
+        assert_eq!(s.sr_update_every_secs,      30);
+    }
+
+    #[test]
+    fn from_env_overrides_partial_fill_and_scalp_and_sr() {
+        std::env::set_var("PARTIAL_FILL_MAX_SLIPPAGE_PCT", "2.5");
+        std::env::set_var("SCALP_SWING_THRESHOLD_MIN",     "15");
+        std::env::set_var("SR_UPDATE_EVERY_SECS",          "10");
+        let s = ParameterStore::from_env();
+        std::env::remove_var("PARTIAL_FILL_MAX_SLIPPAGE_PCT");
+        std::env::remove_var("SCALP_SWING_THRESHOLD_MIN");
+        std::env::remove_var("SR_UPDATE_EVERY_SECS");
+        assert!((s.partial_fill.max_slippage_pct - 2.5).abs() < 1e-9);
+        assert_eq!(s.scalp_swing_threshold_min, 15);
+        assert_eq!(s.sr_update_every_secs,      10);
+        // Diğer alanlar default'ta kalmalı
+        assert_eq!(s.partial_fill.overfill_tolerance, 0.001);
     }
 }

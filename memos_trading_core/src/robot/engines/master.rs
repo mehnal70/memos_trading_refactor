@@ -724,8 +724,12 @@ impl Engine {
                 }
                 return;
             }
-            let interval_secs: u64 = std::env::var("SR_UPDATE_EVERY_SECS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+            // Faz 2: interval ParameterStore'dan okunur. SR_UPDATE_EVERY_SECS env'i
+            // store.from_env'de boot anında zaten alındı; runtime'da brain.parameters
+            // güncellenirse bu task da sonraki turda yeni aralığı görür.
+            let interval_secs: u64 = state.lock().ok()
+                .and_then(|st| st.brain.parameters.read().ok().map(|p| p.sr_update_every_secs))
+                .unwrap_or(30);
             let detector = crate::robot::sr_detector::SrDetector::new(
                 crate::robot::sr_detector::SrDetectorConfig::default()
             );
@@ -1282,14 +1286,17 @@ impl Engine {
         is_long: bool,
     ) {
         use crate::robot::infra::telegram_notifier::Severity;
-        const OVERFILL_TOLERANCE: f64 = 0.001; // %0.1 — rounding payı
-        const CUM_TOLERANCE: f64 = 0.001;
+        // Faz 2: sabit eşikler yerine ParameterStore'dan oku (HyperOpt/manuel update
+        // runtime'da değişiklik yapabilsin). Lock alınamazsa legacy default fallback.
+        let pf = state.lock().ok()
+            .and_then(|st| st.brain.parameters.read().ok().map(|p| p.partial_fill))
+            .unwrap_or_default();
 
         // 1) OVERFILL: borsa pozisyondan fazla doldurmuş (close partial için anlamlı).
         //    Entry partial'de cum henüz local'in üstüne çıkamaz tanım gereği, ama yine
         //    de defensive olarak kontrol ediyoruz.
         if local_qty_before > 0.0
-            && last_qty > local_qty_before * (1.0 + OVERFILL_TOLERANCE)
+            && last_qty > local_qty_before * (1.0 + pf.overfill_tolerance)
         {
             let key = format!("PARTIAL-ANOMALY-OVERFILL-{}", symbol);
             let msg = format!(
@@ -1303,7 +1310,7 @@ impl Engine {
         }
 
         // 2) CUM tutarsız: borsa cum'u emrin orig_qty'sinden büyük raporladı.
-        if cum_qty > orig_qty * (1.0 + CUM_TOLERANCE) {
+        if cum_qty > orig_qty * (1.0 + pf.cum_tolerance) {
             let key = format!("PARTIAL-ANOMALY-CUM-{}", symbol);
             let msg = format!(
                 "[PARTIAL-ANOMALY-CUM] {} cum={:.6} > orig={:.6} (%{:.1}) — borsa payload tutarsız",
@@ -1323,8 +1330,7 @@ impl Engine {
                     "SELL" => (expected - last_price) / expected * 100.0,
                     _ => 0.0,
                 };
-                let threshold_pct: f64 = std::env::var("PARTIAL_FILL_MAX_SLIPPAGE_PCT")
-                    .ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                let threshold_pct = pf.max_slippage_pct;
                 if adverse_pct > threshold_pct {
                     let kind = if is_closing { "CLOSE" } else { "ENTRY" };
                     let key = format!("PARTIAL-ANOMALY-SLIPPAGE-{}-{}", kind, symbol);
