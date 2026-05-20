@@ -61,6 +61,11 @@ impl Engine {
         if let Ok(mut st) = state.lock() {
             st.fleet.phase = "Booting".into();
             st.push_log("🚀 Master Engine ateşlendi. Otonom devriye başladı.".into());
+            // Pipeline timeline'ında 7 kanonik fazı baştan Idle olarak göster —
+            // ilk cycle henüz çalışmadan bile TUI'de doğru sıralı görünür.
+            if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
+                pipe.init_canon_stages();
+            }
         }
 
         // 1. INFRASTRUCTURE FLEET (WS, Diagnostic, Pipeline)
@@ -1402,14 +1407,23 @@ impl Engine {
         ml_confidence: f64,
         snap: &MissionControl,
     ) {
+        use crate::robot::data_pipeline::canon::PipelineStage;
+        use crate::robot::data_pipeline::StepStatus;
         let risk_manager = crate::robot::risk::RiskManager::new();
 
         // Tek sembol için iş bloğu — orijinal `for symbol in candidates` gövdesinin içeriği.
         // Aşağıda `continue` yerine `return` kullanılır (kısa devre tek sembolde).
         {
+            // ─── Faz 1 (DataIngest): SQLite'tan son 200 candle ────────────
             let candles = match crate::persistence::reader::read_candles(db_path, symbol, interval, 200) {
-                Ok(c) if !c.is_empty() => c,
-                _ => return,
+                Ok(c) if !c.is_empty() => {
+                    Self::mark_pipeline_stage(state, PipelineStage::DataIngest, StepStatus::Done);
+                    c
+                }
+                _ => {
+                    Self::mark_pipeline_stage(state, PipelineStage::DataIngest, StepStatus::Failed);
+                    return;
+                }
             };
 
             // === 1.5) AÇIK POZİSYON İSE: önce SL/TP/Trailing/Breakeven denetle ===
@@ -1454,9 +1468,14 @@ impl Engine {
             let strategy = crate::robot::logic::optimizer::make_strategy_pub(&strategy_name);
             let strat_params = crate::core::types::StrategyParams::default();
 
+            // ─── Faz 3 (StrategyEval): sinyal üretimi ─────────────────────
             let signal = match strategy.generate_signal(&candles, &strat_params, None, None) {
-                Ok(s) => s,
+                Ok(s) => {
+                    Self::mark_pipeline_stage(state, PipelineStage::StrategyEval, StepStatus::Done);
+                    s
+                }
                 Err(e) => {
+                    Self::mark_pipeline_stage(state, PipelineStage::StrategyEval, StepStatus::Failed);
                     if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
                         let ev = crate::robot::infra::logger::TradeEvent::error(
                             &format!("{} sinyal üretim hatası: {:?}", symbol, e),
@@ -1510,12 +1529,12 @@ impl Engine {
                         }
                         return;
                     }
-                    // Risk otorizasyonu: RiskGate + Kelly + VaR. Notional yaklaşımı:
-                    // mevcut equity'nin %10'u (tek emir notional tavanı RiskGatePolicy ile
-                    // ayrıca clamp'lenir). Daha hassas notional açılış formülünden gelmeli.
+                    // ─── Faz 4 (RiskGate): Guardrails + Kelly + VaR + Gate ───
+                    // Notional yaklaşımı: equity'nin %10'u (RiskGatePolicy ayrıca clamp eder).
                     let req_notional = snap.finance.total_equity * 0.10;
                     let decision = risk_manager.authorize(&signal, snap, edge, req_notional);
                     if let crate::robot::risk::risk_gate::RiskDecision::Deny { reasons, enter_safe_mode, halt } = decision {
+                        Self::mark_pipeline_stage(state, PipelineStage::RiskGate, StepStatus::Skipped);
                         let mode = if halt { "HALT" }
                             else if enter_safe_mode { "SAFE-MODE" }
                             else { "DENY" };
@@ -1534,6 +1553,7 @@ impl Engine {
                         }
                         return;
                     }
+                    Self::mark_pipeline_stage(state, PipelineStage::RiskGate, StepStatus::Done);
                     if let Ok(mut st) = state.lock() {
                         st.push_log(format!(
                             "📊 {} {} edge={:.2} ✓ + risk ✓ ⇒ POZİSYON AÇILIYOR (strat={})",
@@ -1605,6 +1625,22 @@ impl Engine {
         if ml_confidence < 0.05 { 0.20 }
         else if ml_confidence < 0.30 { 0.35 }
         else { 0.55 }
+    }
+
+    /// Pipeline canon aşamasını "bitti" olarak işaretler.
+    /// state.lock() + live_pipeline.write() kısa scope'lu; lock contention yok.
+    /// Faz 1 iskeletinde DataIngest/StrategyEval/RiskGate noktalarından çağrılır;
+    /// sonraki commit'lerde Execute/Learn/Optimize için de aynı helper kullanılır.
+    fn mark_pipeline_stage(
+        state: &Arc<Mutex<AppState>>,
+        stage: crate::robot::data_pipeline::canon::PipelineStage,
+        status: crate::robot::data_pipeline::StepStatus,
+    ) {
+        if let Ok(st) = state.lock() {
+            if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
+                pipe.mark_stage_completed(stage, status);
+            }
+        }
     }
 
     /// 🧬 FAZ F3: OTONOM POZİSYON AÇILIŞ MOTORU (Paper + Live dispatcher)

@@ -67,4 +67,26 @@ impl PipelineStatus {
         // Kuyruğu sınırla — eski anomalileri at
         if self.anomalies.len() > 50 { self.anomalies.remove(0); }
     }
+
+    /// Kanonik fazların her birini başlangıç anında Idle olarak kayıt eder; UI
+    /// pipeline timeline'ı bot açılır açılmaz tüm 7 fazı doğru sırada gösterir
+    /// (henüz koşulmamış olarak). Çağrılmazsa fazlar ilk işaretlemede sıralı
+    /// gözükmeyebilir (HashMap-veri-yapısı değil ama record_step push order
+    /// kanonik sıra yerine ilk-tetiklenen-önce sırası verir).
+    pub fn init_canon_stages(&mut self) {
+        for stage in super::canon::PipelineStage::ALL {
+            self.record_step(stage.label(), StepStatus::Idle, 0, 0);
+        }
+    }
+
+    /// Bir kanonik aşamanın bittiğini işaretler. `last_run_secs` çağrı anına
+    /// (UNIX epoch saniye) eşitlenir; bridge.rs "X saniye önce" yaşını oradan
+    /// hesaplar. `status` Done/Failed/Skipped olabilir.
+    pub fn mark_stage_completed(&mut self, stage: super::canon::PipelineStage, status: StepStatus) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.record_step(stage.label(), status, now, 0);
+    }
 }
