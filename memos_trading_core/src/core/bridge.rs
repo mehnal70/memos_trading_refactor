@@ -7,7 +7,6 @@ use crate::core::model::{
     ChartSnapshot, TradeDistribution, LogEntry, ClosedTradeModel,
     MarketAnalysisModel, SrZoneModel,
 };
-use chrono::Local;
 
 /// Srivastava ATP - AppState'den saf bir Snapshot (Anlık Görüntü) çıkarır.
 /// Bu fonksiyon robotun 'Adli Tercümanı'dır.
@@ -34,16 +33,17 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
         .unwrap_or_default();
 
     // 3. ADLİ LOG VE ARŞİV HASADI (Son 100 log ve 50 işlem)
+    // Timestamp log satırının kendisinde mühürlü (push_log "[HH:MM:SS] msg"
+    // formatında yazıyor); burada PARSE edilir. Daha önce Local::now()
+    // çağrısıyla her snapshot'ta yeniden üretiliyordu → log paneli her render'da
+    // "değişti" görünüyor, TUI'de görsel flicker yaratıyordu.
     let logs: Vec<LogEntry> = st.guardian.log.iter().rev().take(100).map(|line| {
         let level = if line.contains("ERROR") { "ERROR" }
                     else if line.contains("WARN") { "WARN" }
                     else if line.contains("SIGNAL") { "SIGNAL" }
                     else { "INFO" };
-        LogEntry {
-            timestamp: Local::now().format("%H:%M:%S").to_string(),
-            message: line.clone(),
-            level: level.to_string(),
-        }
+        let (timestamp, message) = parse_log_prefix(line);
+        LogEntry { timestamp, message, level: level.to_string() }
     }).collect();
 
     let mut trade_history: Vec<ClosedTradeModel> = vec![];
@@ -263,6 +263,20 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
     }
 }
 
+/// Log satırının başındaki `[HH:MM:SS]` prefix'ini ayırır. Prefix yoksa
+/// timestamp boş döner, message tüm satırı kapsar. Saf, side-effect yok.
+fn parse_log_prefix(line: &str) -> (String, String) {
+    // Beklenen format: "[HH:MM:SS] message" (push_log böyle yazıyor).
+    let bytes = line.as_bytes();
+    if bytes.len() >= 11 && bytes[0] == b'[' && bytes[9] == b']' && bytes[10] == b' ' {
+        let ts = &line[1..9];
+        if ts.bytes().all(|b| b.is_ascii_digit() || b == b':') {
+            return (ts.to_string(), line[11..].to_string());
+        }
+    }
+    (String::new(), line.to_string())
+}
+
 /// Closed trades listesini holding period'a göre Scalp/Swing'e ayırıp her grup için
 /// (win_rate, profit_factor, avg_win, avg_loss, current_streak) hesaplar.
 ///
@@ -339,6 +353,35 @@ fn stats_for_group(label: &str, group: &[&ClosedTradeModel]) -> TradeTypeStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_log_prefix_extracts_timestamp_and_strips_brackets() {
+        let (ts, msg) = parse_log_prefix("[12:34:56] 🚀 Devriye başladı");
+        assert_eq!(ts, "12:34:56");
+        assert_eq!(msg, "🚀 Devriye başladı");
+    }
+
+    #[test]
+    fn parse_log_prefix_without_bracket_returns_empty_timestamp() {
+        let (ts, msg) = parse_log_prefix("plain line without prefix");
+        assert_eq!(ts, "");
+        assert_eq!(msg, "plain line without prefix");
+    }
+
+    #[test]
+    fn parse_log_prefix_rejects_non_digit_inside_brackets() {
+        // "[ABCDEFGH]" yapısal eşleşse de digit/`:` değil → fallback yol.
+        let (ts, msg) = parse_log_prefix("[ABCDEFGH] hello");
+        assert_eq!(ts, "");
+        assert_eq!(msg, "[ABCDEFGH] hello");
+    }
+
+    #[test]
+    fn parse_log_prefix_handles_empty_line() {
+        let (ts, msg) = parse_log_prefix("");
+        assert_eq!(ts, "");
+        assert_eq!(msg, "");
+    }
 
     fn t(opened: &str, closed: &str, pnl: f64) -> ClosedTradeModel {
         ClosedTradeModel {
