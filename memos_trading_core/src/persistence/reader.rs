@@ -129,21 +129,54 @@ pub fn list_available_tables(db_path: &str) -> Result<Vec<String>, crate::MemosT
 }
 
 /// 📊 SEMBOL ARŞİVİ: `candles` tablosunda mum verisi indirilmiş tüm benzersiz
-/// sembolleri döndürür. Otonom tarayıcı (Screener) ve pipeline süreçleri için
-/// hedef havuzu oluşturur.
+/// sembolleri döndürür (market/interval filtresi yok). Otonom tarayıcı
+/// (Screener) ve pipeline süreçleri için ham havuz.
 ///
 /// Önceki davranış (paper_trading_results) yumurta-tavuk problemine sokuyordu:
 /// işlem hiç yapılmadıkça tablo boş → screener havuz bulamıyor → yeni işlem
 /// olmuyor. `candles` tablosu indirilmiş ham veri havuzu olduğu için doğru
 /// kaynak. Sıralama deterministik (alfabetik).
+///
+/// Market/interval'a göre segmentli istek için `list_symbols_for_market`.
 pub fn list_symbols(db_path: &str) -> Result<Vec<String>, crate::MemosTradingError> {
+    list_symbols_for_market(db_path, None, None)
+}
+
+/// 📊 SEGMENTLİ SEMBOL ARŞİVİ: `candles` tablosunda **belirli market ve/veya
+/// interval'a** uyan benzersiz sembolleri döndürür. Screener gibi çağrıcılar
+/// crypto + BIST karışık havuzu (`candles` ana tablosu) yerine kendi
+/// pazarlarına uygun alt-küme isteyebilir.
+///
+/// - `market = Some("futures")` ve `interval = Some("1m")` → futures-1m
+///   sembolleri (config.market + config.interval ile uyumlu)
+/// - `market = None, interval = None` → list_symbols ile eşdeğer (tüm havuz)
+/// - Parametreler `?` placeholder ile bind, SQL injection güvenli.
+pub fn list_symbols_for_market(
+    db_path: &str,
+    market: Option<&str>,
+    interval: Option<&str>,
+) -> Result<Vec<String>, crate::MemosTradingError> {
     let conn = Connection::open(db_path)
         .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
 
-    let mut stmt = conn.prepare("SELECT DISTINCT symbol FROM candles ORDER BY symbol")
+    let mut where_clauses: Vec<&str> = Vec::new();
+    let mut params: Vec<&str> = Vec::new();
+    if let Some(m) = market   { where_clauses.push("market = ?");   params.push(m); }
+    if let Some(i) = interval { where_clauses.push("interval = ?"); params.push(i); }
+
+    let sql = if where_clauses.is_empty() {
+        "SELECT DISTINCT symbol FROM candles ORDER BY symbol".to_string()
+    } else {
+        format!(
+            "SELECT DISTINCT symbol FROM candles WHERE {} ORDER BY symbol",
+            where_clauses.join(" AND "),
+        )
+    };
+
+    let mut stmt = conn.prepare(&sql)
         .map_err(|e| crate::MemosTradingError::Database(format!("Sorgu hazırlama hatası: {}", e)))?;
 
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| row.get::<_, String>(0))
         .map_err(|e| crate::MemosTradingError::Database(format!("Sembol listesi okuma hatası: {}", e)))?;
 
     let mut symbols = Vec::new();

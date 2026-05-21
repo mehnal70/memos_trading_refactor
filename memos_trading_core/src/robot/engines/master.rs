@@ -2961,10 +2961,14 @@ impl Engine {
             .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
             .unwrap_or_default();
 
-        // 3) Aday havuzu — SQLite + env extras (dedupe). blocked_symbols filtresi
-        //    havuz oluşumunda uygulanır → engellenmiş semboller skorlama yapmadan elenir.
-        let mut pool: Vec<String> = crate::persistence::reader::list_symbols(&db_path)
-            .unwrap_or_default();
+        // 3) Aday havuzu — config.market + config.interval'a uyan SQLite sembolleri
+        //    + env extras (dedupe). Market segmentasyonu sayesinde örn. futures
+        //    profilinde BIST sembolleri (AKBNK, AGHOL...) havuza girmez; crypto
+        //    profilinde de aksi geçerli. blocked_symbols filtresi havuz oluşumunda
+        //    uygulanır → engellenmiş semboller skorlama yapmadan elenir.
+        let mut pool: Vec<String> = crate::persistence::reader::list_symbols_for_market(
+            &db_path, Some(&market), Some(&interval),
+        ).unwrap_or_default();
         for e in extras {
             if !pool.contains(&e) { pool.push(e); }
         }
@@ -2981,15 +2985,18 @@ impl Engine {
         }
         if pool.is_empty() {
             if let Ok(mut st) = state.lock() {
-                st.push_log("🔭 Screener: havuz boş (DB'de sembol yok ve SCREENER_EXTRA_SYMBOLS verilmedi)".into());
+                st.push_log(format!(
+                    "🔭 Screener: havuz boş (market={} interval={} için DB'de sembol yok ve SCREENER_EXTRA_SYMBOLS verilmedi)",
+                    market, interval,
+                ));
             }
             return Ok(());
         }
 
         if let Ok(mut st) = state.lock() {
             st.push_log(format!(
-                "🔭 Screener: havuz={} aday, top_n={} max_workers={} strateji={}",
-                pool.len(), top_n, max_workers, active_strategy,
+                "🔭 Screener: havuz={} aday (market={} interval={}), top_n={} max_workers={} strateji={}",
+                pool.len(), market, interval, top_n, max_workers, active_strategy,
             ));
         }
 
