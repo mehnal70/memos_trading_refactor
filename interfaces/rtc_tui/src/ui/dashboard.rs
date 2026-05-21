@@ -45,7 +45,7 @@ pub fn draw(f: &mut ratatui::Frame, area: Rect, snap: &MissionControl) {
             Constraint::Percentage(20), 
         ])
         .header(
-            Row::new(vec!["Sembol", "Tip", "Yön", "Giriş", "Fiyat", "PnL", "ROE%"])
+            Row::new(vec!["Sembol", "Strateji", "Yön", "Giriş", "Fiyat", "PnL", "ROE%"])
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         )
         .block(

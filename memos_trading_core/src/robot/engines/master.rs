@@ -252,6 +252,14 @@ impl Engine {
                                 if !syms.contains(&w.symbol) { syms.push(w.symbol); }
                             }
                         }
+                        // Yetim pozisyonları da kapsa: orchestrator worker'ı kalmamış ama
+                        // hâlâ açık pozisyon olan semboller — yoksa current_price hep entry'de
+                        // takılı kalır, PnL=0 görünür, SL/TP denetimi yapılamaz.
+                        if let Ok(positions) = st.finance.live_positions.read() {
+                            for sym in positions.keys() {
+                                if !syms.contains(sym) { syms.push(sym.clone()); }
+                            }
+                        }
                         (syms, st.config.interval.clone(), false)
                     }
                 };
@@ -1421,6 +1429,13 @@ impl Engine {
                     candidates.push(worker.symbol.clone());
                 }
             }
+            // Yetim pozisyonları da işle: orchestrator worker'ı yok ama açık pozisyon
+            // var → SL/TP/Trailing denetimi en azından buradan akar, current_price güncel kalır.
+            if let Ok(positions) = st.finance.live_positions.read() {
+                for sym in positions.keys() {
+                    if !candidates.contains(sym) { candidates.push(sym.clone()); }
+                }
+            }
             let live_strategy = st.brain.live_strategy.read()
                 .map(|s| s.clone()).unwrap_or_else(|_| "MA_CROSSOVER".to_string());
             (candidates, st.config.db_path.clone(), st.config.interval.clone(),
@@ -1893,7 +1908,10 @@ impl Engine {
                 symbol: symbol.to_string(),
                 entry_price: entry, current_price: entry,
                 qty: qty_val, leverage: 1.0,
-                trade_type: if is_long { "LONG".into() } else { "SHORT".into() },
+                // trade_type artık stratejik etiket (önceki "LONG"/"SHORT" zaten
+                // is_long ile aynı bilgiyi tekrar ediyordu); UI "Strateji" sütununda
+                // hangi karar mekanizmasının açtığını göstersin.
+                trade_type: strategy_name.clone(),
                 is_long,
                 opened_at: chrono::Utc::now().to_rfc3339(),
                 stop_loss, take_profit, trailing_stop,
