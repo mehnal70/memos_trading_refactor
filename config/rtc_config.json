@@ -7,9 +7,7 @@
   "backtest_candle_limit": 1000,
   "backtest_enabled": true,
   "backtest_every_mins": 60,
-  "blocked_symbols": [
-    "ETHUSDT"
-  ],
+  "blocked_symbols": [],
   "capital": 10000.0,
   "db_path": "data/trader.db",
   "download_candle_limit": 1500,

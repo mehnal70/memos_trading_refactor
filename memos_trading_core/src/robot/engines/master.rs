@@ -1830,6 +1830,16 @@ impl Engine {
         use crate::robot::risk::kelly::KellyCriterion;
         let last_candle = match candles.last() { Some(c) => c, None => return };
 
+        // blocked_symbols savunması: config'te listelenen semboller için yeni pozisyon
+        // açılışı kısa-devre reddedilir. Mevcut açık pozisyonlar bu engelden etkilenmez
+        // (execute_trade_cycle yetim pozisyon kuralı onları yönetmeye devam eder).
+        if Self::is_symbol_blocked(state, symbol) {
+            if let Ok(mut st) = state.lock() {
+                st.push_log(format!("🚫 {} açılış reddedildi: blocked_symbols listesinde", symbol));
+            }
+            return;
+        }
+
         let is_long = matches!(signal, Signal::Buy);
         let entry = last_candle.close;
         let atr = Self::calc_atr(candles, 14);
@@ -2245,6 +2255,15 @@ impl Engine {
                 "🧬 Hub evrim: popülasyon evrimleştirildi (cycle={})", controller_cycle,
             ));
         }
+    }
+
+    /// Sembolün config.blocked_symbols listesinde olup olmadığını döner.
+    /// Case-insensitive karşılaştırma; lock alınamazsa false (savunmacı varsayılan
+    /// — sistemi blocked-shaped failure'a sokmamak için kapı açık bırakılır).
+    pub fn is_symbol_blocked(state: &Arc<Mutex<AppState>>, symbol: &str) -> bool {
+        state.lock().ok().map(|st| {
+            st.config.blocked_symbols.iter().any(|b| b.eq_ignore_ascii_case(symbol))
+        }).unwrap_or(false)
     }
 
     /// 🌐 Mum dizisinden evolution::MarketRegime çıkar (IntelligenceHub'a yöne duyarlı sinyal).
@@ -2826,8 +2845,8 @@ impl Engine {
 
         log::info!("🔭 E2: Screener çalışıyor...");
 
-        // 1) State'ten yapı yapısı + kapasite + pinned + strateji.
-        let (db_path, market, interval, pinned, active_strategy, capital, max_workers, current_workers) = {
+        // 1) State'ten yapı yapısı + kapasite + pinned + strateji + blocked.
+        let (db_path, market, interval, pinned, blocked, active_strategy, capital, max_workers, current_workers) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             let strat = st.brain.live_strategy.read()
                 .map(|s| s.clone()).unwrap_or_else(|_| "MA_CROSSOVER".to_string());
@@ -2843,6 +2862,7 @@ impl Engine {
                 st.config.market.clone(),
                 st.config.interval.clone(),
                 st.config.pinned_symbols.clone(),
+                st.config.blocked_symbols.clone(),
                 strat,
                 st.finance.equity.max(1.0),
                 max_w,
@@ -2861,11 +2881,23 @@ impl Engine {
             .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
             .unwrap_or_default();
 
-        // 3) Aday havuzu — SQLite + env extras (dedupe).
+        // 3) Aday havuzu — SQLite + env extras (dedupe). blocked_symbols filtresi
+        //    havuz oluşumunda uygulanır → engellenmiş semboller skorlama yapmadan elenir.
         let mut pool: Vec<String> = crate::persistence::reader::list_symbols(&db_path)
             .unwrap_or_default();
         for e in extras {
             if !pool.contains(&e) { pool.push(e); }
+        }
+        let blocked_n_before = pool.len();
+        pool.retain(|s| !blocked.iter().any(|b| b.eq_ignore_ascii_case(s)));
+        let blocked_filtered = blocked_n_before.saturating_sub(pool.len());
+        if blocked_filtered > 0 {
+            if let Ok(mut st) = state.lock() {
+                st.push_log(format!(
+                    "🚫 Screener: {} engellenmiş sembol havuzdan çıkarıldı (blocked_symbols)",
+                    blocked_filtered,
+                ));
+            }
         }
         if pool.is_empty() {
             if let Ok(mut st) = state.lock() {
