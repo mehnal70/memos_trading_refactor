@@ -6,7 +6,7 @@
 //   2. Paper/DryRun modunda WS task'ının pasif kaldığını
 // doğrular.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -14,6 +14,14 @@ use memos_trading_core::core::model::{RoboticLoopConfig, TradingMode};
 use memos_trading_core::robot::engines::binance_executor::BinanceFuturesExecutor;
 use memos_trading_core::robot::engines::master::Engine;
 use memos_trading_core::robot::robotic_loop::AppState;
+
+// LIVE_DRY_RUN process-global; aşağıdaki 2 async test set/remove ederek
+// yarışıyordu. Bu testleri dosya-içi mutex ile serileştir. URL testleri
+// (3 sync) env'e dokunmuyor, lock'a ihtiyaç duymazlar.
+static ENV_GUARD: Mutex<()> = Mutex::new(());
+fn lock_env() -> MutexGuard<'static, ()> {
+    ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 #[test]
 fn user_data_stream_url_spot() {
@@ -47,6 +55,7 @@ fn user_data_stream_url_futures_testnet() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn paper_mode_keeps_ws_task_dormant() {
+    let _env = lock_env();
     let tmp_db = format!("/tmp/memos_ws_paper_{}.db", std::process::id());
     let _ = std::fs::remove_file(&tmp_db);
 
@@ -78,6 +87,7 @@ async fn paper_mode_keeps_ws_task_dormant() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn live_dry_run_keeps_ws_task_dormant() {
+    let _env = lock_env();
     let tmp_db = format!("/tmp/memos_ws_dry_{}.db", std::process::id());
     let _ = std::fs::remove_file(&tmp_db);
 

@@ -4,8 +4,18 @@
 // ve default davranışın paper-fallback olduğunu doğrular. Gerçek HTTPS testi yok
 // (API key gerekir).
 
+use std::sync::{Mutex, MutexGuard};
+
 use memos_trading_core::core::model::{RoboticLoopConfig, TradingMode};
 use memos_trading_core::robot::robotic_loop::AppState;
+
+// LIVE_DRY_RUN ve LIVE_MAX_NOTIONAL_USD process-global; cargo paralel koşumda
+// set/remove yarışı flaky panic'lere yol açıyordu. Dosya-içi mutex ile 7 testi
+// serileştir. Poison'a `into_inner()` ile bağışık.
+static ENV_GUARD: Mutex<()> = Mutex::new(());
+fn lock_env() -> MutexGuard<'static, ()> {
+    ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 fn clear_env() {
     std::env::remove_var("LIVE_DRY_RUN");
@@ -14,6 +24,7 @@ fn clear_env() {
 
 #[test]
 fn paper_mode_does_not_create_live_executor() {
+    let _env = lock_env();
     clear_env();
     let config = RoboticLoopConfig {
         trading_mode: TradingMode::Paper,
@@ -28,6 +39,7 @@ fn paper_mode_does_not_create_live_executor() {
 
 #[test]
 fn live_mode_without_api_key_falls_back_to_paper() {
+    let _env = lock_env();
     clear_env();
     std::env::remove_var("BINANCE_API_KEY");
     std::env::remove_var("BINANCE_API_SECRET");
@@ -44,6 +56,7 @@ fn live_mode_without_api_key_falls_back_to_paper() {
 
 #[test]
 fn live_dry_run_env_is_picked_up() {
+    let _env = lock_env();
     clear_env();
     std::env::set_var("LIVE_DRY_RUN", "true");
     let state = AppState::new(RoboticLoopConfig::default());
@@ -53,6 +66,7 @@ fn live_dry_run_env_is_picked_up() {
 
 #[test]
 fn live_max_notional_env_overrides_default() {
+    let _env = lock_env();
     clear_env();
     std::env::set_var("LIVE_MAX_NOTIONAL_USD", "250.5");
     let state = AppState::new(RoboticLoopConfig::default());
@@ -64,6 +78,7 @@ fn live_max_notional_env_overrides_default() {
 
 #[test]
 fn live_max_notional_invalid_falls_back_to_default() {
+    let _env = lock_env();
     clear_env();
     std::env::set_var("LIVE_MAX_NOTIONAL_USD", "abc-invalid");
     let state = AppState::new(RoboticLoopConfig::default());
@@ -74,6 +89,7 @@ fn live_max_notional_invalid_falls_back_to_default() {
 
 #[test]
 fn live_max_notional_negative_clamps_to_zero() {
+    let _env = lock_env();
     clear_env();
     std::env::set_var("LIVE_MAX_NOTIONAL_USD", "-50");
     let state = AppState::new(RoboticLoopConfig::default());
@@ -84,6 +100,7 @@ fn live_max_notional_negative_clamps_to_zero() {
 
 #[test]
 fn live_mode_with_dummy_api_key_creates_executor() {
+    let _env = lock_env();
     clear_env();
     let config = RoboticLoopConfig {
         trading_mode: TradingMode::Live,
