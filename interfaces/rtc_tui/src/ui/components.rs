@@ -21,6 +21,11 @@ pub fn render_finance_header(area: Rect, f: &mut ratatui::Frame, snap: &FinanceS
     let open_color = if snap.open_pnl >= 0.0 { Color::LightGreen } else { Color::LightRed };
     let net_color  = if snap.total_equity >= snap.starting_capital { Color::LightGreen } else { Color::LightRed };
 
+    // SERMAYE realized → cent hassasiyeti tutarlı (sabit değer, flicker yok).
+    // Açık PnL ve NET mark-to-market → cent hassasiyetinde her tick'te oynayıp
+    // görsel flicker yapıyordu; 10 cent (.1) adımı ile mikro dalgalanmalar
+    // kaybolur, dakikalık trend görünür. Pozisyon kapandığında SERMAYE tam
+    // gerçeklenir, ondalık önemli değil.
     let mut spans = vec![
         Span::styled(
             format!(" 💰 SERMAYE: ${:.2}", stable_equity),
@@ -28,12 +33,12 @@ pub fn render_finance_header(area: Rect, f: &mut ratatui::Frame, snap: &FinanceS
         ),
         Span::raw("  ·  "),
         Span::styled(
-            format!("Açık PnL (kümüle): {:+.2}", snap.open_pnl),
+            format!("Açık PnL (kümüle): {:+.1}", snap.open_pnl),
             Style::default().fg(open_color),
         ),
         Span::raw("  ·  "),
         Span::styled(
-            format!("NET: ${:.2}", snap.total_equity),
+            format!("NET: ${:.1}", snap.total_equity),
             Style::default().fg(net_color).add_modifier(Modifier::BOLD),
         ),
         Span::raw("   "),

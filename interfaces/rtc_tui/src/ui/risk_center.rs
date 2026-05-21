@@ -46,9 +46,13 @@ fn draw_equity_sparkline(f: &mut ratatui::Frame, area: Rect, snap: &MissionContr
     let dd_color = if dd > 10.0 { Color::Red }
                    else if dd > 5.0 { Color::Yellow }
                    else { Color::LightGreen };
+    // Equity = realized (starting + realize_pnl). Sparkline ile aynı seri →
+    // açık pozisyonun mark-to-market'i header'ı titretmesin. Anlık NET değer
+    // ana dashboard header'ında zaten görünür.
+    let realized_equity = snap.finance.starting_capital + snap.finance.realize_pnl;
     let header = Line::from(vec![
         Span::styled(" Equity: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("${:.2}", snap.finance.total_equity),
+        Span::styled(format!("${:.2}", realized_equity),
                      Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::raw("   "),
         Span::styled("Peak: ", Style::default().fg(Color::DarkGray)),
