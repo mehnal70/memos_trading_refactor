@@ -545,7 +545,25 @@ impl Engine {
             // last_*_at başlangıçta None ⇒ ilk turda warmup sonrası tetiklenir.
             let mut last_download_at: Option<std::time::Instant> = None;
             let mut last_backtest_at: Option<std::time::Instant> = None;
+            let mut last_screener_at: Option<std::time::Instant> = None;
+            let mut last_ml_at: Option<std::time::Instant> = None;
             let mut warmup_done = false;
+
+            // Screener tetik aralığı env'le ayarlanır; config struct'a alan eklemeden
+            // davranış aktivleştirilir. Default 30 dk; 0 → screener fire kapalı.
+            let screener_enabled = std::env::var("SCHEDULER_SCREENER_ENABLED")
+                .map(|v| v != "false" && v != "0").unwrap_or(true);
+            let screener_period: u64 = std::env::var("SCHEDULER_SCREENER_EVERY_MINS")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(30);
+
+            // ML periyodik fallback: drift-only fire (intelligence_hub) düşük drift'te
+            // hiç eğitim yapmıyordu → kullanıcı "hareketlenme yok" diyor. Periyodik
+            // pulse ile en azından N dakikada bir yeniden eğitim garanti edilir.
+            // Drift cooldown (cefc955) zaten arka arkaya çakışmayı önler.
+            let ml_periodic_enabled = std::env::var("SCHEDULER_ML_ENABLED")
+                .map(|v| v != "false" && v != "0").unwrap_or(true);
+            let ml_period: u64 = std::env::var("SCHEDULER_ML_EVERY_MINS")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(120);
 
             sleep(Duration::from_secs(WARMUP_SECS)).await; // boot warmup
 
@@ -563,7 +581,9 @@ impl Engine {
                 let now = std::time::Instant::now();
 
                 // İlk warmup turu: download_enabled ise hemen bir kerelik tetik bas
-                // ki kullanıcı TUI'ye baktığında veri akışı görünür olsun.
+                // ki kullanıcı TUI'ye baktığında veri akışı görünür olsun. Screener
+                // de aynı turda kısa bir gecikme sonrası (download bittikten sonra
+                // pool'un dolu olması için scheduler'ın bir sonraki turunda) fire eder.
                 if !warmup_done {
                     warmup_done = true;
                     if dl_enabled {
@@ -621,6 +641,54 @@ impl Engine {
                     } else if last_backtest_at.is_none() {
                         // İlk kez: bu turun zamanını kayıt et ki periyot hesabı başlasın
                         last_backtest_at = Some(now);
+                    }
+                }
+
+                // Periyodik screener tetiği — orchestrator havuzuna otonom sembol akışı.
+                // İlk tur: warmup turunu zaten geçtikten sonraki ilk check'te fire eder
+                // (last_screener_at hâlâ None ise due=true). Sonraki turlarda screener_period.
+                if screener_enabled && screener_period > 0 {
+                    let due = match last_screener_at {
+                        Some(t) => now.duration_since(t) >= Duration::from_secs(screener_period * 60),
+                        None    => true,
+                    };
+                    if due {
+                        if let Ok(st) = st_sched.lock() {
+                            if let Some(t) = st.fleet.triggers.get("screener") {
+                                t.store(true, Ordering::Relaxed);
+                            }
+                        }
+                        if let Ok(mut st) = st_sched.lock() {
+                            st.push_log(format!(
+                                "⏰ Scheduler: periyodik screener tetiği (her {} dk)", screener_period,
+                            ));
+                        }
+                        last_screener_at = Some(now);
+                    }
+                }
+
+                // Periyodik ML fallback tetiği — drift-only fire'a ek garanti.
+                // İlk tur: backtest gibi periyodu bekler (boot anında hemen retrain
+                // çalıştırmak için yeterli veri olmayabilir).
+                if ml_periodic_enabled && ml_period > 0 {
+                    let due = match last_ml_at {
+                        Some(t) => now.duration_since(t) >= Duration::from_secs(ml_period * 60),
+                        None    => false,
+                    };
+                    if due {
+                        if let Ok(st) = st_sched.lock() {
+                            if let Some(t) = st.fleet.triggers.get("ml") {
+                                t.store(true, Ordering::Relaxed);
+                            }
+                        }
+                        if let Ok(mut st) = st_sched.lock() {
+                            st.push_log(format!(
+                                "⏰ Scheduler: periyodik ML retrain tetiği (her {} dk)", ml_period,
+                            ));
+                        }
+                        last_ml_at = Some(now);
+                    } else if last_ml_at.is_none() {
+                        last_ml_at = Some(now);
                     }
                 }
 
