@@ -128,14 +128,19 @@ pub fn list_available_tables(db_path: &str) -> Result<Vec<String>, crate::MemosT
     Ok(tables)
 }
 
-/// 📊 SEMBOL ARŞİVİ: Veritabanında kayıtlı olan benzersiz sembol listesini döndürür.
-/// Otonom tarayıcı (Screener) ve pipeline süreçleri için hedef havuzu oluşturur.
+/// 📊 SEMBOL ARŞİVİ: `candles` tablosunda mum verisi indirilmiş tüm benzersiz
+/// sembolleri döndürür. Otonom tarayıcı (Screener) ve pipeline süreçleri için
+/// hedef havuzu oluşturur.
+///
+/// Önceki davranış (paper_trading_results) yumurta-tavuk problemine sokuyordu:
+/// işlem hiç yapılmadıkça tablo boş → screener havuz bulamıyor → yeni işlem
+/// olmuyor. `candles` tablosu indirilmiş ham veri havuzu olduğu için doğru
+/// kaynak. Sıralama deterministik (alfabetik).
 pub fn list_symbols(db_path: &str) -> Result<Vec<String>, crate::MemosTradingError> {
     let conn = Connection::open(db_path)
         .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
 
-    // paper_trading_results tablosundaki benzersiz sembolleri tarar
-    let mut stmt = conn.prepare("SELECT DISTINCT symbol FROM paper_trading_results")
+    let mut stmt = conn.prepare("SELECT DISTINCT symbol FROM candles ORDER BY symbol")
         .map_err(|e| crate::MemosTradingError::Database(format!("Sorgu hazırlama hatası: {}", e)))?;
 
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))
