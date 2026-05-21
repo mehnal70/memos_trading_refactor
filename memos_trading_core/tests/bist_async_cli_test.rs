@@ -5,7 +5,10 @@ use reqwest::Client;
 use serde_json::Value;
 use chrono::Utc;
 
+// Gerçek HTTP çağrısı (api.borsaistanbul.com) gerektirir; offline/CI'da
+// sahte fail verir. Manuel koşum: `cargo test --test bist_async_cli_test -- --ignored`
 #[tokio::test]
+#[ignore = "external network: api.borsaistanbul.com"]
 async fn test_bist_async_cli_style() {
     let symbol = "AKBNK.IS";
     let interval = "1d";
