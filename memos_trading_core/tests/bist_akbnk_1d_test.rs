@@ -2,7 +2,10 @@
 use memos_trading_core::robot::infra::exchange::bist;
 use chrono::Utc;
 
+// Gerçek HTTP çağrısı (bist::fetch_bist_klines → external API); offline/CI'da
+// sahte fail verir. Manuel: `cargo test --test bist_akbnk_1d_test -- --ignored`
 #[tokio::test]
+#[ignore = "external network: BIST API"]
 async fn test_bist_akbnk_1d_last_30days() {
     let symbol = "AKBNK.IS";
     let interval = "1d";

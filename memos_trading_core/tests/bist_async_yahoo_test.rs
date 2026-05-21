@@ -5,7 +5,10 @@ use reqwest::Client;
 use serde_json::Value;
 use chrono::Utc;
 
+// Gerçek HTTP çağrısı (query1.finance.yahoo.com); offline/CI'da sahte fail verir.
+// Manuel: `cargo test --test bist_async_yahoo_test -- --ignored`
 #[tokio::test]
+#[ignore = "external network: Yahoo Finance"]
 async fn test_bist_async_yahoo_style() {
     let symbol = "AKBNK.IS";
     let interval = "1d";

@@ -4,7 +4,10 @@
 use memos_trading_core::robot::infra::exchange::bist;
 use serde_json::Value;
 
+// Gerçek HTTP çağrısı (bist::fetch_bist_klines → external API); offline/CI'da
+// sahte fail verir. Manuel: `cargo test --test bist_download_test -- --ignored`
 #[tokio::test]
+#[ignore = "external network: BIST API"]
 async fn test_bist_klines_download() {
     // Örnek sembol ve kısa zaman aralığı (son 1 gün)
     let symbol = "AKBNK.IS";

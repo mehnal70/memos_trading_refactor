@@ -12,10 +12,11 @@ use memos_trading_core::core::model::RoboticLoopConfig;
 use memos_trading_core::robot::engines::master::Engine;
 use memos_trading_core::robot::robotic_loop::AppState;
 
+// Gerçek HTTP çağrısı (Binance API'den candle çeker); offline/CI'da sahte fail
+// verir. Manuel: `cargo test --test download_job -- --ignored`
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "external network: Binance API"]
 async fn download_trigger_creates_candle_table_for_symbol() {
-    // Internet kontrol etmemiz mümkün değil, ama Binance API erişilebiliyorsa
-    // (sandbox'tan onaylandı: BTC fiyatları geliyor), bu test gerçek HTTP yapacak.
 
     let tmp_db = format!("/tmp/memos_download_test_{}.db", std::process::id());
     let _ = std::fs::remove_file(&tmp_db);
