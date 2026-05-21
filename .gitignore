@@ -10,6 +10,17 @@ logs/
 data/
 memos_trading_core/data/
 
+# Backtest job runtime çıktıları (her run'da yeniden üretilir)
+config/active_profile.json
+config/best_params.json
+
+# Runtime state (engine yazıyor, restart'ta yeniden üretilir).
+# CONFIG olan rtc_config.json, robotic_profiles.json, trade_quality.json track'te kalır.
+config/*_state.json
+config/*_snapshot.json
+config/*.bak_*
+config/adaptive_params.json
+
 # Editor
 .idea/
 .vscode/
