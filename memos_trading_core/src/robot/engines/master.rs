@@ -71,7 +71,17 @@ impl Engine {
         // 1. INFRASTRUCTURE FLEET (WS, Diagnostic, Pipeline)
         Self::spawn_infrastructure_fleet(Arc::clone(&state)).await;
 
-        // Ana döngü heartbeat'i (TUI log paneline periyodik canlılık mesajı, her 30 sn'de bir)
+        // Ana döngü heartbeat'i — TUI log paneline canlılık mesajı.
+        // Daha önce 30 sn'de bir basıyordu, kullanıcı operatörlük açısından log
+        // panelini gürültülü buluyor; default 5 dk'ya çıkarıldı.
+        //   HEARTBEAT_UI_LOG_TICKS  → her N tick'te bir (500ms × tick). Default 600 (5 dk).
+        //   HEARTBEAT_UI_LOG_DISABLE=1/true → tamamen kapat.
+        // İlk tick log'u (tick_count == 1) "sistem ayakta" işareti olarak korunur,
+        // sadece disable=true ise atılmaz.
+        let heartbeat_log_disabled = std::env::var("HEARTBEAT_UI_LOG_DISABLE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        let heartbeat_log_ticks: u64 = std::env::var("HEARTBEAT_UI_LOG_TICKS")
+            .ok().and_then(|s| s.parse().ok()).filter(|n| *n > 0).unwrap_or(600);
         let mut tick_count: u64 = 0;
         loop {
             // Çıkış kontrolü + heartbeat tick mühürlemesi (her tur)
@@ -121,9 +131,11 @@ impl Engine {
                 Self::tick_intelligence_hub(&state).await;
             }
 
-            // 4. Periyodik canlılık logu: her ~30 sn'de bir TUI log paneline kalp atışı.
-            // (500 ms × 60 tur = 30 s). İlk turu da yakala: tick_count == 1.
-            if tick_count == 1 || tick_count % 60 == 0 {
+            // 4. Periyodik canlılık logu: HEARTBEAT_UI_LOG_TICKS (default 600 = 5 dk).
+            // İlk turu da yakala (sistem ayakta işareti). disable=true ise hiç basma.
+            if !heartbeat_log_disabled
+                && (tick_count == 1 || tick_count % heartbeat_log_ticks == 0)
+            {
                 if let Ok(mut st) = state.lock() {
                     let n_open = st.finance.live_positions.read().map(|p| p.len()).unwrap_or(0);
                     let n_closed = st.finance.live_closed_trades.read().map(|t| t.len()).unwrap_or(0);
