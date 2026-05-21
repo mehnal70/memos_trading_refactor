@@ -3,12 +3,21 @@
 // Network çağrısı yok — sadece saf fonksiyonlar (format_message, build_payload,
 // should_send, parse_cooldown_from_env) ve in-memory cooldown davranışı.
 
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use memos_trading_core::robot::infra::telegram_notifier::{
     build_payload, format_message, parse_cooldown_from_env, should_send,
     Severity, TelegramNotifier,
 };
+
+// TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / TELEGRAM_COOLDOWN_SECS process-global;
+// 6 env-touch eden testi serileştir. Saf testler (severity, format_message,
+// should_send_*, async notify_*) env'e dokunmuyor, lock'sız bırakıldı.
+static ENV_GUARD: Mutex<()> = Mutex::new(());
+fn lock_env() -> MutexGuard<'static, ()> {
+    ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 #[test]
 fn severity_prefix_matches_spec() {
@@ -55,6 +64,7 @@ fn should_send_after_cooldown_returns_true() {
 
 #[test]
 fn parse_cooldown_invalid_env_falls_back_to_default() {
+    let _env = lock_env();
     // SAFETY: env'i sıfırla → default 60 sn beklenir
     std::env::remove_var("TELEGRAM_COOLDOWN_SECS");
     assert_eq!(parse_cooldown_from_env(), Duration::from_secs(60));
@@ -62,6 +72,7 @@ fn parse_cooldown_invalid_env_falls_back_to_default() {
 
 #[test]
 fn parse_cooldown_valid_env_overrides_default() {
+    let _env = lock_env();
     std::env::set_var("TELEGRAM_COOLDOWN_SECS", "5");
     assert_eq!(parse_cooldown_from_env(), Duration::from_secs(5));
     std::env::remove_var("TELEGRAM_COOLDOWN_SECS");
@@ -69,6 +80,7 @@ fn parse_cooldown_valid_env_overrides_default() {
 
 #[test]
 fn parse_cooldown_garbage_env_falls_back() {
+    let _env = lock_env();
     std::env::set_var("TELEGRAM_COOLDOWN_SECS", "abc-def");
     assert_eq!(parse_cooldown_from_env(), Duration::from_secs(60));
     std::env::remove_var("TELEGRAM_COOLDOWN_SECS");
@@ -76,6 +88,7 @@ fn parse_cooldown_garbage_env_falls_back() {
 
 #[test]
 fn from_env_returns_none_when_token_missing() {
+    let _env = lock_env();
     std::env::remove_var("TELEGRAM_BOT_TOKEN");
     std::env::set_var("TELEGRAM_CHAT_ID", "12345");
     assert!(TelegramNotifier::from_env().is_none());
@@ -84,6 +97,7 @@ fn from_env_returns_none_when_token_missing() {
 
 #[test]
 fn from_env_returns_none_when_chat_id_missing() {
+    let _env = lock_env();
     std::env::set_var("TELEGRAM_BOT_TOKEN", "abc");
     std::env::remove_var("TELEGRAM_CHAT_ID");
     assert!(TelegramNotifier::from_env().is_none());
@@ -92,6 +106,7 @@ fn from_env_returns_none_when_chat_id_missing() {
 
 #[test]
 fn from_env_returns_none_when_values_whitespace() {
+    let _env = lock_env();
     std::env::set_var("TELEGRAM_BOT_TOKEN", "   ");
     std::env::set_var("TELEGRAM_CHAT_ID",  "\t\n");
     assert!(TelegramNotifier::from_env().is_none(), "boş/whitespace değerler reddedilmeli");

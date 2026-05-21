@@ -6,7 +6,7 @@
 //
 // Pasif modlarda task çalışmaz, gerçek HTTP test yok (paper-fallback hep test edilir).
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -14,8 +14,19 @@ use memos_trading_core::core::model::{RoboticLoopConfig, TradingMode};
 use memos_trading_core::robot::engines::master::Engine;
 use memos_trading_core::robot::robotic_loop::AppState;
 
+// BALANCE_AUTOFIX_* + LIVE_DRY_RUN process-global; cargo paralel koşumda
+// set/remove yarışı flaky'liğe yol açıyordu. Env'e dokunan 5 testi mutex'le
+// serileştir. Poison'a `into_inner()` ile bağışık. (Saf
+// equity_and_peak_can_be_adjusted_by_autofix_logic env'e dokunmadığı için
+// lock'sız bırakıldı.)
+static ENV_GUARD: Mutex<()> = Mutex::new(());
+fn lock_env() -> MutexGuard<'static, ()> {
+    ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 #[test]
 fn autofix_enabled_default_true() {
+    let _env = lock_env();
     std::env::remove_var("BALANCE_AUTOFIX_ENABLED");
     let v = std::env::var("BALANCE_AUTOFIX_ENABLED")
         .map(|s| s != "false" && s != "0").unwrap_or(true);
@@ -24,6 +35,7 @@ fn autofix_enabled_default_true() {
 
 #[test]
 fn autofix_disabled_via_env() {
+    let _env = lock_env();
     std::env::set_var("BALANCE_AUTOFIX_ENABLED", "false");
     let v = std::env::var("BALANCE_AUTOFIX_ENABLED")
         .map(|s| s != "false" && s != "0").unwrap_or(true);
@@ -33,6 +45,7 @@ fn autofix_disabled_via_env() {
 
 #[test]
 fn autofix_disabled_via_zero() {
+    let _env = lock_env();
     std::env::set_var("BALANCE_AUTOFIX_ENABLED", "0");
     let v = std::env::var("BALANCE_AUTOFIX_ENABLED")
         .map(|s| s != "false" && s != "0").unwrap_or(true);
@@ -42,6 +55,7 @@ fn autofix_disabled_via_zero() {
 
 #[test]
 fn autofix_n_obs_env_parses() {
+    let _env = lock_env();
     std::env::set_var("BALANCE_AUTOFIX_AFTER_N_OBS", "5");
     let n: u32 = std::env::var("BALANCE_AUTOFIX_AFTER_N_OBS")
         .ok().and_then(|s| s.parse().ok()).unwrap_or(3);
@@ -51,6 +65,7 @@ fn autofix_n_obs_env_parses() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn paper_mode_skips_autofix_task() {
+    let _env = lock_env();
     let tmp_db = format!("/tmp/memos_autofix_paper_{}.db", std::process::id());
     let _ = std::fs::remove_file(&tmp_db);
 

@@ -9,11 +9,20 @@
 // Telegram notifier env'siz ortamda None → push_alert sadece push_log atar.
 // guardian.log içinde severity prefix + etiket kontrol ediliyor.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use memos_trading_core::core::model::{PositionModel, RoboticLoopConfig};
 use memos_trading_core::robot::engines::master::Engine;
 use memos_trading_core::robot::robotic_loop::AppState;
+
+// PARTIAL_FILL_MAX_SLIPPAGE_PCT process-global; aşağıdaki testler set/remove
+// ederken paralel koşumda yarışıyordu (slippage_threshold_env_override_relaxes_check
+// "5.0" set ediyor, başka test aynı anda remove → default 1.0 → assert patlıyor).
+// Env-touch eden 5 testi mutex'le serileştir.
+static ENV_GUARD: Mutex<()> = Mutex::new(());
+fn lock_env() -> MutexGuard<'static, ()> {
+    ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 fn fresh_state() -> Arc<Mutex<AppState>> {
     Arc::new(Mutex::new(AppState::new(RoboticLoopConfig::default())))
@@ -116,6 +125,7 @@ async fn cum_exceeds_orig_triggers_warning_alert() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn long_close_adverse_slippage_triggers_alert() {
+    let _env = lock_env();
     std::env::remove_var("PARTIAL_FILL_MAX_SLIPPAGE_PCT");
     let state = fresh_state();
     // LONG current=100, kapanışta SELL 90 → (100-90)/100 = +10% adverse > 1%
@@ -135,6 +145,7 @@ async fn long_close_adverse_slippage_triggers_alert() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn long_entry_adverse_slippage_triggers_alert() {
+    let _env = lock_env();
     std::env::remove_var("PARTIAL_FILL_MAX_SLIPPAGE_PCT");
     let state = fresh_state();
     // LONG entry=100, BUY 110 → (110-100)/100 = +10% adverse
@@ -154,6 +165,7 @@ async fn long_entry_adverse_slippage_triggers_alert() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn favorable_price_does_not_trigger_slippage_alert() {
+    let _env = lock_env();
     std::env::remove_var("PARTIAL_FILL_MAX_SLIPPAGE_PCT");
     let state = fresh_state();
     // LONG current=100, SELL 110 → favorable (+10% bot lehine), adverse negatif
@@ -172,6 +184,7 @@ async fn favorable_price_does_not_trigger_slippage_alert() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn slippage_threshold_env_override_relaxes_check() {
+    let _env = lock_env();
     // Eşiği %5'e çıkar → %3 adverse pas geçmeli (default %1'de tetiklenirdi).
     std::env::set_var("PARTIAL_FILL_MAX_SLIPPAGE_PCT", "5.0");
     let state = fresh_state();
@@ -190,6 +203,7 @@ async fn slippage_threshold_env_override_relaxes_check() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn healthy_partial_no_anomaly_alerts() {
+    let _env = lock_env();
     std::env::remove_var("PARTIAL_FILL_MAX_SLIPPAGE_PCT");
     let state = fresh_state();
     open_position(&state, "BTCUSDT", true, 100.0, 1.0, Some(100.0));
