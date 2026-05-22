@@ -206,6 +206,36 @@ pub struct ParameterStore {
     /// `is_fresh` ile kontrol; stale ise fallback).
     #[serde(default)]
     pub symbol_stats: HashMap<(String, String), SymbolStats>,
+    /// Strateji bazlı trail target yüzdesi: SUPERTREND trend takipçisi geniş trail,
+    /// BB mean-reversion sıkı trail vb. `resolve_atr_mult` strategy_name ile bunu okur.
+    /// HyperOpt / feedback loop (sonraki faz) bu map'i runtime'da güncelleyebilir.
+    /// Env override: TARGET_TRAIL_PCT set ise tüm stratejiler için onurlanır
+    /// (operatör manuel müdahale veya A/B test).
+    #[serde(default = "default_strategy_trail_targets")]
+    pub strategy_trail_targets: HashMap<String, f64>,
+}
+
+/// Strateji niyetiyle hizalı default trail target'lar (yüzde, entry'den uzaklık).
+/// Tablo: registry kanonik isimler + IDLE_PROTECT için ölçeklendirme.
+fn default_strategy_trail_targets() -> HashMap<String, f64> {
+    let mut m = HashMap::new();
+    // Trend takipçileri — geniş trail, küçük dalgalanmalarda çıkmaz, trend süresince ride.
+    m.insert("SUPERTREND".to_string(),     1.2);
+    m.insert("MA_CROSSOVER".to_string(),   1.5);
+    m.insert("EMA".to_string(),            1.2);
+    m.insert("MACD".to_string(),           1.5);
+    m.insert("DONCHIAN".to_string(),       1.5);
+    m.insert("ADX".to_string(),            1.3);
+    m.insert("VWAP".to_string(),           1.2);
+    // Mean-reversion — sıkı trail, hızlı kâr al/çık (BB mean'e dön mantığı).
+    m.insert("BB".to_string(),             0.5);
+    // Momentum osilatörleri — orta sıkılık.
+    m.insert("RSI".to_string(),            0.7);
+    m.insert("STOCH_RSI".to_string(),      0.6);
+    m.insert("CCI".to_string(),            0.7);
+    // Default fallback için anahtar (resolve sırasında bulunamayan strateji adına).
+    m.insert("default".to_string(),        0.7);
+    m
 }
 
 /// Hysteresis: yeni rejim drift sayılmadan önce kaç ardışık cycle gözlemlenmeli.
@@ -227,6 +257,7 @@ impl Default for ParameterStore {
             pending_regime: None,
             last_drift_at_secs: 0,
             symbol_stats: HashMap::new(),
+            strategy_trail_targets: default_strategy_trail_targets(),
         }
     }
 }
@@ -332,23 +363,37 @@ impl ParameterStore {
         self.symbol_stats.retain(|_, s| symbol_stats::is_fresh(s, ttl_secs));
     }
 
+    /// Strateji ismine göre trail target yüzdesi.
+    /// Precedence:
+    ///   1) `TARGET_TRAIL_PCT` env set ise — global override (operatör müdahale / A/B test)
+    ///   2) `strategy_trail_targets[strategy_name]` — strateji-bazlı sensible default
+    ///   3) `strategy_trail_targets["default"]` — bilinmeyen strateji için fallback
+    ///   4) Hard-coded 0.7 — store boşsa
+    /// Phase C (sonraki commit) buraya per-(sym, strategy) feedback patch katmanı ekleyecek.
+    pub fn target_trail_pct_for_strategy(&self, strategy_name: &str) -> f64 {
+        if let Some(v) = parse_env_f64("TARGET_TRAIL_PCT") {
+            return v;
+        }
+        if let Some(&v) = self.strategy_trail_targets.get(strategy_name) {
+            return v;
+        }
+        self.strategy_trail_targets.get("default").copied().unwrap_or(0.7)
+    }
+
     /// ATR-trail multiplier çözümleme — Otonom katman.
     ///
-    /// Precedence: `sym×interval > rejim > base`.
-    /// 1) `symbol_stats[(sym, interval)]` fresh ve sample_size≥50 ise:
-    ///    `mult = target_trail_pct / noise_floor_pct`, clamp [1.5, 30].
-    ///    Örnek: target=0.5%, ETH 1m noise=0.018% → mult≈28 (clamped 30).
-    /// 2) Rejim override patch'inde `trade_risk` varsa (Faz 3 c2 sıkılaştırması), `base` üzerinden
-    ///    sabit 2.0 döner — TradeRiskParams ATR mult alanı tutmuyor; rejim sıkılaştırması
-    ///    şimdilik TP/SL ekseninde, atr_mult formula tarafından yönetilir.
-    /// 3) Hiç stats yoksa: caller'ın geçirdiği `default_mult` (genelde `best_params` veya 2.0).
+    /// Precedence:
+    /// 1) `symbol_stats[(sym, interval)]` fresh + sample_size≥50:
+    ///    `mult = strategy_target_pct / noise_floor_pct`, clamp [1.5, 30].
+    /// 2) Hiç stats yok / stale / yetersiz örneklem → `default_mult` (genelde best_params veya 2.0).
     ///
-    /// `target_trail_pct` env'den okunur: `TARGET_TRAIL_PCT` (default 0.5).
+    /// `strategy_name` = pozisyonu açan/açacak stratejinin kanonik adı (SUPERTREND, BB, ...).
+    /// Target pct strateji niyetine göre değişir; env override (TARGET_TRAIL_PCT) hala onurludur.
     pub fn resolve_atr_mult(
         &self,
         symbol: &str,
         interval: &str,
-        target_trail_pct: f64,
+        strategy_name: &str,
         default_mult: f64,
     ) -> f64 {
         const TTL_SECS: u64 = 21_600; // 6 saat
@@ -361,17 +406,12 @@ impl ParameterStore {
                 && s.noise_floor_pct > 0.0
                 && symbol_stats::is_fresh(s, TTL_SECS)
             {
-                let mult = target_trail_pct / s.noise_floor_pct;
+                let target = self.target_trail_pct_for_strategy(strategy_name);
+                let mult = target / s.noise_floor_pct;
                 return mult.clamp(MIN_MULT, MAX_MULT);
             }
         }
         default_mult
-    }
-
-    /// Env'den `TARGET_TRAIL_PCT` okur; geçersiz/yoksa 0.5 döner.
-    /// Resolve sırasında caller'a delegate edebilmek için public.
-    pub fn target_trail_pct_from_env() -> f64 {
-        parse_env_f64("TARGET_TRAIL_PCT").unwrap_or(0.5)
     }
 
     /// Belirli bir rejim için patch yerleştirir (HyperOpt rejim-aware tuning sonucu).
@@ -531,53 +571,80 @@ mod tests {
     #[test]
     fn resolve_atr_mult_returns_default_when_no_stats() {
         let s = ParameterStore::default();
-        let m = s.resolve_atr_mult("BTCUSDT", "1m", 0.5, 2.0);
+        let m = s.resolve_atr_mult("BTCUSDT", "1m", "SUPERTREND", 2.0);
         assert!((m - 2.0).abs() < 1e-9, "stats yokken default döner");
     }
 
     #[test]
-    fn resolve_atr_mult_uses_stats_when_present_and_fresh() {
+    fn resolve_atr_mult_uses_strategy_target_for_trend() {
         let mut s = ParameterStore::default();
-        // Noise = %0.025 (1m crypto tipik), target = %0.5 → mult = 20
-        s.update_symbol_stats("ETHUSDT", "1m", make_stats(0.025, 100, 60));
-        let m = s.resolve_atr_mult("ETHUSDT", "1m", 0.5, 2.0);
-        assert!((m - 20.0).abs() < 1e-9, "mult = 0.5 / 0.025 = 20, gerçek {}", m);
+        // SUPERTREND target=1.2, noise=0.05 → mult = 24
+        s.update_symbol_stats("ETHUSDT", "1m", make_stats(0.05, 100, 60));
+        let m = s.resolve_atr_mult("ETHUSDT", "1m", "SUPERTREND", 2.0);
+        assert!((m - 24.0).abs() < 1e-9, "mult = 1.2/0.05 = 24, gerçek {}", m);
+    }
+
+    #[test]
+    fn resolve_atr_mult_uses_strategy_target_for_meanrev() {
+        let mut s = ParameterStore::default();
+        // BB target=0.5, noise=0.05 → mult = 10
+        s.update_symbol_stats("ETHUSDT", "1m", make_stats(0.05, 100, 60));
+        let m = s.resolve_atr_mult("ETHUSDT", "1m", "BB", 2.0);
+        assert!((m - 10.0).abs() < 1e-9, "BB mean-rev: mult = 0.5/0.05 = 10, gerçek {}", m);
+    }
+
+    #[test]
+    fn resolve_atr_mult_falls_back_to_default_target_for_unknown_strategy() {
+        let mut s = ParameterStore::default();
+        // default target=0.7, noise=0.05 → mult = 14
+        s.update_symbol_stats("ETHUSDT", "1m", make_stats(0.05, 100, 60));
+        let m = s.resolve_atr_mult("ETHUSDT", "1m", "FANCY_UNKNOWN", 2.0);
+        assert!((m - 14.0).abs() < 1e-9, "unknown → default target 0.7, gerçek {}", m);
     }
 
     #[test]
     fn resolve_atr_mult_clamps_at_max_for_extreme_low_noise() {
         let mut s = ParameterStore::default();
-        // Noise = %0.001 → mult = 500 → clamp 30
+        // Noise = %0.001, target SUPERTREND=1.2 → mult = 1200 → clamp 30
         s.update_symbol_stats("BTCUSDT", "1m", make_stats(0.001, 100, 0));
-        let m = s.resolve_atr_mult("BTCUSDT", "1m", 0.5, 2.0);
+        let m = s.resolve_atr_mult("BTCUSDT", "1m", "SUPERTREND", 2.0);
         assert!((m - 30.0).abs() < 1e-9, "MAX_MULT clamp 30, gerçek {}", m);
     }
 
     #[test]
     fn resolve_atr_mult_clamps_at_min_for_very_wide_noise() {
         let mut s = ParameterStore::default();
-        // Noise = %5 (çok yüksek) → mult = 0.1 → clamp 1.5
+        // Noise = %5 (çok yüksek), target=1.2 → mult = 0.24 → clamp 1.5
         s.update_symbol_stats("XYZUSDT", "1h", make_stats(5.0, 100, 0));
-        let m = s.resolve_atr_mult("XYZUSDT", "1h", 0.5, 2.0);
+        let m = s.resolve_atr_mult("XYZUSDT", "1h", "SUPERTREND", 2.0);
         assert!((m - 1.5).abs() < 1e-9, "MIN_MULT clamp 1.5, gerçek {}", m);
     }
 
     #[test]
     fn resolve_atr_mult_falls_back_when_stats_stale() {
         let mut s = ParameterStore::default();
-        // 10 saat eski (TTL=6h üstü) → fallback
         s.update_symbol_stats("BTCUSDT", "1m", make_stats(0.025, 100, 10 * 3600));
-        let m = s.resolve_atr_mult("BTCUSDT", "1m", 0.5, 2.0);
+        let m = s.resolve_atr_mult("BTCUSDT", "1m", "SUPERTREND", 2.0);
         assert!((m - 2.0).abs() < 1e-9, "stale → default 2.0, gerçek {}", m);
     }
 
     #[test]
     fn resolve_atr_mult_falls_back_when_sample_too_small() {
         let mut s = ParameterStore::default();
-        // 30 örnek (<50 alt sınır) → fallback
         s.update_symbol_stats("BTCUSDT", "1m", make_stats(0.025, 30, 60));
-        let m = s.resolve_atr_mult("BTCUSDT", "1m", 0.5, 2.0);
+        let m = s.resolve_atr_mult("BTCUSDT", "1m", "SUPERTREND", 2.0);
         assert!((m - 2.0).abs() < 1e-9, "low sample → default, gerçek {}", m);
+    }
+
+    #[test]
+    fn target_trail_pct_picks_strategy_specific_default() {
+        let s = ParameterStore::default();
+        // Default tablodan
+        assert!((s.target_trail_pct_for_strategy("SUPERTREND") - 1.2).abs() < 1e-9);
+        assert!((s.target_trail_pct_for_strategy("BB") - 0.5).abs() < 1e-9);
+        assert!((s.target_trail_pct_for_strategy("MA_CROSSOVER") - 1.5).abs() < 1e-9);
+        // Bilinmeyen → default
+        assert!((s.target_trail_pct_for_strategy("FANCY_FOO") - 0.7).abs() < 1e-9);
     }
 
     #[test]

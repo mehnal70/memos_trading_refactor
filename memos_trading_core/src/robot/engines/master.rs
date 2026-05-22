@@ -1710,12 +1710,15 @@ impl Engine {
             let atr_value  = Self::calc_atr(&candles, 14);
             let (live_price, exit_reason) = {
                 let st = match state.lock() { Ok(s) => s, Err(_) => return };
-                // ATR-trail mult: önce sembol×interval noise-floor (otonom katman),
-                // yoksa best_params HyperOpt çıktısı, son fallback 2.0.
+                // ATR-trail mult: sembol×interval noise floor + pozisyonu açan stratejinin
+                // target_pct'i (SUPERTREND=geniş, BB=sıkı vb.). pos.trade_type açılışta
+                // strategy_name ile mühürleniyor → trail kararı strateji niyetiyle hizalı.
                 let default_mult = st.brain.best_params.get("pos_atr_trail_mult").copied().unwrap_or(2.0);
-                let target_trail_pct = crate::robot::parameters::ParameterStore::target_trail_pct_from_env();
+                let pos_strategy: String = st.finance.live_positions.read().ok()
+                    .and_then(|m| m.get(symbol).map(|p| p.trade_type.clone()))
+                    .unwrap_or_else(|| "default".to_string());
                 let atr_mult = st.brain.parameters.read().ok()
-                    .map(|p| p.resolve_atr_mult(symbol, interval, target_trail_pct, default_mult))
+                    .map(|p| p.resolve_atr_mult(symbol, interval, &pos_strategy, default_mult))
                     .unwrap_or(default_mult);
                 let be_rr    = st.brain.best_params.get("pos_breakeven_at_rr").copied().unwrap_or(1.0);
                 let fleet_price = st.fleet.live_price.read().ok()
@@ -1902,7 +1905,7 @@ impl Engine {
                             symbol, signal_label, edge, strategy_name,
                         ));
                     }
-                    Self::open_paper_position(state, symbol, &signal, &candles).await;
+                    Self::open_paper_position(state, symbol, &signal, &candles, &strategy_name).await;
                 }
                 // Pozisyon varken TERS yönde sinyal → kapanış (edge filtresi gevşek).
                 // Long + Sell ya da Short + Buy: trend dönmüş demektir.
@@ -2070,7 +2073,13 @@ impl Engine {
     /// 🧬 FAZ F3: OTONOM POZİSYON AÇILIŞ MOTORU (Paper + Live dispatcher)
     /// Kelly oranı, brain.ml_confidence ve loss_streak ile dinamik tahsisat yapar.
     /// Live executor bağlıysa ve dry-run değilse: gerçek market order gönderir.
-    async fn open_paper_position(state: &Arc<Mutex<AppState>>, symbol: &str, signal: &Signal, candles: &[Candle]) {
+    async fn open_paper_position(
+        state: &Arc<Mutex<AppState>>,
+        symbol: &str,
+        signal: &Signal,
+        candles: &[Candle],
+        strategy_name: &str,
+    ) {
         use crate::robot::risk::kelly::KellyCriterion;
         let last_candle = match candles.last() { Some(c) => c, None => return };
 
@@ -2168,18 +2177,18 @@ impl Engine {
             } else {
                 (entry * (1.0 + sl_pct / 100.0), entry * (1.0 - tp_pct / 100.0))
             };
-            // ATR-trail mult: otonom katman (sembol×interval noise floor) → best_params → 2.0.
+            // ATR-trail mult: sembol×interval noise floor + strateji niyetine bağlı target_pct.
             // Aynı resolve zinciri check_exit_conditions ile birebir → open/exit tutarlı.
             let default_mult = st.brain.best_params.get("pos_atr_trail_mult").copied().unwrap_or(2.0);
-            let target_trail_pct = crate::robot::parameters::ParameterStore::target_trail_pct_from_env();
             let interval_for_resolve = st.config.interval.clone();
             let atr_mult = st.brain.parameters.read().ok()
-                .map(|p| p.resolve_atr_mult(symbol, &interval_for_resolve, target_trail_pct, default_mult))
+                .map(|p| p.resolve_atr_mult(symbol, &interval_for_resolve, strategy_name, default_mult))
                 .unwrap_or(default_mult);
             let trailing_stop = if is_long { entry - atr * atr_mult }
                                 else       { entry + atr * atr_mult };
-            let strategy_name = st.brain.live_strategy.read()
-                .map(|s| s.clone()).unwrap_or_else(|_| "MA_CROSSOVER".into());
+            // strategy_name caller'dan geliyor — process_symbol_cycle StrategySelector ile
+            // rejime göre seçti (SUPERTREND / BB / MA_CROSSOVER vb.). trade_type bunu mühürler;
+            // check_exit_conditions açılışla aynı target_pct'i okuyabilsin diye.
             let new_pos = PositionModel {
                 pos_id: pos_id_str.clone(),
                 symbol: symbol.to_string(),
@@ -2188,7 +2197,7 @@ impl Engine {
                 // trade_type artık stratejik etiket (önceki "LONG"/"SHORT" zaten
                 // is_long ile aynı bilgiyi tekrar ediyordu); UI "Strateji" sütununda
                 // hangi karar mekanizmasının açtığını göstersin.
-                trade_type: strategy_name.clone(),
+                trade_type: strategy_name.to_string(),
                 is_long,
                 opened_at: chrono::Utc::now().to_rfc3339(),
                 stop_loss, take_profit, trailing_stop,
@@ -2198,7 +2207,7 @@ impl Engine {
             Some(OpenPlan {
                 new_pos, alloc_capital, qty_val,
                 kelly_fraction: kelly.kelly_fraction, risk_appetite, ml_conf,
-                tp_pct, sl_pct, strategy_name,
+                tp_pct, sl_pct, strategy_name: strategy_name.to_string(),
                 live_executor: st.live_executor.clone(),
                 live_dry_run: st.live_dry_run,
                 live_max_notional: st.live_max_notional_usd,
