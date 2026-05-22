@@ -32,6 +32,10 @@ pub struct HeartbeatRecord {
     pub anomalies: usize,
     pub strategy: String,
     pub ml_confidence: f64,
+    /// GBT modeli eğitilmiş mi? false ise ml_confidence statik (sharpe-based).
+    /// true ise cycle-bazlı dinamik (predict_confidence) → değer hareket etmeli.
+    #[serde(default)]
+    pub gbt_ready: bool,
 }
 
 impl HeartbeatRecord {
@@ -57,6 +61,10 @@ impl HeartbeatRecord {
         let strategy = state.brain.live_strategy.read()
             .map(|s| crate::core::model::normalize_strategy_label(&s))
             .unwrap_or_else(|_| "?".to_string());
+        // GBT canlı mı? IntelligenceHub.gbt.is_ready() → predict_confidence
+        // gerçek dinamik üretiyor demektir.
+        let gbt_ready = state.brain.intelligence_hub.read()
+            .map(|hub| hub.gbt.is_ready()).unwrap_or(false);
 
         Self {
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -70,6 +78,7 @@ impl HeartbeatRecord {
             anomalies,
             strategy,
             ml_confidence: state.brain.ml_confidence,
+            gbt_ready,
         }
     }
 }
@@ -309,6 +318,7 @@ mod tests {
             anomalies: 0,
             strategy: "MA_CROSSOVER".to_string(),
             ml_confidence: 0.0,
+            gbt_ready: false,
         };
         append_record(&path, &rec).unwrap();
         append_record(&path, &rec).unwrap();

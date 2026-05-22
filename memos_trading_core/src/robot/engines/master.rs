@@ -4,8 +4,13 @@
 use crate::prelude::*;
 use super::base::{EngineConfig, TradingEngine};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::time::{sleep, Duration};
+
+/// Anomali-tetikli ML retrain'in son fire epoch'u (saniye). 0 = hiç fire edilmedi.
+/// `perform_anomaly_recovery` her cycle çağrılır ama bu cooldown sayesinde
+/// ML trigger spam'i kapanır (default 300sn, `ANOMALY_ML_TRIGGER_COOLDOWN_SECS`).
+static ANOMALY_ML_LAST_TRIGGER_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 // Projedeki gerçek tiplerin ve trait'lerin bağlanması için ön hazırlık (Agnostik Katman)
 pub struct MLModel;
@@ -619,6 +624,23 @@ impl Engine {
                             st.push_log("⏰ Scheduler: warmup tamamlandı → ilk download tetiği".into());
                         }
                         last_download_at = Some(now);
+                    }
+                    // Boot ML warmup tetiği: anomaly bazlı tetik artık schema guard
+                    // sayesinde tetiklenmiyor (DataIngest Failed yok), bu yüzden
+                    // ilk run'da 120dk beklemeden GBT'yi cold-start eğitelim.
+                    // SCHEDULER_ML_WARMUP_SKIP=1 ile bu tetik kapatılabilir.
+                    let skip_warmup_ml = std::env::var("SCHEDULER_ML_WARMUP_SKIP")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+                    if ml_periodic_enabled && !skip_warmup_ml {
+                        if let Ok(st) = st_sched.lock() {
+                            if let Some(t) = st.fleet.triggers.get("ml") {
+                                t.store(true, Ordering::Relaxed);
+                            }
+                        }
+                        if let Ok(mut st) = st_sched.lock() {
+                            st.push_log("⏰ Scheduler: warmup → ilk ML retrain tetiği (GBT cold-train)".into());
+                        }
+                        last_ml_at = Some(now);
                     }
                 }
 
@@ -1674,6 +1696,14 @@ impl Engine {
                             .and_then(|hub| hub.predict_confidence(&fv, &signal))
                     })
                 } else { None };
+                // GBT canlı çalıştığında brain.ml_confidence'ı last-cycle örneği
+                // ile güncelle → heartbeat ve operatör dinamik değeri görür.
+                // Yoksa retrain sonrası set edilen sharpe-bazlı statik değer kalır.
+                if let Some(c) = gbt_conf {
+                    if let Ok(mut st) = state.lock() {
+                        st.brain.ml_confidence = c;
+                    }
+                }
                 gbt_conf.unwrap_or(ml_confidence)
             };
 
@@ -2790,6 +2820,11 @@ impl Engine {
 
     /// 🛡️ ANOMALİ ONARIMI: aktif anomali sayısı > 0 ise ML retrain tetiklenir,
     /// anomali türleri ve onarım kaydı guardian.repair_log'a düşürülür.
+    ///
+    /// Cooldown (`ANOMALY_ML_TRIGGER_COOLDOWN_SECS`, default 300sn):
+    /// Anomali aralıksız sürüyorsa (ör. recovery edilen pasif semboller
+    /// nedeniyle DataIngest Failed) her 500ms ML trigger spam'i oluşurdu.
+    /// Cooldown süresince ML trigger ATIlMAZ; phase ve log girdisi yine yazılır.
     fn perform_anomaly_recovery(state: &Arc<Mutex<AppState>>, snap: &MissionControl) {
         if snap.active_anomalies == 0 { return; }
         let mut st = state.lock().unwrap();
@@ -2805,8 +2840,19 @@ impl Engine {
             if !kinds.contains(&a.kind) { kinds.push(a.kind.clone()); }
         }
 
+        // Cooldown denetimi: bir önceki ML trigger'dan beri yeterli süre geçti mi?
+        let cooldown_secs = std::env::var("ANOMALY_ML_TRIGGER_COOLDOWN_SECS")
+            .ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(300);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let last_fired = ANOMALY_ML_LAST_TRIGGER_EPOCH.load(Ordering::Relaxed);
+        let armed = last_fired == 0 || now_secs.saturating_sub(last_fired) >= cooldown_secs;
+
         // ML retrain'i tetikle (zaten ml job'u kendi loglarını basacak)
-        st.fleet.triggers.get("ml").map(|t| t.store(true, Ordering::Relaxed));
+        if armed {
+            st.fleet.triggers.get("ml").map(|t| t.store(true, Ordering::Relaxed));
+            ANOMALY_ML_LAST_TRIGGER_EPOCH.store(now_secs, Ordering::Relaxed);
+        }
 
         st.push_log(format!(
             "🚨 Anomali onarımı: {} aktif ({} kritik / {} uyarı), türler: {} ⇒ ML retrain tetiklendi",
