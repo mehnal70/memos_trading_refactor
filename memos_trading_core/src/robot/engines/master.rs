@@ -1710,7 +1710,13 @@ impl Engine {
             let atr_value  = Self::calc_atr(&candles, 14);
             let (live_price, exit_reason) = {
                 let st = match state.lock() { Ok(s) => s, Err(_) => return };
-                let atr_mult = st.brain.best_params.get("pos_atr_trail_mult").copied().unwrap_or(2.0);
+                // ATR-trail mult: önce sembol×interval noise-floor (otonom katman),
+                // yoksa best_params HyperOpt çıktısı, son fallback 2.0.
+                let default_mult = st.brain.best_params.get("pos_atr_trail_mult").copied().unwrap_or(2.0);
+                let target_trail_pct = crate::robot::parameters::ParameterStore::target_trail_pct_from_env();
+                let atr_mult = st.brain.parameters.read().ok()
+                    .map(|p| p.resolve_atr_mult(symbol, interval, target_trail_pct, default_mult))
+                    .unwrap_or(default_mult);
                 let be_rr    = st.brain.best_params.get("pos_breakeven_at_rr").copied().unwrap_or(1.0);
                 let fleet_price = st.fleet.live_price.read().ok()
                     .and_then(|m| m.get(symbol).copied())
@@ -2162,7 +2168,14 @@ impl Engine {
             } else {
                 (entry * (1.0 + sl_pct / 100.0), entry * (1.0 - tp_pct / 100.0))
             };
-            let atr_mult = st.brain.best_params.get("pos_atr_trail_mult").copied().unwrap_or(2.0);
+            // ATR-trail mult: otonom katman (sembol×interval noise floor) → best_params → 2.0.
+            // Aynı resolve zinciri check_exit_conditions ile birebir → open/exit tutarlı.
+            let default_mult = st.brain.best_params.get("pos_atr_trail_mult").copied().unwrap_or(2.0);
+            let target_trail_pct = crate::robot::parameters::ParameterStore::target_trail_pct_from_env();
+            let interval_for_resolve = st.config.interval.clone();
+            let atr_mult = st.brain.parameters.read().ok()
+                .map(|p| p.resolve_atr_mult(symbol, &interval_for_resolve, target_trail_pct, default_mult))
+                .unwrap_or(default_mult);
             let trailing_stop = if is_long { entry - atr * atr_mult }
                                 else       { entry + atr * atr_mult };
             let strategy_name = st.brain.live_strategy.read()
@@ -3585,6 +3598,17 @@ impl Engine {
                     match write_result {
                         Ok(Ok(())) => {
                             per_symbol_summary.push(format!("{}={}", sym, n));
+                            // Otonom katman: sembol+interval bazlı noise floor hesabı.
+                            // compute_symbol_stats min 64 candle istiyor (14 ATR + 50 sample);
+                            // limit ≥50 garantili ama yetersizse None döner ve store
+                            // güncellenmez → resolve_atr_mult fallback'e düşer.
+                            if let Some(stats) = crate::robot::parameters::compute_symbol_stats(&candles) {
+                                if let Ok(st) = state.lock() {
+                                    if let Ok(mut params) = st.brain.parameters.write() {
+                                        params.update_symbol_stats(sym, &interval, stats);
+                                    }
+                                }
+                            }
                             if let Ok(mut st) = state.lock() {
                                 st.push_log(format!("    └─ {} ✓ {} mum yazıldı", sym, n));
                             }

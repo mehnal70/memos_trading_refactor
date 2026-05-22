@@ -15,6 +15,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 pub mod adaptive;
+pub mod symbol_stats;
+
+pub use symbol_stats::{SymbolStats, compute_symbol_stats};
 
 /// Rejim-bazlı parametre patch'i. Yalnızca override edilmek istenen alanlar `Some`
 /// olur; diğerleri base ParameterStore değerlerini korur (sparse override).
@@ -196,6 +199,13 @@ pub struct ParameterStore {
     /// 0 = hiç drift yok. Aynı 60 sn içinde tekrar drift tetiklenmez.
     #[serde(default)]
     pub last_drift_at_secs: u64,
+    /// Sembol+interval bazlı gürültü/volatilite istatistikleri.
+    /// `perform_download` her başarılı sembolden sonra günceller; `resolve_atr_mult`
+    /// burayı tüketir. Boş ise tüm çağrılar rejim/base fallback'e düşer.
+    /// Key = (symbol, interval). TTL: default 6 saat (`resolve_atr_mult` içinde
+    /// `is_fresh` ile kontrol; stale ise fallback).
+    #[serde(default)]
+    pub symbol_stats: HashMap<(String, String), SymbolStats>,
 }
 
 /// Hysteresis: yeni rejim drift sayılmadan önce kaç ardışık cycle gözlemlenmeli.
@@ -216,6 +226,7 @@ impl Default for ParameterStore {
             last_observed_regime: None,
             pending_regime: None,
             last_drift_at_secs: 0,
+            symbol_stats: HashMap::new(),
         }
     }
 }
@@ -307,6 +318,60 @@ impl ParameterStore {
         self.regime_overrides.get(regime)
             .and_then(|p| p.trade_risk)
             .unwrap_or(self.trade_risk)
+    }
+
+    /// Sembol+interval için noise-floor stats'i günceller (perform_download çağrır).
+    /// Zaten varsa üzerine yazar (taze veri eski hesabı geçersiz kılar).
+    pub fn update_symbol_stats(&mut self, symbol: &str, interval: &str, stats: SymbolStats) {
+        self.symbol_stats.insert((symbol.to_string(), interval.to_string()), stats);
+    }
+
+    /// Stale stats temizliği (cold-start / bakım). TTL üstü kayıtları siler.
+    /// Engine periyodik çağırmıyor; in-memory store küçük (~100 entry max).
+    pub fn purge_stale_symbol_stats(&mut self, ttl_secs: u64) {
+        self.symbol_stats.retain(|_, s| symbol_stats::is_fresh(s, ttl_secs));
+    }
+
+    /// ATR-trail multiplier çözümleme — Otonom katman.
+    ///
+    /// Precedence: `sym×interval > rejim > base`.
+    /// 1) `symbol_stats[(sym, interval)]` fresh ve sample_size≥50 ise:
+    ///    `mult = target_trail_pct / noise_floor_pct`, clamp [1.5, 30].
+    ///    Örnek: target=0.5%, ETH 1m noise=0.018% → mult≈28 (clamped 30).
+    /// 2) Rejim override patch'inde `trade_risk` varsa (Faz 3 c2 sıkılaştırması), `base` üzerinden
+    ///    sabit 2.0 döner — TradeRiskParams ATR mult alanı tutmuyor; rejim sıkılaştırması
+    ///    şimdilik TP/SL ekseninde, atr_mult formula tarafından yönetilir.
+    /// 3) Hiç stats yoksa: caller'ın geçirdiği `default_mult` (genelde `best_params` veya 2.0).
+    ///
+    /// `target_trail_pct` env'den okunur: `TARGET_TRAIL_PCT` (default 0.5).
+    pub fn resolve_atr_mult(
+        &self,
+        symbol: &str,
+        interval: &str,
+        target_trail_pct: f64,
+        default_mult: f64,
+    ) -> f64 {
+        const TTL_SECS: u64 = 21_600; // 6 saat
+        const MIN_MULT: f64 = 1.5;
+        const MAX_MULT: f64 = 30.0;
+        const MIN_SAMPLE: usize = 50;
+
+        if let Some(s) = self.symbol_stats.get(&(symbol.to_string(), interval.to_string())) {
+            if s.sample_size >= MIN_SAMPLE
+                && s.noise_floor_pct > 0.0
+                && symbol_stats::is_fresh(s, TTL_SECS)
+            {
+                let mult = target_trail_pct / s.noise_floor_pct;
+                return mult.clamp(MIN_MULT, MAX_MULT);
+            }
+        }
+        default_mult
+    }
+
+    /// Env'den `TARGET_TRAIL_PCT` okur; geçersiz/yoksa 0.5 döner.
+    /// Resolve sırasında caller'a delegate edebilmek için public.
+    pub fn target_trail_pct_from_env() -> f64 {
+        parse_env_f64("TARGET_TRAIL_PCT").unwrap_or(0.5)
     }
 
     /// Belirli bir rejim için patch yerleştirir (HyperOpt rejim-aware tuning sonucu).
@@ -450,6 +515,80 @@ fn now_epoch_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SymbolStats fixture: belirli yaşa sahip tazeleyici. Now-offset saniye.
+    fn make_stats(noise_pct: f64, sample: usize, age_secs: u64) -> SymbolStats {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        SymbolStats {
+            noise_floor_pct: noise_pct,
+            p90_range_pct:   noise_pct * 1.5,
+            sample_size:     sample,
+            last_updated:    now.saturating_sub(age_secs),
+        }
+    }
+
+    #[test]
+    fn resolve_atr_mult_returns_default_when_no_stats() {
+        let s = ParameterStore::default();
+        let m = s.resolve_atr_mult("BTCUSDT", "1m", 0.5, 2.0);
+        assert!((m - 2.0).abs() < 1e-9, "stats yokken default döner");
+    }
+
+    #[test]
+    fn resolve_atr_mult_uses_stats_when_present_and_fresh() {
+        let mut s = ParameterStore::default();
+        // Noise = %0.025 (1m crypto tipik), target = %0.5 → mult = 20
+        s.update_symbol_stats("ETHUSDT", "1m", make_stats(0.025, 100, 60));
+        let m = s.resolve_atr_mult("ETHUSDT", "1m", 0.5, 2.0);
+        assert!((m - 20.0).abs() < 1e-9, "mult = 0.5 / 0.025 = 20, gerçek {}", m);
+    }
+
+    #[test]
+    fn resolve_atr_mult_clamps_at_max_for_extreme_low_noise() {
+        let mut s = ParameterStore::default();
+        // Noise = %0.001 → mult = 500 → clamp 30
+        s.update_symbol_stats("BTCUSDT", "1m", make_stats(0.001, 100, 0));
+        let m = s.resolve_atr_mult("BTCUSDT", "1m", 0.5, 2.0);
+        assert!((m - 30.0).abs() < 1e-9, "MAX_MULT clamp 30, gerçek {}", m);
+    }
+
+    #[test]
+    fn resolve_atr_mult_clamps_at_min_for_very_wide_noise() {
+        let mut s = ParameterStore::default();
+        // Noise = %5 (çok yüksek) → mult = 0.1 → clamp 1.5
+        s.update_symbol_stats("XYZUSDT", "1h", make_stats(5.0, 100, 0));
+        let m = s.resolve_atr_mult("XYZUSDT", "1h", 0.5, 2.0);
+        assert!((m - 1.5).abs() < 1e-9, "MIN_MULT clamp 1.5, gerçek {}", m);
+    }
+
+    #[test]
+    fn resolve_atr_mult_falls_back_when_stats_stale() {
+        let mut s = ParameterStore::default();
+        // 10 saat eski (TTL=6h üstü) → fallback
+        s.update_symbol_stats("BTCUSDT", "1m", make_stats(0.025, 100, 10 * 3600));
+        let m = s.resolve_atr_mult("BTCUSDT", "1m", 0.5, 2.0);
+        assert!((m - 2.0).abs() < 1e-9, "stale → default 2.0, gerçek {}", m);
+    }
+
+    #[test]
+    fn resolve_atr_mult_falls_back_when_sample_too_small() {
+        let mut s = ParameterStore::default();
+        // 30 örnek (<50 alt sınır) → fallback
+        s.update_symbol_stats("BTCUSDT", "1m", make_stats(0.025, 30, 60));
+        let m = s.resolve_atr_mult("BTCUSDT", "1m", 0.5, 2.0);
+        assert!((m - 2.0).abs() < 1e-9, "low sample → default, gerçek {}", m);
+    }
+
+    #[test]
+    fn purge_stale_keeps_fresh_drops_old() {
+        let mut s = ParameterStore::default();
+        s.update_symbol_stats("FRESH", "1m", make_stats(0.5, 100, 60));
+        s.update_symbol_stats("STALE", "1m", make_stats(0.5, 100, 7 * 3600));
+        s.purge_stale_symbol_stats(6 * 3600);
+        assert!(s.symbol_stats.contains_key(&("FRESH".into(), "1m".into())));
+        assert!(!s.symbol_stats.contains_key(&("STALE".into(), "1m".into())));
+    }
 
     #[test]
     fn default_edge_thresholds_match_legacy_constants() {
