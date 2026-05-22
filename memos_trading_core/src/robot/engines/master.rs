@@ -1765,8 +1765,19 @@ impl Engine {
                 }
                 // Aynı yöndeki tekrar sinyaller: pozisyon zaten o yönde, dokunma.
                 // (Aksi halde aç/kapa döngüsü ve komisyon erozyonu doğar.)
+                // Görünürlük: throttle'lı RISK_BLOCK olarak işaretle → operatör
+                // "neden trade yok?" sorusunu trades.jsonl'dan yanıtlayabilsin.
                 (crate::core::types::Signal::Buy,  Some(true))
-                | (crate::core::types::Signal::Sell, Some(false)) => {}
+                | (crate::core::types::Signal::Sell, Some(false)) => {
+                    if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
+                        let dir_label = if matches!(signal, Signal::Buy) { "LONG" } else { "SHORT" };
+                        let ev = crate::robot::infra::logger::TradeEvent::risk_block(
+                            &format!("[position-aligned] {} sinyali, pozisyon zaten {}", signal_label, dir_label),
+                            symbol,
+                        );
+                        let _ = logger.log_event(&ev);
+                    }
+                }
                 _ => {}
             }
         }
@@ -2725,6 +2736,25 @@ impl Engine {
                 crate::robot::data_pipeline::canon::PipelineStage::Execute,
                 crate::robot::data_pipeline::StepStatus::Done,
             );
+        } else {
+            // target_pos None: positions.remove(symbol) o anda sembolü bulamadı.
+            // Bu yetim kapanış sinyali; sessizce yutulursa closed_trades muhasebe
+            // boşluğu doğar. Hem push_log hem anomaly emit edilir.
+            st.push_log(format!(
+                "🧾 [CLOSE-NO-POS] {} kapanış istendi ama live_positions'da yok (yetim) — reason={}",
+                symbol, reason.as_str(),
+            ));
+            if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
+                use crate::robot::data_pipeline::{AnomalyKind, AnomalySeverity};
+                pipe.push_anomaly(
+                    AnomalySeverity::Warning,
+                    AnomalyKind::Custom,
+                    format!(
+                        "Yetim kapanış: {} (reason={}) — live_positions'da kayıt yok",
+                        symbol, reason.as_str(),
+                    ),
+                );
+            }
         }
     }
 

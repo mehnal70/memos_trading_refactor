@@ -51,8 +51,24 @@ impl HeartbeatRecord {
             .map(|t| t.len()).unwrap_or(0);
         let anomalies = state.guardian.live_pipeline.read()
             .map(|p| p.anomalies.len()).unwrap_or(0);
+        // brain.live_strategy "Default"/"Auto"/"" iken motor her cycle'da rejime
+        // göre otonom strateji seçiyor (process_symbol_cycle'da
+        // StrategySelector::select_best). Tek statik isim yansıtmak yanıltıcı
+        // olur; bridge.rs'le aynı normalleştirme uygulanır → operatör heartbeat
+        // jsonl'da gerçek davranışı görür.
         let strategy = state.brain.live_strategy.read()
-            .map(|s| s.clone()).unwrap_or_else(|_| "?".to_string());
+            .map(|s| {
+                let raw = s.clone();
+                if raw.eq_ignore_ascii_case("default")
+                    || raw.eq_ignore_ascii_case("auto")
+                    || raw.is_empty()
+                {
+                    "Otonom (rejime göre)".to_string()
+                } else {
+                    raw
+                }
+            })
+            .unwrap_or_else(|_| "?".to_string());
 
         Self {
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -86,6 +102,9 @@ pub fn spawn_heartbeat_writer(
 
         let interval = Duration::from_secs(interval_secs.max(1));
         let mut tick: u64 = 0;
+        // Muhasebe denetim baseline'ı: tick-arası farkı görmek için.
+        let mut prev_open: Option<usize> = None;
+        let mut prev_closed: Option<usize> = None;
         loop {
             // Çıkış kontrolü + snapshot üretimi tek kilit altında
             let record_opt = {
@@ -103,6 +122,36 @@ pub fn spawn_heartbeat_writer(
                 Some(r) => r,
                 None => break,
             };
+
+            // Muhasebe boşluğu denetimi: önceki tick'e göre açık pozisyon azaldıysa
+            // closed_trades en az o kadar artmalı. Aksi halde "yetim kapanış" →
+            // anomaly emit + log. İlk turda baseline kurulduğu için karşılaştırma yok.
+            if let (Some(po), Some(pc)) = (prev_open, prev_closed) {
+                let open_lost = po.saturating_sub(record.open_positions);
+                let closed_gain = record.closed_trades.saturating_sub(pc);
+                if open_lost > closed_gain {
+                    let gap = open_lost - closed_gain;
+                    if let Ok(mut st) = state.lock() {
+                        if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
+                            use crate::robot::data_pipeline::{AnomalyKind, AnomalySeverity};
+                            pipe.push_anomaly(
+                                AnomalySeverity::Warning,
+                                AnomalyKind::Custom,
+                                format!(
+                                    "Muhasebe boşluğu: {} pozisyon kapandı ama closed_trades sadece +{} arttı (yetim={})",
+                                    open_lost, closed_gain, gap,
+                                ),
+                            );
+                        }
+                        st.push_log(format!(
+                            "🧾 [ACCOUNTING-GAP] tick={} open {} → {} (kayıp {}), closed +{} (yetim {})",
+                            tick, po, record.open_positions, open_lost, closed_gain, gap,
+                        ));
+                    }
+                }
+            }
+            prev_open = Some(record.open_positions);
+            prev_closed = Some(record.closed_trades);
 
             // JSONL append (her satır bir JSON). Hata olursa ilk turda push_log,
             // sonra spam'i durdur.
@@ -170,6 +219,89 @@ mod tests {
         // (10000 - 9500) / 10000 * 100 = 5.0
         assert!((rec.drawdown_pct - 5.0).abs() < 1e-9,
             "drawdown_pct beklenen 5.0, gerçek {}", rec.drawdown_pct);
+    }
+
+    #[test]
+    fn strategy_normalizes_default_and_auto_to_otonom() {
+        let cfg = RoboticLoopConfig::default();
+        let st = AppState::new(cfg);
+        // Default boot değeri "AUTO" idi — snapshot "Otonom (rejime göre)" göstermeli.
+        let rec = HeartbeatRecord::snapshot(&st, 0);
+        assert_eq!(rec.strategy, "Otonom (rejime göre)",
+            "AUTO sentinel normalize edilmedi: {}", rec.strategy);
+
+        // Manuel "Default" da aynı şekilde normalize edilmeli (eski boot'lar).
+        {
+            let mut s = st.brain.live_strategy.write().unwrap();
+            *s = "Default".to_string();
+        }
+        let rec2 = HeartbeatRecord::snapshot(&st, 1);
+        assert_eq!(rec2.strategy, "Otonom (rejime göre)");
+
+        // Açıkça bir strateji set edilirse aynen yansır.
+        {
+            let mut s = st.brain.live_strategy.write().unwrap();
+            *s = "SUPERTREND".to_string();
+        }
+        let rec3 = HeartbeatRecord::snapshot(&st, 2);
+        assert_eq!(rec3.strategy, "SUPERTREND");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn accounting_gap_detection_emits_anomaly() {
+        use crate::core::model::PositionModel;
+        let path = format!("/tmp/memos_hb_gap_{}.jsonl", std::process::id());
+        let _ = std::fs::remove_file(&path);
+
+        let cfg = RoboticLoopConfig::default();
+        let st = Arc::new(Mutex::new(AppState::new(cfg)));
+
+        // İlk tick: 2 açık pozisyon, 0 closed.
+        {
+            let s = st.lock().unwrap();
+            let mut p = s.finance.live_positions.write().unwrap();
+            for sym in ["AAA", "BBB"] {
+                p.insert(sym.into(), PositionModel {
+                    pos_id: format!("test-{}", sym),
+                    symbol: sym.into(),
+                    entry_price: 1.0,
+                    current_price: 1.0,
+                    qty: 1.0,
+                    leverage: 1.0,
+                    is_long: true,
+                    trade_type: "scalp".into(),
+                    opened_at: "2026-01-01T00:00:00Z".into(),
+                    stop_loss: 0.0,
+                    take_profit: 0.0,
+                    trailing_stop: 0.0,
+                    max_favorable_price: 1.0,
+                    breakeven_activated: false,
+                });
+            }
+        }
+
+        // 1sn interval ile başlat → 1. tick'te baseline kurulur.
+        spawn_heartbeat_writer(Arc::clone(&st), path.clone(), 1);
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+
+        // Şimdi 1 pozisyon silelim ama closed_trades'a YAZMAYALIM (yetim simülasyonu).
+        {
+            let s = st.lock().unwrap();
+            s.finance.live_positions.write().unwrap().remove("BBB");
+        }
+        // 2. tick'in muhasebe denetimini yakalamak için bekle.
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+
+        // Stop ve doğrula.
+        st.lock().unwrap().app_stop_signal.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+
+        let pipe = st.lock().unwrap().guardian.live_pipeline.read().unwrap().anomalies.clone();
+        let has_gap = pipe.iter().any(|a| a.message.contains("Muhasebe boşluğu"));
+        assert!(has_gap, "Yetim kapanış anomaly emit edilmedi: {:?}",
+            pipe.iter().map(|a| a.message.clone()).collect::<Vec<_>>());
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

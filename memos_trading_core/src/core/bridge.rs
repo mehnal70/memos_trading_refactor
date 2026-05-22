@@ -240,8 +240,15 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
             TradeTypeStats { label: "SWING".into(), win_rate: 0.0, profit_factor: 0.0, avg_win: 0.0, avg_loss: 0.0, current_streak: 0 },
         ));
 
-    // anomalies aşağıda MissionControl'a move edilmeden önce sayıyı yakala.
+    // anomalies aşağıda MissionControl'a move edilmeden önce sayıyı + tip
+    // dağılımını yakala. boot anomaly 50 olduğunda hangi tipin baskın olduğu
+    // görünür (TUI Risk Center).
     let active_anomalies = anomalies.len();
+    let mut anomalies_by_kind: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for a in &anomalies {
+        *anomalies_by_kind.entry(a.kind.clone()).or_insert(0) += 1;
+    }
     let repair_log: Vec<String> = st.guardian.repair_log.iter().rev().take(50).cloned().collect();
 
     MissionControl {
@@ -260,6 +267,7 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
         charts,
         fleet,
         active_anomalies,
+        anomalies_by_kind,
     }
 }
 

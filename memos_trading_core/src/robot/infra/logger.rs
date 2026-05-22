@@ -1,12 +1,20 @@
 // robot/logger.rs - Trade logging sistemi (dosya + JSON)
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use chrono::Utc;
 use serde::{Serialize, Deserialize};
 use crate::core::types::{Signal, Trade};
 use crate::MemosTradingError;
+
+/// SIGNAL throttle: aynı (symbol, signal) için bu süre içinde gelen tekrar
+/// log'ları yutulur. Varsayılan 60 sn, env: MEMOS_SIGNAL_THROTTLE_SECS.
+/// 0 verilirse throttle kapalı (her sinyal yazılır).
+const DEFAULT_SIGNAL_THROTTLE_SECS: u64 = 60;
 
 /// Trade eventi JSON formatı
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,12 +153,31 @@ impl TradeEvent {
 pub struct TradingLogger {
     log_file: String,
     json_file: String,
+    /// SIGNAL idempotency cache: (symbol, signal_label) → son yazılan an.
+    /// Aynı kombinasyon throttle_window içinde tekrar gelirse atılır.
+    last_signal: Mutex<HashMap<(String, String), Instant>>,
+    /// Throttle penceresi; 0 ise throttle kapalı.
+    signal_throttle: Duration,
 }
 
 impl TradingLogger {
-    /// Yeni logger oluştur
+    /// Yeni logger oluştur. SIGNAL throttle penceresi env'den okunur
+    /// (`MEMOS_SIGNAL_THROTTLE_SECS`, default 60 sn).
     pub fn new(log_file: &str, json_file: &str) -> Result<Self, MemosTradingError> {
-        // Dizinleri oluştur
+        let throttle_secs = std::env::var("MEMOS_SIGNAL_THROTTLE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_SIGNAL_THROTTLE_SECS);
+        Self::new_with_throttle(log_file, json_file, throttle_secs)
+    }
+
+    /// Throttle saniyesini doğrudan belirleyen varyant (test ve özel durumlar).
+    /// `throttle_secs = 0` → throttle kapalı, her SIGNAL yazılır.
+    pub fn new_with_throttle(
+        log_file: &str,
+        json_file: &str,
+        throttle_secs: u64,
+    ) -> Result<Self, MemosTradingError> {
         if let Some(parent) = Path::new(log_file).parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| MemosTradingError::Io(e))?;
@@ -163,11 +190,48 @@ impl TradingLogger {
         Ok(Self {
             log_file: log_file.to_string(),
             json_file: json_file.to_string(),
+            last_signal: Mutex::new(HashMap::new()),
+            signal_throttle: Duration::from_secs(throttle_secs),
         })
+    }
+
+    /// Aynı (event_type, symbol, signal) throttle penceresi içinde tekrar
+    /// gelirse `true` döner. İlk geçişte cache güncellenir ve `false` döner.
+    /// SIGNAL ve RISK_BLOCK için kullanılır; TRADE_OPEN/TRADE_CLOSE/ERROR
+    /// throttle dışıdır (zaten seyrek olaylardır).
+    fn should_throttle(&self, event_type: &str, symbol: &str, signal_label: &str) -> bool {
+        if self.signal_throttle.is_zero() {
+            return false;
+        }
+        let key = (
+            format!("{}|{}", event_type, symbol),
+            signal_label.to_string(),
+        );
+        let now = Instant::now();
+        let mut map = match self.last_signal.lock() {
+            Ok(g) => g,
+            Err(_) => return false, // poisoned ise log'a izin ver
+        };
+        if let Some(prev) = map.get(&key) {
+            if now.duration_since(*prev) < self.signal_throttle {
+                return true;
+            }
+        }
+        map.insert(key, now);
+        false
     }
 
     /// Trade eventini logla (hem text hem JSON)
     pub fn log_event(&self, event: &TradeEvent) -> Result<(), MemosTradingError> {
+        // Throttle: SIGNAL + RISK_BLOCK aynı koşullarda her cycle'da tekrarlanabilir,
+        // 60sn pencerede tekilleştir → 12 MB trades.jsonl spam'i çözülür.
+        let throttled = matches!(event.event_type.as_str(), "SIGNAL" | "RISK_BLOCK");
+        if throttled
+            && self.should_throttle(&event.event_type, &event.symbol, &event.signal)
+        {
+            return Ok(());
+        }
+
         // 1. Human-readable log dosyasına yaz
         self.write_text_log(event)?;
 
@@ -331,5 +395,133 @@ mod tests {
         assert_eq!(ev.signal, "SHORT");
         assert_eq!(ev.pnl, -25.0);
         assert!(ev.message.contains("STOP_LOSS"));
+    }
+
+    fn count_lines(path: &str) -> usize {
+        std::fs::read_to_string(path)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn test_signal_throttle_dedup_same_symbol_signal() {
+        let dir = std::env::temp_dir().join(format!(
+            "memos_logger_throttle_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let log = dir.join("a.log");
+        let json = dir.join("a.jsonl");
+        let log_s = log.to_string_lossy().to_string();
+        let json_s = json.to_string_lossy().to_string();
+        let logger = TradingLogger::new_with_throttle(&log_s, &json_s, 60).unwrap();
+        logger.clear_logs().ok();
+
+        let ev = TradeEvent::signal("ADGYO", Signal::Buy, 44.86);
+        // Üst üste üç çağrı (gerçek cycle senaryosu) — sadece ilki yazılmalı.
+        logger.log_event(&ev).unwrap();
+        logger.log_event(&ev).unwrap();
+        logger.log_event(&ev).unwrap();
+
+        assert_eq!(count_lines(&json_s), 1, "throttle aynı sinyali yutmadı");
+        logger.clear_logs().ok();
+    }
+
+    #[test]
+    fn test_signal_throttle_distinct_keys_pass() {
+        let dir = std::env::temp_dir().join(format!(
+            "memos_logger_distinct_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let log = dir.join("b.log");
+        let json = dir.join("b.jsonl");
+        let log_s = log.to_string_lossy().to_string();
+        let json_s = json.to_string_lossy().to_string();
+        let logger = TradingLogger::new_with_throttle(&log_s, &json_s, 60).unwrap();
+        logger.clear_logs().ok();
+
+        logger.log_event(&TradeEvent::signal("ADGYO", Signal::Buy, 44.86)).unwrap();
+        logger.log_event(&TradeEvent::signal("ADGYO", Signal::Sell, 44.86)).unwrap(); // farklı sinyal
+        logger.log_event(&TradeEvent::signal("THYAO", Signal::Buy, 100.0)).unwrap();   // farklı sembol
+
+        assert_eq!(count_lines(&json_s), 3, "farklı anahtarlar yutuldu");
+        logger.clear_logs().ok();
+    }
+
+    #[test]
+    fn test_signal_throttle_zero_disables() {
+        let dir = std::env::temp_dir().join(format!(
+            "memos_logger_zero_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let log = dir.join("c.log");
+        let json = dir.join("c.jsonl");
+        let log_s = log.to_string_lossy().to_string();
+        let json_s = json.to_string_lossy().to_string();
+        let logger = TradingLogger::new_with_throttle(&log_s, &json_s, 0).unwrap();
+        logger.clear_logs().ok();
+
+        let ev = TradeEvent::signal("ADGYO", Signal::Buy, 44.86);
+        for _ in 0..5 {
+            logger.log_event(&ev).unwrap();
+        }
+        assert_eq!(count_lines(&json_s), 5, "throttle=0 olduğunda tümü yazılmalı");
+        logger.clear_logs().ok();
+    }
+
+    #[test]
+    fn test_throttle_only_signal_and_risk_block() {
+        let dir = std::env::temp_dir().join(format!(
+            "memos_logger_other_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let log = dir.join("d.log");
+        let json = dir.join("d.jsonl");
+        let log_s = log.to_string_lossy().to_string();
+        let json_s = json.to_string_lossy().to_string();
+        let logger = TradingLogger::new_with_throttle(&log_s, &json_s, 60).unwrap();
+        logger.clear_logs().ok();
+
+        // SIGNAL ve RISK_BLOCK throttle hedefi → ikinci çağrı yutulur.
+        logger.log_event(&TradeEvent::signal("BTC", Signal::Buy, 50_000.0)).unwrap();
+        logger.log_event(&TradeEvent::signal("BTC", Signal::Buy, 50_000.0)).unwrap();    // yutulur
+        logger.log_event(&TradeEvent::risk_block("test", "BTC")).unwrap();
+        logger.log_event(&TradeEvent::risk_block("test", "BTC")).unwrap();               // yutulur
+        // TRADE_OPEN / TRADE_CLOSE / ERROR throttle dışı.
+        logger.log_event(&TradeEvent::trade_open("BTC", "S", true, 50_000.0, 0.01, 10_000.0)).unwrap();
+        logger.log_event(&TradeEvent::trade_close("BTC", "S", true, 51_000.0, 0.01, 10.0, 10_010.0, "TP")).unwrap();
+        logger.log_event(&TradeEvent::error("e")).unwrap();
+
+        // 1 SIGNAL + 1 RISK_BLOCK + 1 OPEN + 1 CLOSE + 1 ERROR = 5
+        assert_eq!(count_lines(&json_s), 5);
+        logger.clear_logs().ok();
+    }
+
+    #[test]
+    fn test_risk_block_throttle_dedup() {
+        let dir = std::env::temp_dir().join(format!(
+            "memos_logger_rb_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let log = dir.join("e.log");
+        let json = dir.join("e.jsonl");
+        let log_s = log.to_string_lossy().to_string();
+        let json_s = json.to_string_lossy().to_string();
+        let logger = TradingLogger::new_with_throttle(&log_s, &json_s, 60).unwrap();
+        logger.clear_logs().ok();
+
+        // Aynı sembolde art arda 3 RISK_BLOCK → sadece 1 yazılmalı.
+        for _ in 0..3 {
+            logger.log_event(&TradeEvent::risk_block("guardrails", "BTCUSDT")).unwrap();
+        }
+        // Farklı sembol throttle'dan bağımsız geçer.
+        logger.log_event(&TradeEvent::risk_block("guardrails", "ETHUSDT")).unwrap();
+
+        assert_eq!(count_lines(&json_s), 2);
+        logger.clear_logs().ok();
     }
 }

@@ -41,6 +41,10 @@ impl RiskManager {
     ///
     /// Tüm filtreleri sırasıyla çalıştırır; ilk Deny döndüren filtre zinciri keser.
     /// Boş zincir => Allow.
+    ///
+    /// Görünürlük: bir filtre veto ederse Deny.reasons listesinin ilk elemanına
+    /// `[filter_name]` prefix'i takılır. Sinyal→trade gap'ini operatörün
+    /// trades.jsonl + robotic_trading.log üzerinden tek bakışta görmesi için.
     pub fn authorize(
         &self,
         signal: &Signal,
@@ -57,10 +61,36 @@ impl RiskManager {
         for filter in &self.filters {
             match filter.evaluate(&ctx) {
                 RiskDecision::Allow => continue,
-                decision @ RiskDecision::Deny { .. } => return decision,
+                RiskDecision::Deny { reasons, enter_safe_mode, halt } => {
+                    let tagged = Self::tag_reasons(filter.name(), reasons);
+                    return RiskDecision::Deny {
+                        reasons: tagged,
+                        enter_safe_mode,
+                        halt,
+                    };
+                }
             }
         }
         RiskDecision::Allow
+    }
+
+    /// Deny gerekçelerine veto eden filtrenin adını prefix olarak ekler.
+    /// `[risk_gate] Kritik Max DD aşıldı: 11.2%` gibi.
+    fn tag_reasons(filter_name: &str, reasons: Vec<String>) -> Vec<String> {
+        if reasons.is_empty() {
+            return vec![format!("[{}] (gerekçe yok)", filter_name)];
+        }
+        reasons
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| {
+                if i == 0 {
+                    format!("[{}] {}", filter_name, r)
+                } else {
+                    r
+                }
+            })
+            .collect()
     }
 }
 
@@ -89,5 +119,36 @@ mod tests {
         m.push_filter(Box::new(KellyEdgeFilter::default()));
         assert_eq!(m.filters.len(), 1);
         assert_eq!(m.filters[0].name(), "kelly_edge");
+    }
+
+    #[test]
+    fn tag_reasons_prefixes_only_first_entry() {
+        let reasons = vec![
+            "Kritik Max DD aşıldı: 11.2%".to_string(),
+            "Günlük kayıp sınırı ihlal edildi: 3.5%".to_string(),
+        ];
+        let out = RiskManager::tag_reasons("risk_gate", reasons);
+        assert_eq!(out[0], "[risk_gate] Kritik Max DD aşıldı: 11.2%");
+        assert_eq!(out[1], "Günlük kayıp sınırı ihlal edildi: 3.5%");
+    }
+
+    #[test]
+    fn tag_reasons_handles_empty_list() {
+        let out = RiskManager::tag_reasons("kelly_edge", vec![]);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].starts_with("[kelly_edge]"));
+    }
+
+    #[test]
+    fn tag_reasons_preserves_extra_lines_unprefixed() {
+        let reasons = vec![
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ];
+        let out = RiskManager::tag_reasons("value_at_risk", reasons);
+        assert!(out[0].starts_with("[value_at_risk] first"));
+        assert_eq!(out[1], "second");
+        assert_eq!(out[2], "third");
     }
 }

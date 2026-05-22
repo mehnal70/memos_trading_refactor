@@ -455,6 +455,11 @@ pub struct MissionControl {
     pub scalp_stats: TradeTypeStats,
     pub swing_stats: TradeTypeStats,
     pub active_anomalies: usize,
+    /// Anomalilerin tip-başı dağılımı (DataStall/ApiError/Drift/RiskBreach/Custom).
+    /// Boot anında 50 anomaly varsa hangisinin baskın olduğunu görmek için.
+    /// `serde(default)` → eski snapshot'lar geriye uyumlu.
+    #[serde(default)]
+    pub anomalies_by_kind: std::collections::BTreeMap<String, usize>,
 }
 
 // =============================================================================

@@ -155,7 +155,8 @@ fn push_filter_appends_custom_plugin() {
     let sig = Signal::Buy;
     match mgr.authorize(&sig, &snap, 0.80, 200.0) {
         RiskDecision::Deny { reasons, .. } => {
-            assert_eq!(reasons, vec!["test-plugin".to_string()]);
+            // authorize() veto eden filtre adını ilk satıra prefix olarak ekler.
+            assert_eq!(reasons, vec!["[always_deny] test-plugin".to_string()]);
         }
         other => panic!("Deny bekleniyordu: {:?}", other),
     }

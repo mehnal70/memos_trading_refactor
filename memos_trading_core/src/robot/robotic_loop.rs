@@ -230,7 +230,10 @@ impl AppState {
             ml_confidence: 0.0,
             hyperopt_score: 0.0,
             best_params: HashMap::new(),
-            live_strategy: Arc::new(RwLock::new("Default".to_string())),
+            // "AUTO" → master.rs:process_symbol_cycle bu sentinel'i rejime göre
+            // dinamik strateji seçimine çevirir ("Default" da kabul ediliyor; ama
+            // semantik netlik için yeni boot'larda AUTO).
+            live_strategy: Arc::new(RwLock::new("AUTO".to_string())),
             thresholds: AdaptiveThresholds { drift_baseline: 0.15, volatility_regime: 1.0 },
             drift_history: VecDeque::with_capacity(100),
             intelligence_hub: Arc::new(RwLock::new(intelligence_hub)),

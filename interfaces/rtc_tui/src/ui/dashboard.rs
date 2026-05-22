@@ -97,6 +97,7 @@ mod tests {
             swing_stats: TradeTypeStats { label: "W".into(), win_rate: 0.0, profit_factor: 0.0,
                 avg_win: 0.0, avg_loss: 0.0, current_streak: 0 },
             active_anomalies: 0,
+            anomalies_by_kind: std::collections::BTreeMap::new(),
         }
     }
 

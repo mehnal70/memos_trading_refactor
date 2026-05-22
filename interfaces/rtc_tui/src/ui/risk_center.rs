@@ -128,6 +128,20 @@ fn draw_active_anomalies(f: &mut ratatui::Frame, area: Rect, snap: &MissionContr
         ])
     }).collect();
 
+    // Tip-başı dağılım özetini başlığa ekle: "DataStall:32 ApiError:15 ..."
+    // Boot anında 50 anomaly olduğunda hangi tipin baskın olduğunu tek bakışta
+    // görmek için.
+    let kind_summary = format_kind_summary(&snap.anomalies_by_kind);
+    let title = if kind_summary.is_empty() {
+        format!(" 🛡️ Aktif Anomaliler ({}) ", snap.anomalies.len())
+    } else {
+        format!(
+            " 🛡️ Aktif Anomaliler ({}) · {} ",
+            snap.anomalies.len(),
+            kind_summary,
+        )
+    };
+
     let table = Table::new(rows, [
         Constraint::Length(2),
         Constraint::Length(10),
@@ -137,10 +151,24 @@ fn draw_active_anomalies(f: &mut ratatui::Frame, area: Rect, snap: &MissionContr
     .header(Row::new(vec!["", "Severity", "Kind", "Mesaj"])
         .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
     .block(Block::default()
-        .title(format!(" 🛡️ Aktif Anomaliler ({}) ", snap.anomalies.len()))
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red)));
     f.render_widget(table, area);
+}
+
+/// Anomaly kind sayımlarını başlık satırı için "Kind:N · Kind:N" formatına çevirir.
+/// Çoktan aza göre sıralar.
+fn format_kind_summary(by_kind: &std::collections::BTreeMap<String, usize>) -> String {
+    if by_kind.is_empty() {
+        return String::new();
+    }
+    let mut pairs: Vec<(&String, &usize)> = by_kind.iter().collect();
+    pairs.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    pairs.iter()
+        .map(|(k, v)| format!("{}:{}", k, v))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn draw_repair_log(f: &mut ratatui::Frame, area: Rect, snap: &MissionControl) {
@@ -264,6 +292,11 @@ mod tests {
             swing_stats: TradeTypeStats { label: "SWING".into(), win_rate: 0.0, profit_factor: 0.0,
                 avg_win: 0.0, avg_loss: 0.0, current_streak: 0 },
             active_anomalies: 1,
+            anomalies_by_kind: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("DataStall".to_string(), 1);
+                m
+            },
         }
     }
 
@@ -313,6 +346,63 @@ mod tests {
             "risk gate paneli başlığı yok\n{}", rendered);
         assert!(rendered.contains("AÇILIYOR") || rendered.contains("VETO"),
             "risk gate karar log'u render edilmemiş\n{}", rendered);
+    }
+
+    #[test]
+    fn anomaly_kind_summary_appears_in_title_when_many_kinds() {
+        let backend = TestBackend::new(160, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut snap = make_snap_with_data();
+        // Boot anomaly senaryosu: birden çok tip aynı snapshot içinde.
+        snap.anomalies.clear();
+        for _ in 0..32 {
+            snap.anomalies.push(AnomalyModel {
+                severity: "Warning".into(), kind: "DataStall".into(),
+                message: "stall".into(), fix_hint: String::new(), auto_fixed: false,
+            });
+        }
+        for _ in 0..12 {
+            snap.anomalies.push(AnomalyModel {
+                severity: "Warning".into(), kind: "ApiError".into(),
+                message: "err".into(), fix_hint: String::new(), auto_fixed: false,
+            });
+        }
+        snap.active_anomalies = snap.anomalies.len();
+        snap.anomalies_by_kind = {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("DataStall".into(), 32);
+            m.insert("ApiError".into(), 12);
+            m
+        };
+
+        terminal.draw(|f| draw(f, f.size(), &snap)).unwrap();
+        let rendered = buffer_to_string(&terminal);
+        // Başlıkta tip-başı dağılım görünmeli (DataStall çoğunlukta → önce).
+        assert!(
+            rendered.contains("DataStall:32"),
+            "DataStall:32 başlık özetinde yok\n{}", rendered,
+        );
+        assert!(
+            rendered.contains("ApiError:12"),
+            "ApiError:12 başlık özetinde yok\n{}", rendered,
+        );
+    }
+
+    #[test]
+    fn format_kind_summary_sorts_descending_by_count() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("ApiError".into(), 5);
+        m.insert("DataStall".into(), 32);
+        m.insert("Drift".into(), 1);
+        let out = format_kind_summary(&m);
+        // En çok olan başta: DataStall:32 → ApiError:5 → Drift:1
+        assert_eq!(out, "DataStall:32 · ApiError:5 · Drift:1");
+    }
+
+    #[test]
+    fn format_kind_summary_empty_returns_blank() {
+        let m: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        assert_eq!(format_kind_summary(&m), "");
     }
 
     #[test]
