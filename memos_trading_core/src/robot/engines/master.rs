@@ -1537,15 +1537,27 @@ impl Engine {
                 }
             }
             let mut candidates = Vec::new();
+            // BIST exclude — recovery filter ile aynı politika. Orchestrator
+            // veya pinned semboller üzerinden BIST sembolleri de gelirse cycle
+            // başına eklemeyelim → DataIngest/PriceFetch Failed → anomaly birikimi
+            // zincirinin asıl kaynağı buydu. ALLOW_BIST=1 ile opt-out.
+            let allow_bist_cycle = std::env::var("ALLOW_BIST")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
             if let Ok(orch) = st.fleet.symbol_orchestrator.read() {
                 for worker in orch.get_worker_status() {
+                    if !allow_bist_cycle && Self::looks_like_bist_symbol(&worker.symbol) {
+                        continue;
+                    }
                     candidates.push(worker.symbol.clone());
                 }
             }
             // Yetim pozisyonları da işle: orchestrator worker'ı yok ama açık pozisyon
             // var → SL/TP/Trailing denetimi en azından buradan akar, current_price güncel kalır.
+            // BIST yetim pozisyonu olamaz (recovery filter zaten engelledi), ama defensive
+            // olarak yine aynı kontrol.
             if let Ok(positions) = st.finance.live_positions.read() {
                 for sym in positions.keys() {
+                    if !allow_bist_cycle && Self::looks_like_bist_symbol(sym) { continue; }
                     if !candidates.contains(sym) { candidates.push(sym.clone()); }
                 }
             }
@@ -3538,15 +3550,25 @@ impl Engine {
             Ok(st) => (st.config.db_path.clone(), st.config.interval.clone()),
             Err(_) => return,
         };
+        // BIST exclude: default ON. BIST canlı feed pratik olarak yok → cycle'a
+        // BIST koymak DataIngest/PriceFetch Failed → anomaly birikimi.
+        // ALLOW_BIST=1 ile geri açılır (geçmiş data backtest senaryoları için).
+        let allow_bist = std::env::var("ALLOW_BIST")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
         match crate::persistence::reader::recover_open_positions(&db_path) {
             Ok(positions) if !positions.is_empty() => {
-                // Filtre: sembol+interval için en az 1 candle yoksa "stale" sayılır
-                // → live_positions'a yüklenmez. Aksi halde her cycle DataIngest
-                // Failed → anomaly birikimi → recovery/ML loop.
-                // Stale pozisyonlar repair_log'a düşürülür; operatör görür.
+                // İki kademeli filtre:
+                //   1) BIST heuristic (allow_bist=false ise BIST'leri atla).
+                //   2) Candles existence — sembol+interval için en az 1 candle.
+                // Atlananlar repair_log'a düşürülür; operatör görür.
                 let mut loaded = Vec::new();
-                let mut stale  = Vec::new();
+                let mut stale  = Vec::new();   // candles yok
+                let mut bist   = Vec::new();   // BIST exclude
                 for pos in positions {
+                    if !allow_bist && Self::looks_like_bist_symbol(&pos.symbol) {
+                        bist.push(pos);
+                        continue;
+                    }
                     let has_candles = crate::persistence::reader::read_candles(
                         &db_path, &pos.symbol, &interval, 1,
                     ).map(|v| !v.is_empty()).unwrap_or(false);
@@ -3555,7 +3577,9 @@ impl Engine {
                 }
                 let n_loaded = loaded.len();
                 let n_stale  = stale.len();
+                let n_bist   = bist.len();
                 let stale_syms: Vec<String> = stale.iter().map(|p| p.symbol.clone()).collect();
+                let bist_syms:  Vec<String> = bist.iter().map(|p| p.symbol.clone()).collect();
 
                 if let Ok(st) = state.lock() {
                     if let Ok(mut map) = st.finance.live_positions.write() {
@@ -3563,19 +3587,32 @@ impl Engine {
                     }
                 }
                 log::info!(
-                    "♻️ [RECOVERY] {} pozisyon yüklendi, {} stale (candles {} interval'inde yok): {}",
-                    n_loaded, n_stale, interval, stale_syms.join(","),
+                    "♻️ [RECOVERY] {} yüklendi · {} stale · {} BIST-excluded ({} interval). stale={} bist={}",
+                    n_loaded, n_stale, n_bist, interval,
+                    stale_syms.join(","), bist_syms.join(","),
                 );
                 if let Ok(mut st) = state.lock() {
-                    if n_stale > 0 {
-                        st.push_log(format!(
-                            "♻️ [RECOVERY] {} pozisyon yüklendi · {} stale ({} interval'inde candles yok): {}",
-                            n_loaded, n_stale, interval, stale_syms.join(","),
-                        ));
+                    if n_stale > 0 || n_bist > 0 {
+                        let mut msg = format!(
+                            "♻️ [RECOVERY] {} yüklendi", n_loaded,
+                        );
+                        if n_stale > 0 {
+                            msg.push_str(&format!(
+                                " · {} stale ({} interval'inde candles yok): {}",
+                                n_stale, interval, stale_syms.join(","),
+                            ));
+                        }
+                        if n_bist > 0 {
+                            msg.push_str(&format!(
+                                " · {} BIST-excluded (canlı feed yok; ALLOW_BIST=1 ile aç): {}",
+                                n_bist, bist_syms.join(","),
+                            ));
+                        }
+                        st.push_log(msg.clone());
                         st.guardian.repair_log.push_back(format!(
-                            "[{}] recovery: {} stale pos atlandı (candles {} yok): {}",
+                            "[{}] recovery: yüklendi={} stale={} bist={}",
                             chrono::Local::now().format("%H:%M:%S"),
-                            n_stale, interval, stale_syms.join(","),
+                            n_loaded, n_stale, n_bist,
                         ));
                         while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
                     } else {
@@ -3601,6 +3638,28 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Heuristik BIST hisse kodu tespiti.
+    ///
+    /// Kural:
+    ///   - 3-6 karakter uzunluğunda
+    ///   - Sadece A-Z + 0-9 (BIST: AKBNK, ALARK, A1CAP, ADGYO ...)
+    ///   - Yaygın crypto quote suffix'i YOK (USDT/USDC/BUSD/FDUSD/TUSD/DAI)
+    ///
+    /// Yanılgı payı: 5-6 char crypto pair'leri (ETHBTC, BNBBTC vb.) BIST sayılabilir.
+    /// Bu yüzden BIST exclude default ON ama opt-out env (ALLOW_BIST=1) var.
+    /// Operatör kripto-only çalışıyorsa default ON güvenli (BIST verisi pratikte yok).
+    pub fn looks_like_bist_symbol(sym: &str) -> bool {
+        if sym.len() < 3 || sym.len() > 6 { return false; }
+        if !sym.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) {
+            return false;
+        }
+        const CRYPTO_QUOTES: &[&str] = &["USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI"];
+        for q in CRYPTO_QUOTES {
+            if sym.ends_with(q) { return false; }
+        }
+        true
     }
 
     /// Mevcut `live_positions` haritasını DB'ye snapshot'lar. Pozisyon açılış

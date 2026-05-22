@@ -128,6 +128,34 @@ fn recovery_stale_filter_matches_candles_existence() {
 }
 
 #[test]
+fn bist_heuristic_separates_bist_from_crypto_pairs() {
+    // BIST tarafı — 3-6 char, all caps, crypto quote yok.
+    assert!(Engine::looks_like_bist_symbol("AKBNK"));
+    assert!(Engine::looks_like_bist_symbol("ALARK"));
+    assert!(Engine::looks_like_bist_symbol("AKFGY"));
+    assert!(Engine::looks_like_bist_symbol("A1CAP"));   // rakam-içeren
+    assert!(Engine::looks_like_bist_symbol("ADGYO"));
+    assert!(Engine::looks_like_bist_symbol("THYAO"));   // 5 char
+    assert!(Engine::looks_like_bist_symbol("GARAN"));
+
+    // Crypto USDT pair'leri — BIST sayılmamalı.
+    assert!(!Engine::looks_like_bist_symbol("BTCUSDT"));
+    assert!(!Engine::looks_like_bist_symbol("ETHUSDT"));
+    assert!(!Engine::looks_like_bist_symbol("ADAUSDT"));
+    assert!(!Engine::looks_like_bist_symbol("BNBUSDT"));
+
+    // Diğer crypto quote'lar.
+    assert!(!Engine::looks_like_bist_symbol("BTCUSDC"));
+    assert!(!Engine::looks_like_bist_symbol("BTCFDUSD"));
+
+    // Liste dışı edge case'ler.
+    assert!(!Engine::looks_like_bist_symbol("BT"));     // çok kısa
+    assert!(!Engine::looks_like_bist_symbol("VERYLONGSYM"));  // çok uzun
+    assert!(!Engine::looks_like_bist_symbol("btc"));    // küçük harf
+    assert!(!Engine::looks_like_bist_symbol("BTC-USD")); // tire içerir
+}
+
+#[test]
 fn recover_returns_empty_when_table_missing() {
     let db = format!("/tmp/memos_recovery_empty_{}.db", std::process::id());
     let _ = std::fs::remove_file(&db);
