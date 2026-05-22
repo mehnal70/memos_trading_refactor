@@ -59,6 +59,13 @@ impl PipelineStatus {
 
     pub fn push_anomaly(&mut self, severity: AnomalySeverity, kind: AnomalyKind, message: impl Into<String>) {
         let msg = message.into();
+        // Dedupe: aynı severity+kind+message zaten kuyrukta varsa tekrar ekleme.
+        // Engine her ~500ms aynı RiskGate Skipped (Kelly edge negatif) anomaly'sini
+        // basıyordu → 50 cap'i doluyor, gerçek olaylar (örn. DataStall) eski anomaly'yi
+        // attığı için kayboluyordu. Dedupe sonrası queue gerçek olay çeşitliliğini korur.
+        if self.anomalies.iter().any(|a| a.severity == severity && a.kind == kind && a.message == msg) {
+            return;
+        }
         // Stderr'a düşür ki headless modda root cause analizi için görünür olsun;
         // push_log yalnız TUI panel buffer'ına gider, dosya log'una yansımaz.
         log::warn!("anomaly[{:?}/{:?}] {}", severity, kind, msg);
