@@ -3473,16 +3473,27 @@ impl Engine {
         log::info!("🌐 E2: Data pipeline download başlatıldı...");
 
         // 1) Çalışma listesi — kilit kısa
+        // BIST exclude: hydrate/price_poll/execute_trade_cycle ile aynı politika.
+        // Burada filtre yoktu → her 15dk scheduler tetiklendiğinde BIST sembolleri
+        // (orchestrator veya pinned'den) Binance'a gönderiliyor → "Veri Format
+        // Hatası" log'u kirletiyordu. ALLOW_BIST=1 ile opt-out.
         let (symbols, interval, db_path, limit) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
-            let mut syms: Vec<String> = vec![st.config.symbol.clone()];
+            let allow_bist = std::env::var("ALLOW_BIST")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+            let bist_ok = |s: &str| allow_bist || !Self::looks_like_bist_symbol(s);
+
+            let mut syms: Vec<String> = vec![];
+            if bist_ok(&st.config.symbol) { syms.push(st.config.symbol.clone()); }
             // SymbolOrchestrator + pinned
             if let Ok(orch) = st.fleet.symbol_orchestrator.read() {
                 for w in orch.get_worker_status() {
+                    if !bist_ok(&w.symbol) { continue; }
                     if !syms.contains(&w.symbol) { syms.push(w.symbol); }
                 }
             }
             for s in &st.config.pinned_symbols {
+                if !bist_ok(s) { continue; }
                 if !syms.contains(s) { syms.push(s.clone()); }
             }
             syms.retain(|s| !s.is_empty());
