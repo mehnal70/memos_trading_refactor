@@ -919,17 +919,29 @@ impl Engine {
                 if stop { break; }
 
                 // 1) Aktif sembolleri topla.
+                // BIST exclude — hydrate/price_poll/perform_download/execute_trade_cycle
+                // ile aynı politika. Eski BIST mumları DB'de duruyor; filtre yokken
+                // SR zone'lar hesaplanıp Market Gözetimi'nde fiyatsız BIST'ler gözükür.
                 let (db_path, interval, symbols) = {
                     let st = match state.lock() { Ok(s) => s, Err(_) => break };
+                    let allow_bist = std::env::var("ALLOW_BIST")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+                    let bist_ok = |s: &str| allow_bist || !Self::looks_like_bist_symbol(s);
+
                     let mut symbols: Vec<String> = vec![];
-                    if !st.config.symbol.is_empty() && !symbols.contains(&st.config.symbol) {
+                    if bist_ok(&st.config.symbol)
+                        && !st.config.symbol.is_empty()
+                        && !symbols.contains(&st.config.symbol)
+                    {
                         symbols.push(st.config.symbol.clone());
                     }
                     for s in &st.config.pinned_symbols {
+                        if !bist_ok(s) { continue; }
                         if !symbols.contains(s) { symbols.push(s.clone()); }
                     }
                     if let Ok(orch) = st.fleet.symbol_orchestrator.read() {
                         for w in orch.get_worker_status() {
+                            if !bist_ok(&w.symbol) { continue; }
                             if !symbols.contains(&w.symbol) { symbols.push(w.symbol); }
                         }
                     }
@@ -1856,11 +1868,18 @@ impl Engine {
                             else if enter_safe_mode { "SAFE-MODE" }
                             else { "DENY" };
                         let block_reason = format!("[{}] {}", mode, reasons.join(" · "));
-                        if let Ok(mut st) = state.lock() {
-                            st.push_log(format!(
-                                "🛡️ {} {} edge={:.2} ✓ ama RiskManager [{}]: {}",
-                                symbol, signal_label, edge, mode, reasons.join(" · "),
-                            ));
+                        // 60sn throttle per sembol: aynı sembolde Kelly edge negatif sebebiyle
+                        // her cycle (500ms) blok log'u oluşuyordu → olay günlüğü saniyede 6+ satır
+                        // birikti, gerçek olaylar görünmüyordu. HALT ise throttle yok (kritik).
+                        let should_log = halt
+                            || log_throttle_should_emit(symbol, "risk_block_safemode", 60);
+                        if should_log {
+                            if let Ok(mut st) = state.lock() {
+                                st.push_log(format!(
+                                    "🛡️ {} {} edge={:.2} ✓ ama RiskManager [{}]: {}",
+                                    symbol, signal_label, edge, mode, reasons.join(" · "),
+                                ));
+                            }
                         }
                         if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
                             let ev = crate::robot::infra::logger::TradeEvent::risk_block(
@@ -2936,24 +2955,27 @@ impl Engine {
         let armed = last_fired == 0 || now_secs.saturating_sub(last_fired) >= cooldown_secs;
 
         // ML retrain'i tetikle (zaten ml job'u kendi loglarını basacak)
+        // push_log + repair_log SADECE armed iken yazılır — cooldown'da spam yapmaz.
+        // Daha önce her cycle (500ms) "ML retrain tetiklendi" log basıyordu ama cooldown
+        // gerçek tetiği bastırıyordu → mesaj yanıltıcı + olay günlüğü doluyor.
         if armed {
             st.fleet.triggers.get("ml").map(|t| t.store(true, Ordering::Relaxed));
             ANOMALY_ML_LAST_TRIGGER_EPOCH.store(now_secs, Ordering::Relaxed);
+
+            st.push_log(format!(
+                "🚨 Anomali onarımı: {} aktif ({} kritik / {} uyarı), türler: {} ⇒ ML retrain tetiklendi",
+                snap.active_anomalies, critical_n, warning_n,
+                kinds.join(","),
+            ));
+
+            // Repair log: onarım adımının izi
+            let repair_entry = format!(
+                "[{}] auto-fix: ml-retrain dispatched (anomaly_count={})",
+                chrono::Local::now().format("%H:%M:%S"), snap.active_anomalies,
+            );
+            st.guardian.repair_log.push_back(repair_entry);
+            if st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
         }
-
-        st.push_log(format!(
-            "🚨 Anomali onarımı: {} aktif ({} kritik / {} uyarı), türler: {} ⇒ ML retrain tetiklendi",
-            snap.active_anomalies, critical_n, warning_n,
-            kinds.join(","),
-        ));
-
-        // Repair log: onarım adımının izi
-        let repair_entry = format!(
-            "[{}] auto-fix: ml-retrain dispatched (anomaly_count={})",
-            chrono::Local::now().format("%H:%M:%S"), snap.active_anomalies,
-        );
-        st.guardian.repair_log.push_back(repair_entry);
-        if st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
     }
 
     /// 🧠 ML Retrain (Faz 4 - "ml" trigger):

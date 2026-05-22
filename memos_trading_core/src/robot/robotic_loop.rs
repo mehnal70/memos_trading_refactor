@@ -257,9 +257,19 @@ impl AppState {
         }
 
         // 3. Kalıcı hafızadaki (SQLite) en çok kazandıran sembolleri hasat et (Elite Fleet)
-        // Eğer veritabanı yolu üzerinde kayıtlı semboller varsa, onları da otonom listeye ekler
+        // Eğer veritabanı yolu üzerinde kayıtlı semboller varsa, onları da otonom listeye ekler.
+        // BIST exclude: eski runlardan DB'de kalmış BIST sembolleri orchestrator'a worker
+        // olarak girmesin → market gözetimi/SR zones/price_poll hepsinde fiyatsız BIST satırları
+        // birikiyordu. ALLOW_BIST=1 ile geri açılır.
+        let allow_bist = std::env::var("ALLOW_BIST")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
         if let Ok(elite_symbols) = crate::persistence::reader::list_symbols(&config.db_path) {
             for sym in elite_symbols {
+                if !allow_bist
+                    && crate::robot::engines::master::Engine::looks_like_bist_symbol(&sym)
+                {
+                    continue;
+                }
                 // Mükerrer kaydı engellemek için kontrol bariyeri (Double-execution koruması)
                 if !config.pinned_symbols.contains(&sym) {
                     symbol_orchestrator.register(
