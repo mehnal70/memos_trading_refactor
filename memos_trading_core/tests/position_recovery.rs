@@ -128,6 +128,25 @@ fn recovery_stale_filter_matches_candles_existence() {
 }
 
 #[test]
+fn log_throttle_first_emits_then_suppresses_within_cooldown() {
+    use memos_trading_core::robot::engines::master::log_throttle_should_emit;
+    // Unique kind ki diğer testlerle çakışmasın.
+    let kind = "test_throttle_kind_A";
+    let sym  = "TESTSYM";
+    // İlk çağrı → emit.
+    assert!(log_throttle_should_emit(sym, kind, 60));
+    // Cooldown içinde → suppress.
+    assert!(!log_throttle_should_emit(sym, kind, 60));
+    assert!(!log_throttle_should_emit(sym, kind, 60));
+    // Farklı sembol → bağımsız.
+    assert!(log_throttle_should_emit("OTHERSYM", kind, 60));
+    // Cooldown=0 → her zaman emit.
+    let kind_zero = "test_throttle_kind_B";
+    assert!(log_throttle_should_emit(sym, kind_zero, 0));
+    assert!(log_throttle_should_emit(sym, kind_zero, 0));
+}
+
+#[test]
 fn bist_heuristic_separates_bist_from_crypto_pairs() {
     // BIST tarafı — 3-6 char, all caps, crypto quote yok.
     assert!(Engine::looks_like_bist_symbol("AKBNK"));

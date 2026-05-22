@@ -12,6 +12,32 @@ use tokio::time::{sleep, Duration};
 /// ML trigger spam'i kapanır (default 300sn, `ANOMALY_ML_TRIGGER_COOLDOWN_SECS`).
 static ANOMALY_ML_LAST_TRIGGER_EPOCH: AtomicU64 = AtomicU64::new(0);
 
+/// Sembol bazlı log throttle: (symbol, kind) → son emit epoch. Aynı sembol için
+/// "DataIngest empty" log'u her cycle (500ms) tekrarlanmasın diye 300sn pencere
+/// (env `LOG_DATAINGEST_COOLDOWN_SECS`). HashMap büyümesi sınırlı — sembol sayısı
+/// orchestrator'la beraber tipik <100.
+static LOG_THROTTLE_MAP: std::sync::OnceLock<std::sync::Mutex<
+    std::collections::HashMap<(String, &'static str), u64>
+>> = std::sync::OnceLock::new();
+
+pub fn log_throttle_should_emit(symbol: &str, kind: &'static str, cooldown_secs: u64) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let map = LOG_THROTTLE_MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = match map.lock() {
+        Ok(g) => g,
+        Err(_) => return true, // poisoned ise log'a izin ver
+    };
+    let key = (symbol.to_string(), kind);
+    if let Some(last) = guard.get(&key) {
+        if now.saturating_sub(*last) < cooldown_secs {
+            return false;
+        }
+    }
+    guard.insert(key, now);
+    true
+}
+
 // Projedeki gerçek tiplerin ve trait'lerin bağlanması için ön hazırlık (Agnostik Katman)
 pub struct MLModel;
 pub struct Monitor;
@@ -1634,7 +1660,12 @@ impl Engine {
                     // Sembol candle'sız → bir sonraki cycle yine aynı sonuç
                     // verecek. push_anomaly etmeden chain_steps'i Failed işaretle
                     // (TUI Pipeline panelinde görünür, anomaly cap'ini doldurmaz).
-                    log::warn!("DataIngest empty: {} {} (candles tablo'da 1m kayıt yok)", symbol, interval);
+                    // Log throttle: aynı sembol için 300sn pencere (env override).
+                    let cooldown = std::env::var("LOG_DATAINGEST_COOLDOWN_SECS")
+                        .ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+                    if log_throttle_should_emit(symbol, "dataingest_empty", cooldown) {
+                        log::warn!("DataIngest empty: {} {} (candles tablo'da 1m kayıt yok)", symbol, interval);
+                    }
                     if let Ok(st) = state.lock() {
                         if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
                             pipe.mark_stage_completed(
@@ -1646,7 +1677,11 @@ impl Engine {
                     return;
                 }
                 Err(e) => {
-                    log::warn!("DataIngest error: {} {} → {}", symbol, interval, e);
+                    let cooldown = std::env::var("LOG_DATAINGEST_COOLDOWN_SECS")
+                        .ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+                    if log_throttle_should_emit(symbol, "dataingest_error", cooldown) {
+                        log::warn!("DataIngest error: {} {} → {}", symbol, interval, e);
+                    }
                     Self::mark_pipeline_stage(state, PipelineStage::DataIngest, StepStatus::Failed);
                     return;
                 }
