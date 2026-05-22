@@ -90,6 +90,43 @@ async fn hydrate_loads_snapshot_into_live_positions() {
     let _ = std::fs::remove_file(&db);
 }
 
+/// Recovery filter: candles tablosunda sembol+interval için kayıt yoksa
+/// "stale" sayılır, live_positions'a yüklenmez. Aksi halde her cycle
+/// DataIngest Failed → anomaly birikimi olur (BIST recovery senaryosu).
+#[test]
+fn recovery_stale_filter_matches_candles_existence() {
+    use memos_trading_core::persistence::{
+        reader::read_candles,
+        writer::{ensure_candles_table, save_candle},
+    };
+    use memos_trading_core::core::types::Candle;
+    use chrono::Utc;
+
+    let db = format!("/tmp/memos_stale_filter_{}.db", std::process::id());
+    let _ = std::fs::remove_file(&db);
+    {
+        let conn = Connection::open(&db).unwrap();
+        ensure_candles_table(&conn).unwrap();
+        // BTCUSDT 1m → var. AKBNK 1m → yok (stale olmalı).
+        save_candle(&conn, "binance", "spot", &Candle {
+            timestamp: Utc::now(),
+            open: 50000.0, high: 50100.0, low: 49900.0, close: 50050.0,
+            volume: 1.0, symbol: "BTCUSDT".into(), interval: "1m".into(),
+        }).unwrap();
+    }
+
+    // Filter mantığı: read_candles(...).map(|v| !v.is_empty()).unwrap_or(false).
+    let live_btc = read_candles(&db, "BTCUSDT", "1m", 1)
+        .map(|v| !v.is_empty()).unwrap_or(false);
+    let live_akbnk = read_candles(&db, "AKBNK", "1m", 1)
+        .map(|v| !v.is_empty()).unwrap_or(false);
+
+    assert!(live_btc,    "BTCUSDT candles vardı; filter true vermeli");
+    assert!(!live_akbnk, "AKBNK candles yoktu; filter false vermeli (stale)");
+
+    let _ = std::fs::remove_file(&db);
+}
+
 #[test]
 fn recover_returns_empty_when_table_missing() {
     let db = format!("/tmp/memos_recovery_empty_{}.db", std::process::id());

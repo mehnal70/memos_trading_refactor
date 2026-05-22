@@ -3534,26 +3534,55 @@ impl Engine {
     /// - Halihazırda live_positions'ta aynı sembol varsa: DB tarafı ezilir
     ///   (recovery sırasında live state boş olmalı; defensive).
     async fn hydrate_open_positions_from_db(state: &Arc<Mutex<AppState>>) {
-        let db_path = match state.lock() {
-            Ok(st) => st.config.db_path.clone(),
+        let (db_path, interval) = match state.lock() {
+            Ok(st) => (st.config.db_path.clone(), st.config.interval.clone()),
             Err(_) => return,
         };
         match crate::persistence::reader::recover_open_positions(&db_path) {
             Ok(positions) if !positions.is_empty() => {
-                let n = positions.len();
+                // Filtre: sembol+interval için en az 1 candle yoksa "stale" sayılır
+                // → live_positions'a yüklenmez. Aksi halde her cycle DataIngest
+                // Failed → anomaly birikimi → recovery/ML loop.
+                // Stale pozisyonlar repair_log'a düşürülür; operatör görür.
+                let mut loaded = Vec::new();
+                let mut stale  = Vec::new();
+                for pos in positions {
+                    let has_candles = crate::persistence::reader::read_candles(
+                        &db_path, &pos.symbol, &interval, 1,
+                    ).map(|v| !v.is_empty()).unwrap_or(false);
+                    if has_candles { loaded.push(pos); }
+                    else            { stale.push(pos); }
+                }
+                let n_loaded = loaded.len();
+                let n_stale  = stale.len();
+                let stale_syms: Vec<String> = stale.iter().map(|p| p.symbol.clone()).collect();
+
                 if let Ok(st) = state.lock() {
                     if let Ok(mut map) = st.finance.live_positions.write() {
-                        for pos in positions {
-                            map.insert(pos.symbol.clone(), pos);
-                        }
+                        for pos in loaded { map.insert(pos.symbol.clone(), pos); }
                     }
                 }
-                log::info!("♻️ [RECOVERY] {} açık pozisyon DB snapshot'ından geri yüklendi", n);
+                log::info!(
+                    "♻️ [RECOVERY] {} pozisyon yüklendi, {} stale (candles {} interval'inde yok): {}",
+                    n_loaded, n_stale, interval, stale_syms.join(","),
+                );
                 if let Ok(mut st) = state.lock() {
-                    st.push_log(format!(
-                        "♻️ [RECOVERY] {} açık pozisyon DB snapshot'ından geri yüklendi",
-                        n,
-                    ));
+                    if n_stale > 0 {
+                        st.push_log(format!(
+                            "♻️ [RECOVERY] {} pozisyon yüklendi · {} stale ({} interval'inde candles yok): {}",
+                            n_loaded, n_stale, interval, stale_syms.join(","),
+                        ));
+                        st.guardian.repair_log.push_back(format!(
+                            "[{}] recovery: {} stale pos atlandı (candles {} yok): {}",
+                            chrono::Local::now().format("%H:%M:%S"),
+                            n_stale, interval, stale_syms.join(","),
+                        ));
+                        while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
+                    } else {
+                        st.push_log(format!(
+                            "♻️ [RECOVERY] {} açık pozisyon DB snapshot'ından geri yüklendi", n_loaded,
+                        ));
+                    }
                 }
             }
             Ok(_) => {
