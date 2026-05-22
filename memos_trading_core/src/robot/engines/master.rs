@@ -20,6 +20,28 @@ static LOG_THROTTLE_MAP: std::sync::OnceLock<std::sync::Mutex<
     std::collections::HashMap<(String, &'static str), u64>
 >> = std::sync::OnceLock::new();
 
+/// Phase C: TRAILING_STOP kapanışları sonrası 60sn olgunluk gözlem kuyruğu.
+/// close_paper_position TrailingStop branch'ı buraya enqueue eder; periyodik
+/// processor (spawn_trail_feedback_processor) olgunlaşmış kayıtları evalue edip
+/// ParameterStore.record_trailing_outcome'a iletir. Static — AppState alanı eklemiyoruz.
+static PENDING_TRAIL_OBS: std::sync::OnceLock<std::sync::Mutex<
+    std::collections::VecDeque<crate::robot::parameters::PendingTrailObservation>
+>> = std::sync::OnceLock::new();
+
+fn trail_obs_queue() -> &'static std::sync::Mutex<
+    std::collections::VecDeque<crate::robot::parameters::PendingTrailObservation>
+> {
+    PENDING_TRAIL_OBS.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+pub fn enqueue_trail_observation(obs: crate::robot::parameters::PendingTrailObservation) {
+    if let Ok(mut q) = trail_obs_queue().lock() {
+        // Kuyruğu sınırla — pathological case'de 1000+ gözlem birikmesin.
+        while q.len() >= 500 { q.pop_front(); }
+        q.push_back(obs);
+    }
+}
+
 pub fn log_throttle_should_emit(symbol: &str, kind: &'static str, cooldown_secs: u64) -> bool {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -887,6 +909,75 @@ impl Engine {
         // SR_UPDATER_DISABLE=1 ile kapatılabilir, SR_UPDATE_EVERY_SECS (default 30)
         // ile aralık ayarlanır.
         Self::spawn_sr_updater(Arc::clone(&state));
+
+        // ── Task 11: Trail-feedback processor (Phase C otonom katman).
+        //
+        // PENDING_TRAIL_OBS kuyruğundaki TRAILING_STOP gözlemlerini 60sn olgunlaştıktan
+        // sonra evalue eder: exit_price ile mevcut live_price karşılaştırılarak
+        // "early exit" (trail çok sıkıydı) veya "right exit" tespit edilir; sonuç
+        // ParameterStore.record_trailing_outcome'a aktarılır. Pencere dolunca patch
+        // uygulanır (per sym+strateji target_override).
+        Self::spawn_trail_feedback_processor(Arc::clone(&state));
+    }
+
+    /// Phase C processor: olgunlaşmış trailing observation'ları evalue edip
+    /// ParameterStore'a feedback yansıtır. Her 10sn'de bir tarama yapar — ne çok
+    /// agresif (kuyruk hızla büyür mü kontrol), ne de çok az (60sn olgunluk için yeter).
+    fn spawn_trail_feedback_processor(state: Arc<Mutex<AppState>>) {
+        tokio::spawn(async move {
+            const MATURE_SECS: u64 = 60;
+            const POLL_SECS:   u64 = 10;
+            const STALE_SECS:  u64 = 300; // 5dk: live_price yoksa gözlem düşer
+
+            loop {
+                let stop = state.lock().map(|s| s.app_stop_signal.load(Ordering::Relaxed)).unwrap_or(true);
+                if stop { break; }
+
+                // Olgun + stale ayrımı yapıp tek scope'lu queue manipülasyonu.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let mature: Vec<crate::robot::parameters::PendingTrailObservation> = {
+                    if let Ok(mut q) = trail_obs_queue().lock() {
+                        let mut keep = std::collections::VecDeque::with_capacity(q.len());
+                        let mut take = Vec::new();
+                        while let Some(o) = q.pop_front() {
+                            if now.saturating_sub(o.exit_epoch) >= STALE_SECS {
+                                continue; // 5dk üstü → düşür
+                            }
+                            if o.is_mature(MATURE_SECS) { take.push(o); }
+                            else { keep.push_back(o); }
+                        }
+                        *q = keep;
+                        take
+                    } else { Vec::new() }
+                };
+
+                // Evalue + record — tek state.lock altında batch.
+                if !mature.is_empty() {
+                    if let Ok(st) = state.lock() {
+                        let live_price = st.fleet.live_price.read().ok().map(|g| g.clone()).unwrap_or_default();
+                        if let Ok(mut params) = st.brain.parameters.write() {
+                            for obs in &mature {
+                                let cur = match live_price.get(&obs.symbol).copied() {
+                                    Some(v) if v > 0.0 => v,
+                                    _ => continue, // fiyat yok → atla (kuyruktan zaten alındı, drop edilir)
+                                };
+                                let was_early = obs.evaluate(cur);
+                                let changed = params.record_trailing_outcome(&obs.symbol, &obs.strategy, was_early);
+                                if let Some(new_target) = changed {
+                                    log::info!(
+                                        "🎯 Trail feedback patch: {} ({}) → target={:.2}%",
+                                        obs.symbol, obs.strategy, new_target,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                tokio::time::sleep(std::time::Duration::from_secs(POLL_SECS)).await;
+            }
+        });
     }
 
     /// 📐 Periyodik S/R updater — aktif sembol setini gezer, son 200 candle üzerinden
@@ -2800,6 +2891,21 @@ impl Engine {
                 ExitReason::StrategySignal                   => last_candle.close,
             };
             let exit_price = if exit_price > 0.0 { exit_price } else { last_candle.close };
+
+            // Phase C: TRAILING_STOP kapanışı sonrası 60sn olgunluk gözlemi için kuyruğa al.
+            // Periyodik processor (spawn_trail_feedback_processor) bunu evalue eder ve
+            // ParameterStore.record_trailing_outcome ile feedback uygular.
+            if matches!(reason, ExitReason::TrailingStop) {
+                let now_epoch = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                enqueue_trail_observation(crate::robot::parameters::PendingTrailObservation {
+                    symbol:     symbol.to_string(),
+                    strategy:   pos.trade_type.clone(),
+                    is_long:    pos.is_long,
+                    exit_price,
+                    exit_epoch: now_epoch,
+                });
+            }
 
             let pnl_val = crate::core::math::calculate_pnl(pos.entry_price, exit_price, pos.qty, pos.is_long);
             // Çıkış komisyonu (0.1%) — exit notional üzerinden

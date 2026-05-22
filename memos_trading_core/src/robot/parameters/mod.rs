@@ -16,8 +16,10 @@ use serde::{Deserialize, Serialize};
 
 pub mod adaptive;
 pub mod symbol_stats;
+pub mod trail_feedback;
 
 pub use symbol_stats::{SymbolStats, compute_symbol_stats};
+pub use trail_feedback::{TrailFeedback, PendingTrailObservation};
 
 /// Rejim-bazlı parametre patch'i. Yalnızca override edilmek istenen alanlar `Some`
 /// olur; diğerleri base ParameterStore değerlerini korur (sparse override).
@@ -208,11 +210,16 @@ pub struct ParameterStore {
     pub symbol_stats: HashMap<(String, String), SymbolStats>,
     /// Strateji bazlı trail target yüzdesi: SUPERTREND trend takipçisi geniş trail,
     /// BB mean-reversion sıkı trail vb. `resolve_atr_mult` strategy_name ile bunu okur.
-    /// HyperOpt / feedback loop (sonraki faz) bu map'i runtime'da güncelleyebilir.
+    /// HyperOpt / feedback loop bu map'i runtime'da güncelleyebilir.
     /// Env override: TARGET_TRAIL_PCT set ise tüm stratejiler için onurlanır
     /// (operatör manuel müdahale veya A/B test).
     #[serde(default = "default_strategy_trail_targets")]
     pub strategy_trail_targets: HashMap<String, f64>,
+    /// Per-(sembol, strateji) trailing outcome feedback'i (Phase C).
+    /// TRAILING_STOP kapanışları 60sn sonra evalue edilir; early-exit oranı yüksekse
+    /// hedef genişler, düşükse daralır. `target_override` Phase B default'unu by-pass eder.
+    #[serde(default)]
+    pub trail_feedback: HashMap<(String, String), TrailFeedback>,
 }
 
 /// Strateji niyetiyle hizalı default trail target'lar (yüzde, entry'den uzaklık).
@@ -258,6 +265,7 @@ impl Default for ParameterStore {
             last_drift_at_secs: 0,
             symbol_stats: HashMap::new(),
             strategy_trail_targets: default_strategy_trail_targets(),
+            trail_feedback: HashMap::new(),
         }
     }
 }
@@ -363,13 +371,9 @@ impl ParameterStore {
         self.symbol_stats.retain(|_, s| symbol_stats::is_fresh(s, ttl_secs));
     }
 
-    /// Strateji ismine göre trail target yüzdesi.
-    /// Precedence:
-    ///   1) `TARGET_TRAIL_PCT` env set ise — global override (operatör müdahale / A/B test)
-    ///   2) `strategy_trail_targets[strategy_name]` — strateji-bazlı sensible default
-    ///   3) `strategy_trail_targets["default"]` — bilinmeyen strateji için fallback
-    ///   4) Hard-coded 0.7 — store boşsa
-    /// Phase C (sonraki commit) buraya per-(sym, strategy) feedback patch katmanı ekleyecek.
+    /// Strateji ismine göre trail target yüzdesi (Phase B fallback).
+    /// Symbol-bağlamsız çağrılırsa per-symbol feedback patch'i atlanır.
+    /// Yeni call site'lar `target_trail_pct_for_strategy_and_symbol` kullanmalı.
     pub fn target_trail_pct_for_strategy(&self, strategy_name: &str) -> f64 {
         if let Some(v) = parse_env_f64("TARGET_TRAIL_PCT") {
             return v;
@@ -378,6 +382,45 @@ impl ParameterStore {
             return v;
         }
         self.strategy_trail_targets.get("default").copied().unwrap_or(0.7)
+    }
+
+    /// Strateji + sembol bağlamlı trail target — Phase C feedback katmanı dahil.
+    /// Precedence:
+    ///   1) `TARGET_TRAIL_PCT` env — operatör global override
+    ///   2) `trail_feedback[(sym, strategy)].target_override` — runtime feedback patch
+    ///   3) `strategy_trail_targets[strategy_name]` — Phase B sensible default
+    ///   4) `strategy_trail_targets["default"]` — bilinmeyen strateji fallback
+    ///   5) Hard-coded 0.7 — store boşsa
+    pub fn target_trail_pct_for_strategy_and_symbol(&self, symbol: &str, strategy_name: &str) -> f64 {
+        if let Some(v) = parse_env_f64("TARGET_TRAIL_PCT") {
+            return v;
+        }
+        if let Some(fb) = self.trail_feedback.get(&(symbol.to_string(), strategy_name.to_string())) {
+            if let Some(override_pct) = fb.target_override {
+                return override_pct;
+            }
+        }
+        if let Some(&v) = self.strategy_trail_targets.get(strategy_name) {
+            return v;
+        }
+        self.strategy_trail_targets.get("default").copied().unwrap_or(0.7)
+    }
+
+    /// Trailing-stop outcome'ını sayaçlara yaz; pencere dolmuşsa adjustment dener.
+    /// Caller (master.rs observation processor) `was_early` değerini PendingTrailObservation
+    /// üzerinden hesaplar. `base_target` = mevcut strateji default'u (adjustment referansı).
+    /// Döner: target_override değiştiyse Some(new_target) — logging için.
+    pub fn record_trailing_outcome(
+        &mut self,
+        symbol: &str,
+        strategy_name: &str,
+        was_early: bool,
+    ) -> Option<f64> {
+        let base = self.target_trail_pct_for_strategy(strategy_name);
+        let fb = self.trail_feedback
+            .entry((symbol.to_string(), strategy_name.to_string()))
+            .or_insert_with(TrailFeedback::new);
+        fb.record_outcome(was_early, base)
     }
 
     /// ATR-trail multiplier çözümleme — Otonom katman.
@@ -406,7 +449,8 @@ impl ParameterStore {
                 && s.noise_floor_pct > 0.0
                 && symbol_stats::is_fresh(s, TTL_SECS)
             {
-                let target = self.target_trail_pct_for_strategy(strategy_name);
+                // Phase C feedback patch'i de dahil (per-sym, strateji override).
+                let target = self.target_trail_pct_for_strategy_and_symbol(symbol, strategy_name);
                 let mult = target / s.noise_floor_pct;
                 return mult.clamp(MIN_MULT, MAX_MULT);
             }
