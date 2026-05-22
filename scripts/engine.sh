@@ -2,15 +2,17 @@
 # scripts/engine.sh — Memos Trading Engine yönetim CLI'ı
 #
 # Kullanım:
+#   ./scripts/engine.sh              # interaktif menü (varsayılan)
+#   ./scripts/engine.sh menu         # aynı menü
 #   ./scripts/engine.sh start        # arka planda başlat (debug binary)
-#   ./scripts/engine.sh start --release   # release binary ile
+#   ./scripts/engine.sh start --release
 #   ./scripts/engine.sh stop         # graceful kapat (SIGTERM, 5s sonra SIGKILL)
 #   ./scripts/engine.sh status       # process + son heartbeat tick
 #   ./scripts/engine.sh restart      # stop + start
-#   ./scripts/engine.sh tail         # heartbeat'i okunabilir formatta canlı izle
-#   ./scripts/engine.sh trades       # trades.jsonl'ı canlı izle
-#   ./scripts/engine.sh logs [N]     # son N satır engine_stderr.log (default 50)
-#   ./scripts/engine.sh build [--release]   # binary'yi derle
+#   ./scripts/engine.sh tail         # heartbeat'i okunabilir canlı izle
+#   ./scripts/engine.sh trades       # trades.jsonl canlı izle
+#   ./scripts/engine.sh logs [N]     # son N satır (default 50)
+#   ./scripts/engine.sh build [--release]
 #
 # Tek-engine garantisi: start çağrısı önce PID dosyasını kontrol eder; canlı
 # süreç varsa "zaten çalışıyor" diyerek geri çekilir → çift engine = DB çakışması
@@ -229,9 +231,76 @@ cmd_help() {
     sed -n '2,18p' "$0"
 }
 
+# Engine durumunu menü başlığı için tek satıra sıkıştırır.
+status_oneline() {
+    local pid
+    pid=$(read_pid)
+    if pid_alive "$pid"; then
+        local up
+        up=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
+        local last_tick="-"
+        if [ -s "$HEARTBEAT_LOG" ]; then
+            last_tick=$(tail -1 "$HEARTBEAT_LOG" | grep -oE '"tick":[0-9]+' | head -1 | cut -d: -f2)
+        fi
+        echo "🟢 ÇALIŞIYOR · PID $pid · uptime $up · tick $last_tick"
+    else
+        echo "🔴 KAPALI"
+    fi
+}
+
+cmd_menu() {
+    while true; do
+        clear
+        echo "╔══════════════════════════════════════════════════════════╗"
+        echo "║   MEMOS TRADING ENGINE — YÖNETİM PANELİ                  ║"
+        echo "╚══════════════════════════════════════════════════════════╝"
+        echo "Durum:  $(status_oneline)"
+        echo
+        PS3=$'\nSeçim (numara) > '
+        # Bash select kullan; ekstra bağımlılık yok
+        select choice in \
+            "Start (debug)" \
+            "Start (release)" \
+            "Stop" \
+            "Restart" \
+            "Status (detaylı)" \
+            "Heartbeat tail (Ctrl+C ile döner)" \
+            "Trades tail (Ctrl+C ile döner)" \
+            "Logs (son 50 satır)" \
+            "Logs (son 200 satır)" \
+            "Build (debug)" \
+            "Build (release)" \
+            "Yenile (menüyü yeniden çiz)" \
+            "Çıkış"
+        do
+            case "$REPLY" in
+                1)  cmd_start ;;
+                2)  cmd_start --release ;;
+                3)  cmd_stop ;;
+                4)  cmd_restart ;;
+                5)  cmd_status ;;
+                6)  cmd_tail || true ;;
+                7)  cmd_trades || true ;;
+                8)  cmd_logs 50 ;;
+                9)  cmd_logs 200 ;;
+                10) cmd_build ;;
+                11) cmd_build --release ;;
+                12) break ;;  # menüyü yenile
+                13) echo "Görüşmek üzere."; return 0 ;;
+                *)  echo "Geçersiz seçim: $REPLY" ;;
+            esac
+            echo
+            echo "(devam etmek için Enter'a bas)"
+            read -r _
+            break  # iç select'ten çık, while döngüsüyle menüyü yeniden çiz
+        done
+    done
+}
+
 # ─── dispatch ────────────────────────────────────────────────────────────────
 
-case "${1:-help}" in
+case "${1:-menu}" in
+    menu|"") cmd_menu ;;
     start)   shift; cmd_start "$@" ;;
     stop)    cmd_stop ;;
     status)  cmd_status ;;
