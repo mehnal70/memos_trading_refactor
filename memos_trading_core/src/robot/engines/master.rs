@@ -274,9 +274,19 @@ impl Engine {
                     if st.app_stop_signal.load(Ordering::Relaxed) {
                         (vec![], String::new(), true)
                     } else {
-                        let mut syms: Vec<String> = vec![st.config.symbol.clone()];
+                        // BIST exclude — Binance API'ye BIST sembolü göndermek
+                        // "Veri Format Hatası" döndürüyor (ApiError anomaly).
+                        // ALLOW_BIST=1 ile geri açılır.
+                        let allow_bist = std::env::var("ALLOW_BIST")
+                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false);
+                        let bist_ok = |s: &str| allow_bist || !Self::looks_like_bist_symbol(s);
+
+                        let mut syms: Vec<String> = vec![];
+                        if bist_ok(&st.config.symbol) { syms.push(st.config.symbol.clone()); }
                         if let Ok(orch) = st.fleet.symbol_orchestrator.read() {
                             for w in orch.get_worker_status() {
+                                if !bist_ok(&w.symbol) { continue; }
                                 if !syms.contains(&w.symbol) { syms.push(w.symbol); }
                             }
                         }
@@ -285,6 +295,7 @@ impl Engine {
                         // takılı kalır, PnL=0 görünür, SL/TP denetimi yapılamaz.
                         if let Ok(positions) = st.finance.live_positions.read() {
                             for sym in positions.keys() {
+                                if !bist_ok(sym) { continue; }
                                 if !syms.contains(sym) { syms.push(sym.clone()); }
                             }
                         }
@@ -1611,12 +1622,31 @@ impl Engine {
         // Aşağıda `continue` yerine `return` kullanılır (kısa devre tek sembolde).
         {
             // ─── Faz 1 (DataIngest): SQLite'tan son 200 candle ────────────
+            // Üç ayrım: Ok(non-empty) Done. Ok(empty) sessiz Skipped (sembol
+            // için 1m candle DB'de yok = veri kaynağı eksikliği, alarm değil).
+            // Err = gerçek DB hatası, anomaly emit.
             let candles = match crate::persistence::reader::read_candles(db_path, symbol, interval, 200) {
                 Ok(c) if !c.is_empty() => {
                     Self::mark_pipeline_stage(state, PipelineStage::DataIngest, StepStatus::Done);
                     c
                 }
-                _ => {
+                Ok(_) => {
+                    // Sembol candle'sız → bir sonraki cycle yine aynı sonuç
+                    // verecek. push_anomaly etmeden chain_steps'i Failed işaretle
+                    // (TUI Pipeline panelinde görünür, anomaly cap'ini doldurmaz).
+                    log::warn!("DataIngest empty: {} {} (candles tablo'da 1m kayıt yok)", symbol, interval);
+                    if let Ok(st) = state.lock() {
+                        if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
+                            pipe.mark_stage_completed(
+                                PipelineStage::DataIngest,
+                                StepStatus::Failed,
+                            );
+                        }
+                    }
+                    return;
+                }
+                Err(e) => {
+                    log::warn!("DataIngest error: {} {} → {}", symbol, interval, e);
                     Self::mark_pipeline_stage(state, PipelineStage::DataIngest, StepStatus::Failed);
                     return;
                 }

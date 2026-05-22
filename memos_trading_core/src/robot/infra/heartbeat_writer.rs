@@ -36,6 +36,10 @@ pub struct HeartbeatRecord {
     /// true ise cycle-bazlı dinamik (predict_confidence) → değer hareket etmeli.
     #[serde(default)]
     pub gbt_ready: bool,
+    /// Anomaly tip dağılımı: kind → count. Boot'ta 50 anomaly olduğunda
+    /// hangi kind'ın baskın olduğunu post-mortem için görmek üzere.
+    #[serde(default)]
+    pub anomalies_by_kind: std::collections::BTreeMap<String, usize>,
 }
 
 impl HeartbeatRecord {
@@ -53,8 +57,17 @@ impl HeartbeatRecord {
             .map(|p| p.len()).unwrap_or(0);
         let closed_trades = state.finance.live_closed_trades.read()
             .map(|t| t.len()).unwrap_or(0);
-        let anomalies = state.guardian.live_pipeline.read()
-            .map(|p| p.anomalies.len()).unwrap_or(0);
+        let (anomalies, anomalies_by_kind) = state.guardian.live_pipeline.read()
+            .map(|p| {
+                let mut by_kind: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for a in &p.anomalies {
+                    let key = format!("{:?}", a.kind);
+                    *by_kind.entry(key).or_insert(0) += 1;
+                }
+                (p.anomalies.len(), by_kind)
+            })
+            .unwrap_or_else(|_| (0, std::collections::BTreeMap::new()));
         // brain.live_strategy "Default"/"Auto"/"" iken motor her cycle'da rejime
         // göre otonom strateji seçiyor; tek-nokta normalize için
         // core::model::normalize_strategy_label kullanılır (bridge ile aynı).
@@ -79,6 +92,7 @@ impl HeartbeatRecord {
             strategy,
             ml_confidence: state.brain.ml_confidence,
             gbt_ready,
+            anomalies_by_kind,
         }
     }
 }
@@ -319,6 +333,7 @@ mod tests {
             strategy: "MA_CROSSOVER".to_string(),
             ml_confidence: 0.0,
             gbt_ready: false,
+            anomalies_by_kind: std::collections::BTreeMap::new(),
         };
         append_record(&path, &rec).unwrap();
         append_record(&path, &rec).unwrap();

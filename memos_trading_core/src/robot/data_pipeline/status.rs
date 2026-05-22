@@ -58,9 +58,13 @@ impl PipelineStatus {
     }
 
     pub fn push_anomaly(&mut self, severity: AnomalySeverity, kind: AnomalyKind, message: impl Into<String>) {
+        let msg = message.into();
+        // Stderr'a düşür ki headless modda root cause analizi için görünür olsun;
+        // push_log yalnız TUI panel buffer'ına gider, dosya log'una yansımaz.
+        log::warn!("anomaly[{:?}/{:?}] {}", severity, kind, msg);
         self.anomalies.push(PipelineAnomalyRuntime {
             severity, kind,
-            message: message.into(),
+            message: msg,
             fix_hint: None,
             auto_fixed: false,
         });
