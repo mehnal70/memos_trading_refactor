@@ -462,6 +462,22 @@ pub struct MissionControl {
     pub anomalies_by_kind: std::collections::BTreeMap<String, usize>,
 }
 
+/// Strateji etiketini insan-okunabilir biçime normalleştirir.
+///
+/// "Default" / "Auto" / "AUTO" / "" → "Otonom (rejime göre)".
+/// Aksi durumlarda raw değer döner. Bridge, heartbeat_writer ve TradingLogger
+/// bu fonksiyonu çağırır; tek nokta = tutarlı görünüm.
+pub fn normalize_strategy_label(raw: &str) -> String {
+    if raw.eq_ignore_ascii_case("default")
+        || raw.eq_ignore_ascii_case("auto")
+        || raw.is_empty()
+    {
+        "Otonom (rejime göre)".to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
 // =============================================================================
 // 4. EMİR YAPILARI VE TÜR GÜVENLİĞİ (OMS TABANI)
 // =============================================================================
@@ -661,5 +677,26 @@ impl PaperTradingResult {
     /// Simülasyonun istatistiksel olarak başarılı (güvenli) olup olmadığını doğrular
     pub fn is_edge_confirmed(&self) -> bool {
         self.win_rate >= 0.45 && self.profit_factor > 1.25 && self.max_drawdown_pct < 15.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_strategy_label_handles_sentinels() {
+        assert_eq!(normalize_strategy_label("AUTO"), "Otonom (rejime göre)");
+        assert_eq!(normalize_strategy_label("auto"), "Otonom (rejime göre)");
+        assert_eq!(normalize_strategy_label("Default"), "Otonom (rejime göre)");
+        assert_eq!(normalize_strategy_label("default"), "Otonom (rejime göre)");
+        assert_eq!(normalize_strategy_label(""), "Otonom (rejime göre)");
+    }
+
+    #[test]
+    fn normalize_strategy_label_preserves_real_names() {
+        assert_eq!(normalize_strategy_label("MA_CROSSOVER"), "MA_CROSSOVER");
+        assert_eq!(normalize_strategy_label("SUPERTREND"), "SUPERTREND");
+        assert_eq!(normalize_strategy_label("Bollinger"), "Bollinger");
     }
 }

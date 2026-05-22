@@ -52,22 +52,10 @@ impl HeartbeatRecord {
         let anomalies = state.guardian.live_pipeline.read()
             .map(|p| p.anomalies.len()).unwrap_or(0);
         // brain.live_strategy "Default"/"Auto"/"" iken motor her cycle'da rejime
-        // göre otonom strateji seçiyor (process_symbol_cycle'da
-        // StrategySelector::select_best). Tek statik isim yansıtmak yanıltıcı
-        // olur; bridge.rs'le aynı normalleştirme uygulanır → operatör heartbeat
-        // jsonl'da gerçek davranışı görür.
+        // göre otonom strateji seçiyor; tek-nokta normalize için
+        // core::model::normalize_strategy_label kullanılır (bridge ile aynı).
         let strategy = state.brain.live_strategy.read()
-            .map(|s| {
-                let raw = s.clone();
-                if raw.eq_ignore_ascii_case("default")
-                    || raw.eq_ignore_ascii_case("auto")
-                    || raw.is_empty()
-                {
-                    "Otonom (rejime göre)".to_string()
-                } else {
-                    raw
-                }
-            })
+            .map(|s| crate::core::model::normalize_strategy_label(&s))
             .unwrap_or_else(|_| "?".to_string());
 
         Self {

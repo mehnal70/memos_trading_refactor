@@ -68,6 +68,17 @@ impl Engine {
             }
         }
 
+        // 0a. SCHEMA GUARD: candles + open_positions_snapshot tablolarını
+        //     defensive olarak yarat. Cold-start'ta hiç candle indirilmemişken
+        //     ML retrain trigger'ı her 500ms "no such table: candles" hatasıyla
+        //     log'u kirletiyordu. Tablo "CREATE IF NOT EXISTS" idempotent.
+        Self::ensure_db_schema(&state);
+
+        // 0b. POZİSYON RECOVERY: önceki run'un open_positions_snapshot tablosunu
+        //     oku → live_positions'a hidrate et. Tablo yoksa veya boşsa sessizce
+        //     geçer (cold-start). Recovery sayısı TUI log'a yansır.
+        Self::hydrate_open_positions_from_db(&state).await;
+
         // 1. INFRASTRUCTURE FLEET (WS, Diagnostic, Pipeline)
         Self::spawn_infrastructure_fleet(Arc::clone(&state)).await;
 
@@ -2251,6 +2262,10 @@ impl Engine {
             crate::robot::data_pipeline::canon::PipelineStage::Execute,
             crate::robot::data_pipeline::StepStatus::Done,
         );
+
+        // 💾 RECOVERY: pozisyon haritası değişti → DB snapshot'ı güncelle.
+        // Crash + restart sonrası hydrate_open_positions_from_db bu durumu okur.
+        Self::persist_open_positions_snapshot(state);
     }
 
     /// 🧠 IntelligenceHub periyodik tick: drift hesabı + evrim + retrain kararı.
@@ -2755,7 +2770,14 @@ impl Engine {
                     ),
                 );
             }
+            drop(st); // else dalında lock henüz canlıydı; persist'ten önce serbest bırak
         }
+
+        // 💾 RECOVERY: pozisyon haritası değişti (kapanış sonrası). Boş harita
+        // da snapshot'a yazılır → restart sonrası "tamamı kapalı" doğru yansır.
+        // İki daldan sonra çağrılır: if-Some içinde st 2704'te drop edildi,
+        // else dalında yukarıda drop edildi.
+        Self::persist_open_positions_snapshot(state);
     }
 
 
@@ -3425,5 +3447,108 @@ impl Engine {
         } else {
             Ok(())
         }
+    }
+
+    /// Boot'ta SQLite şemasını defensive yaratır. Cold-start'ta candle tablosu
+    /// yoksa ML retrain trigger'ı her 500ms hata atıyordu. Her iki tablo da
+    /// `CREATE IF NOT EXISTS` idempotent — mevcut DB'lere zarar vermez.
+    fn ensure_db_schema(state: &Arc<Mutex<AppState>>) {
+        let db_path = match state.lock() {
+            Ok(st) => st.config.db_path.clone(),
+            Err(_) => return,
+        };
+        let conn = match rusqlite::Connection::open(&db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                if let Ok(mut st) = state.lock() {
+                    st.push_log(format!("⚠️ ensure_db_schema: DB açılamadı ({}) — devam ediliyor", e));
+                }
+                return;
+            }
+        };
+        if let Err(e) = crate::persistence::writer::ensure_candles_table(&conn) {
+            log::warn!("⚠️ candles tablosu kurulamadı: {}", e);
+            if let Ok(mut st) = state.lock() {
+                st.push_log(format!("⚠️ candles tablosu kurulamadı: {}", e));
+            }
+        } else {
+            log::info!("📐 SQLite şeması doğrulandı (candles + open_positions_snapshot)");
+            if let Ok(mut st) = state.lock() {
+                st.push_log("📐 SQLite şeması doğrulandı (candles + open_positions_snapshot)".to_string());
+            }
+        }
+        // open_positions_snapshot ayrıca save_open_positions_snapshot içinde
+        // ilk INSERT öncesi yaratılıyor; ek bir CREATE çağrısına gerek yok.
+    }
+
+    /// Boot sırasında önceki run'un `open_positions_snapshot` tablosundan
+    /// açık pozisyonları okur ve `live_positions` HashMap'ine hidrate eder.
+    /// - Tablo yoksa / kayıt yoksa: sessiz geçer (cold-start).
+    /// - DB açılamazsa: hata log'una düşer ama engine devam eder.
+    /// - Halihazırda live_positions'ta aynı sembol varsa: DB tarafı ezilir
+    ///   (recovery sırasında live state boş olmalı; defensive).
+    async fn hydrate_open_positions_from_db(state: &Arc<Mutex<AppState>>) {
+        let db_path = match state.lock() {
+            Ok(st) => st.config.db_path.clone(),
+            Err(_) => return,
+        };
+        match crate::persistence::reader::recover_open_positions(&db_path) {
+            Ok(positions) if !positions.is_empty() => {
+                let n = positions.len();
+                if let Ok(st) = state.lock() {
+                    if let Ok(mut map) = st.finance.live_positions.write() {
+                        for pos in positions {
+                            map.insert(pos.symbol.clone(), pos);
+                        }
+                    }
+                }
+                log::info!("♻️ [RECOVERY] {} açık pozisyon DB snapshot'ından geri yüklendi", n);
+                if let Ok(mut st) = state.lock() {
+                    st.push_log(format!(
+                        "♻️ [RECOVERY] {} açık pozisyon DB snapshot'ından geri yüklendi",
+                        n,
+                    ));
+                }
+            }
+            Ok(_) => {
+                log::info!("♻️ [RECOVERY] DB snapshot boş — cold-start");
+                if let Ok(mut st) = state.lock() {
+                    st.push_log("♻️ [RECOVERY] DB snapshot boş — cold-start".to_string());
+                }
+            }
+            Err(e) => {
+                log::warn!("⚠️ [RECOVERY] snapshot okunamadı: {} — cold-start'a düşülüyor", e);
+                if let Ok(mut st) = state.lock() {
+                    st.push_log(format!(
+                        "⚠️ [RECOVERY] open_positions_snapshot okunamadı: {} (cold-start'a düşülüyor)",
+                        e,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Mevcut `live_positions` haritasını DB'ye snapshot'lar. Pozisyon açılış
+    /// ve kapanış sonunda çağrılır; ENGINE crash + restart durumunda recovery
+    /// bu snapshot'ı okuyup haritayı yeniden kurar.
+    /// Senkron — Connection::open + INSERT/UPDATE; UI lock dışında çağrılmalı.
+    pub fn persist_open_positions_snapshot(state: &Arc<Mutex<AppState>>) {
+        let (db_path, positions) = match state.lock() {
+            Ok(st) => {
+                let db_path = st.config.db_path.clone();
+                let positions: Vec<_> = st.finance.live_positions.read()
+                    .map(|m| m.values().cloned().collect())
+                    .unwrap_or_default();
+                (db_path, positions)
+            }
+            Err(_) => return,
+        };
+        let conn = match rusqlite::Connection::open(&db_path) {
+            Ok(c) => c,
+            Err(_) => return, // sessiz fail; bir sonraki snapshot dener
+        };
+        let _ = crate::persistence::writer::save_open_positions_snapshot(
+            &conn, &positions,
+        );
     }
 }

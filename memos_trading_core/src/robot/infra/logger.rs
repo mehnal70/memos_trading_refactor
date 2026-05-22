@@ -74,6 +74,7 @@ impl TradeEvent {
         equity: f64,
     ) -> Self {
         let side = if is_long { "LONG" } else { "SHORT" };
+        let strat_label = crate::core::model::normalize_strategy_label(strategy);
         Self {
             timestamp: Utc::now().to_rfc3339(),
             event_type: "TRADE_OPEN".to_string(),
@@ -85,7 +86,7 @@ impl TradeEvent {
             equity,
             message: format!(
                 "OPEN {} {} qty={:.6} @ ${:.4} | Strat={} | Equity: ${:.2}",
-                side, symbol, qty, price, strategy, equity,
+                side, symbol, qty, price, strat_label, equity,
             ),
         }
     }
@@ -102,6 +103,7 @@ impl TradeEvent {
         reason: &str,
     ) -> Self {
         let side = if is_long { "LONG" } else { "SHORT" };
+        let strat_label = crate::core::model::normalize_strategy_label(strategy);
         Self {
             timestamp: Utc::now().to_rfc3339(),
             event_type: "TRADE_CLOSE".to_string(),
@@ -113,7 +115,7 @@ impl TradeEvent {
             equity,
             message: format!(
                 "CLOSE {} {} qty={:.6} @ ${:.4} | Reason={} | PnL: ${:.4} | Strat={} | Equity: ${:.2}",
-                side, symbol, qty, exit_price, reason, pnl, strategy, equity,
+                side, symbol, qty, exit_price, reason, pnl, strat_label, equity,
             ),
         }
     }
@@ -359,6 +361,33 @@ mod tests {
         assert_eq!(ev.equity, 10_000.0);
         assert!(ev.message.contains("OPEN LONG BTCUSDT"));
         assert!(ev.message.contains("MA_CROSSOVER"));
+    }
+
+    #[test]
+    fn test_trade_open_normalizes_auto_strategy() {
+        // "AUTO" sentinel → "Otonom (rejime göre)" olarak yansımalı.
+        let ev = TradeEvent::trade_open(
+            "BTCUSDT", "AUTO", true, 50_000.0, 0.01, 10_000.0,
+        );
+        assert!(ev.message.contains("Strat=Otonom (rejime göre)"),
+            "AUTO normalize edilmedi: {}", ev.message);
+        assert!(!ev.message.contains("Strat=AUTO"),
+            "raw AUTO görünüyor: {}", ev.message);
+
+        // "Default" da aynı normalize edilmeli.
+        let ev2 = TradeEvent::trade_open(
+            "ETHUSDT", "Default", false, 3_000.0, 0.5, 9_500.0,
+        );
+        assert!(ev2.message.contains("Strat=Otonom (rejime göre)"));
+    }
+
+    #[test]
+    fn test_trade_close_normalizes_auto_strategy() {
+        let ev = TradeEvent::trade_close(
+            "BTCUSDT", "AUTO", true, 51_000.0, 0.01, 10.0, 10_010.0, "TAKE_PROFIT",
+        );
+        assert!(ev.message.contains("Strat=Otonom (rejime göre)"),
+            "AUTO normalize edilmedi: {}", ev.message);
     }
 
     #[test]

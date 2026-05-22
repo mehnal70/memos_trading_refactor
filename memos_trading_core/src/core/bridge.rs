@@ -193,15 +193,11 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
 
     // brain.live_strategy "Default"/"Auto" iken motor zaten her cycle'da rejime göre
     // sembol başına dinamik strateji seçiyor (StrategySelector::select_best); tek bir
-    // statik isim yansıtmak yanıltıcı olur. UI için anlamlı bir etikete yumuşat.
-    let live_strategy_name = st.brain.live_strategy.read().map(|s| {
-        let raw = s.clone();
-        if raw.eq_ignore_ascii_case("default") || raw.eq_ignore_ascii_case("auto") || raw.is_empty() {
-            "Otonom (rejime göre)".to_string()
-        } else {
-            raw
-        }
-    }).unwrap_or_else(|_| "—".to_string());
+    // statik isim yansıtmak yanıltıcı olur. Tek-nokta normalize için
+    // core::model::normalize_strategy_label kullanılır.
+    let live_strategy_name = st.brain.live_strategy.read()
+        .map(|s| crate::core::model::normalize_strategy_label(&s))
+        .unwrap_or_else(|_| "—".to_string());
     let best_tp_pct = st.brain.best_params.get("take_profit_pct").copied().unwrap_or(0.0);
     let best_sl_pct = st.brain.best_params.get("stop_loss_pct").copied().unwrap_or(0.0);
     let best_position_size = st.brain.best_params.get("max_position_size").copied().unwrap_or(0.0);

@@ -164,7 +164,9 @@ pub fn save_candle(
 
 /// Ana `candles` tablosunu ve gerekli indeksleri defensive olarak yaratır.
 /// Repository::init_schema ile aynı tanım — iki yer ayrışmamalı.
-fn ensure_candles_table(conn: &Connection) -> Result<()> {
+/// Boot zincirinden de çağrılır → ML retrain ve scheduler'lar cold-start'ta
+/// "no such table: candles" hatasına çarpmasın.
+pub fn ensure_candles_table(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS candles (
             id INTEGER PRIMARY KEY,
