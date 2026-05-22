@@ -40,8 +40,18 @@ fn make_row(s: &PipelineStep) -> Row<'static> {
         "—".to_string()
     };
     let overdue_color = if s.overdue_secs > 0 { Color::Red } else { Color::DarkGray };
-    let last_run_text = if s.last_run_age_secs == 0 {
-        "henüz".to_string()
+
+    // `last_run_age_secs == 0` iki anlama gelir:
+    //   1. Step hiç koşmadı (status=Idle, bridge bunu 0'a fold ediyor)
+    //   2. Step bu saniye içinde koştu (now - last_run = 0)
+    // Engine record_step'i her ~500ms'de bir tetikleyince age 0 ↔ 1 ↔ 0…
+    // salınımı oluşuyor → TUI "henüz" ↔ "1s önce" flicker yapıyordu.
+    // Çözüm: 5s'lik bir "tazelik penceresi" — bu aralıkta tek stabil
+    // etiket ("canlı") göster; sadece status=Idle && age=0 ise "—" (hiç koşmadı).
+    let last_run_text = if s.status == "Idle" && s.last_run_age_secs == 0 {
+        "—".to_string()
+    } else if s.last_run_age_secs < 5 {
+        "canlı".to_string()
     } else {
         format!("{}s önce", s.last_run_age_secs)
     };
