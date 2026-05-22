@@ -3594,11 +3594,10 @@ impl Engine {
             if let Ok(mut st) = state.lock() {
                 st.push_log(format!("⚠️ candles tablosu kurulamadı: {}", e));
             }
-        } else {
-            log::info!("📐 SQLite şeması doğrulandı (candles + open_positions_snapshot)");
-            if let Ok(mut st) = state.lock() {
-                st.push_log("📐 SQLite şeması doğrulandı (candles + open_positions_snapshot)".to_string());
-            }
+        } else if let Ok(mut st) = state.lock() {
+            st.push_log_mirror(
+                "📐 SQLite şeması doğrulandı (candles + open_positions_snapshot)".to_string(),
+            );
         }
         // open_positions_snapshot ayrıca save_open_positions_snapshot içinde
         // ilk INSERT öncesi yaratılıyor; ek bir CREATE çağrısına gerek yok.
@@ -3651,46 +3650,34 @@ impl Engine {
                         for pos in loaded { map.insert(pos.symbol.clone(), pos); }
                     }
                 }
-                log::info!(
-                    "♻️ [RECOVERY] {} yüklendi · {} stale · {} BIST-excluded ({} interval). stale={} bist={}",
-                    n_loaded, n_stale, n_bist, interval,
-                    stale_syms.join(","), bist_syms.join(","),
-                );
                 if let Ok(mut st) = state.lock() {
+                    let mut msg = format!("♻️ [RECOVERY] {} yüklendi", n_loaded);
+                    if n_stale > 0 {
+                        msg.push_str(&format!(
+                            " · {} stale ({} interval'inde candles yok): {}",
+                            n_stale, interval, stale_syms.join(","),
+                        ));
+                    }
+                    if n_bist > 0 {
+                        msg.push_str(&format!(
+                            " · {} BIST-excluded (canlı feed yok; ALLOW_BIST=1 ile aç): {}",
+                            n_bist, bist_syms.join(","),
+                        ));
+                    }
+                    st.push_log_mirror(msg);
                     if n_stale > 0 || n_bist > 0 {
-                        let mut msg = format!(
-                            "♻️ [RECOVERY] {} yüklendi", n_loaded,
-                        );
-                        if n_stale > 0 {
-                            msg.push_str(&format!(
-                                " · {} stale ({} interval'inde candles yok): {}",
-                                n_stale, interval, stale_syms.join(","),
-                            ));
-                        }
-                        if n_bist > 0 {
-                            msg.push_str(&format!(
-                                " · {} BIST-excluded (canlı feed yok; ALLOW_BIST=1 ile aç): {}",
-                                n_bist, bist_syms.join(","),
-                            ));
-                        }
-                        st.push_log(msg.clone());
                         st.guardian.repair_log.push_back(format!(
                             "[{}] recovery: yüklendi={} stale={} bist={}",
                             chrono::Local::now().format("%H:%M:%S"),
                             n_loaded, n_stale, n_bist,
                         ));
                         while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
-                    } else {
-                        st.push_log(format!(
-                            "♻️ [RECOVERY] {} açık pozisyon DB snapshot'ından geri yüklendi", n_loaded,
-                        ));
                     }
                 }
             }
             Ok(_) => {
-                log::info!("♻️ [RECOVERY] DB snapshot boş — cold-start");
                 if let Ok(mut st) = state.lock() {
-                    st.push_log("♻️ [RECOVERY] DB snapshot boş — cold-start".to_string());
+                    st.push_log_mirror("♻️ [RECOVERY] DB snapshot boş — cold-start".to_string());
                 }
             }
             Err(e) => {

@@ -408,11 +408,20 @@ impl AppState {
         t
     }
 
-    /// Adli Log Kaydı: guardian üzerinden mühürlenir
+    /// Adli Log Kaydı: guardian üzerinden mühürlenir (TUI panel).
     pub fn push_log(&mut self, msg: String) {
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
         self.guardian.log.push_back(format!("[{}] {}", ts, msg));
         if self.guardian.log.len() > 300 { self.guardian.log.pop_front(); }
+    }
+
+    /// Hem TUI panel buffer'a hem stderr'a (log::info!) yansıt. Headless modda
+    /// operatör panel olmadan da boot/recovery/şema mesajlarını görebilsin diye.
+    /// Cycle başına çağrılan high-frequency mesajlar için kullanılmaz; sadece
+    /// önemli durum geçişleri (boot, recovery, schema, exit) için.
+    pub fn push_log_mirror(&mut self, msg: String) {
+        log::info!("{}", msg);
+        self.push_log(msg);
     }
         /// Otonom Karar Verici: Bakanlıklar arası dengeyi gözeterek aksiyon alır.
     pub fn orchestrate_autonomy(&mut self) {
