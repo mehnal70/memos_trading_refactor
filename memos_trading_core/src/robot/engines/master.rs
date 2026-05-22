@@ -2079,7 +2079,23 @@ impl Engine {
         }
 
         let is_long = matches!(signal, Signal::Buy);
-        let entry = last_candle.close;
+        // Entry fiyatı: önce st.fleet.live_price (price_poll 5sn REST snapshot),
+        // yoksa candles.last().close (DB son mum). Sadece candle close kullanılınca
+        // DB 15dk eski olduğunda gerçek market ile uçurum açıldı → pozisyon eski
+        // candle entry'siyle açılıyor, mark-to-market hemen TP'ye çarpıyor (entry
+        // ile gerçek fiyat arasındaki fark TP eşiğini aştığı için) → phantom kazanç
+        // döngüsü: aç @ stale → kapat @ TP → tekrar aç → tekrar TP. Equity sahte şişer.
+        let candle_close = last_candle.close;
+        let entry = {
+            let st_lock = state.lock();
+            match st_lock {
+                Ok(st) => st.fleet.live_price.read().ok()
+                    .and_then(|m| m.get(symbol).copied())
+                    .filter(|&v| v > 0.0)
+                    .unwrap_or(candle_close),
+                Err(_) => candle_close,
+            }
+        };
         let atr = Self::calc_atr(candles, 14);
         let regime = Self::classify_regime(candles);
         let pos_id = crate::core::types::PositionId::new();
