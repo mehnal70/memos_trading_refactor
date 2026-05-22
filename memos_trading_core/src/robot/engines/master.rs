@@ -1688,19 +1688,29 @@ impl Engine {
             };
 
             // === 1.5) AÇIK POZİSYON İSE: önce SL/TP/Trailing/Breakeven denetle ===
-            let live_price = candles.last().map(|c| c.close).unwrap_or(0.0);
+            // En taze fiyat öncelik sırası:
+            //   1) st.fleet.live_price (price_poll task'ı her 5sn REST'den çeker)
+            //   2) candles.last().close (DB'deki son mum; download 15dk'da bir → eski olabilir)
+            // Daha önce sadece (2) kullanılıyordu → outer mark-to-market (line ~1572)
+            // taze fiyat yazsa bile bu blok her sembol task'ında eski mum close'u ile
+            // pos.current_price'ı geri eziyordu → TUI sermaye/PnL hep entry'de sıkışıyordu.
+            let candle_close = candles.last().map(|c| c.close).unwrap_or(0.0);
             let atr_value  = Self::calc_atr(&candles, 14);
-            let exit_reason = {
+            let (live_price, exit_reason) = {
                 let st = match state.lock() { Ok(s) => s, Err(_) => return };
                 let atr_mult = st.brain.best_params.get("pos_atr_trail_mult").copied().unwrap_or(2.0);
                 let be_rr    = st.brain.best_params.get("pos_breakeven_at_rr").copied().unwrap_or(1.0);
+                let fleet_price = st.fleet.live_price.read().ok()
+                    .and_then(|m| m.get(symbol).copied())
+                    .filter(|&v| v > 0.0);
+                let live_price = fleet_price.unwrap_or(candle_close);
                 let reason_opt = if let Ok(mut positions) = st.finance.live_positions.write() {
                     if let Some(pos) = positions.get_mut(symbol) {
                         pos.current_price = live_price;
                         Self::check_exit_conditions(pos, live_price, atr_value, atr_mult, be_rr)
                     } else { None }
                 } else { None };
-                reason_opt
+                (live_price, reason_opt)
             };
             if let Some(reason) = exit_reason {
                 if let Ok(mut st) = state.lock() {
