@@ -55,7 +55,10 @@ async fn main() -> Result<()> {
 
     let symbol      = env::var("TRADE_SYMBOL").unwrap_or_else(|_| "BTCUSDT".to_owned());
     let market      = env::var("TRADE_MARKET").unwrap_or_else(|_| "spot".to_owned());
-    let db_path     = env::var("DB_PATH").unwrap_or_else(|_| "data/memos_trading.db".to_owned());
+    // Kanonik DB: data/trader.db. Tüm interface'ler (rtc_tui, rtc_healthcheck,
+    // RoboticLoopConfig::default) aynı path'i kullanır → engine'in yazdığı DB
+    // ile TUI'nin okuduğu DB uyumlu. Override için env DB_PATH.
+    let db_path     = env::var("DB_PATH").unwrap_or_else(|_| "data/trader.db".to_owned());
 
     // Trading mode env önceliği:
     //   1. TRADING_MODE=Live|Paper|Backtest (case-insensitive, doğru kaynak)
