@@ -1835,6 +1835,17 @@ impl Engine {
                 return; // bu sembolde tur bitti, yeniden açılış aynı turda denenmesin
             }
 
+            // ─── ScalpSwing A2: alt-kanal fırsat avı ──────────────────────────
+            // scalp_swing_config enabled (SCALP_SWING_ENABLE=1) ise ScalpEngine
+            // ve SwingEngine fırsat üretmeye çalışır; SlotGuard ile kanal-bazlı
+            // limit + hedge kontrolü yapılır. Uygun ise açılış doğrudan
+            // ScalpSwing patikasından gider (kind=Some(TradeType)) — bu turda
+            // klasik strateji yolu (Strategy.generate_signal) pas geçilir.
+            // Disabled ise sessiz false → eski davranış aynen.
+            if Self::try_open_scalp_swing(state, symbol, &candles).await {
+                return;
+            }
+
             // 3) Strateji seçimi: brain.live_strategy "Default"/"AUTO" ise rejime göre otonom seç.
             let strategy_name = if live_strategy.eq_ignore_ascii_case("default")
                                   || live_strategy.eq_ignore_ascii_case("auto")
@@ -2015,7 +2026,7 @@ impl Engine {
                             symbol, signal_label, edge, strategy_name,
                         ));
                     }
-                    Self::open_paper_position(state, symbol, &signal, &candles, &strategy_name).await;
+                    Self::open_paper_position(state, symbol, &signal, &candles, &strategy_name, None).await;
                 }
                 // Pozisyon varken TERS yönde sinyal → kapanış (edge filtresi gevşek).
                 // Long + Sell ya da Short + Buy: trend dönmüş demektir.
@@ -2180,15 +2191,108 @@ impl Engine {
         }
     }
 
+    /// ScalpSwing A2: alt-kanal fırsat avcısı. cfg.scalp_enabled/swing_enabled
+    /// gate'ler ile ScalpEngine/SwingEngine fırsat üretir, en yüksek skoru
+    /// SlotGuard'dan geçirir ve uygunsa open_paper_position'a Some(TradeType)
+    /// yolu ile dispatch eder. `true` döndüğünde caller turun bu sembolde
+    /// klasik Strategy yolunu pas geçer (çakışma yok). `false` döndüğünde
+    /// klasik akış aynen devam.
+    async fn try_open_scalp_swing(
+        state: &Arc<Mutex<AppState>>,
+        symbol: &str,
+        candles: &[Candle],
+    ) -> bool {
+        use crate::robot::scalp_swing::{
+            ScalpEngine, SwingEngine, SlotGuard, OpenSlot, ScalpSwingConfig,
+        };
+
+        // 1) cfg + mevcut açık pozisyonların kanal-bazlı slot'larını topla.
+        //    Hem cfg hem slots tek kısa mutex skopunda alınır.
+        let (cfg, existing_slots): (ScalpSwingConfig, Vec<OpenSlot>) = {
+            let st = match state.lock() { Ok(s) => s, Err(_) => return false };
+            let cfg = match st.brain.scalp_swing_config.read().ok() {
+                Some(c) => c.clone(),
+                None => return false,
+            };
+            if !cfg.scalp_enabled && !cfg.swing_enabled { return false; }
+            let slots = st.finance.live_positions.read().ok().map(|m| {
+                m.values().filter_map(|p| {
+                    p.kind.map(|kind| OpenSlot {
+                        symbol: p.symbol.clone(),
+                        trade_type: kind,
+                        is_long: p.is_long,
+                    })
+                }).collect::<Vec<_>>()
+            }).unwrap_or_default();
+            (cfg, slots)
+        };
+
+        // 2) Adayları topla — disabled olan engine boş döner.
+        let scalp_opp = if cfg.scalp_enabled {
+            ScalpEngine::evaluate(candles, cfg.scalp_min_score)
+        } else { None };
+        let swing_opp = if cfg.swing_enabled {
+            SwingEngine::evaluate(candles, cfg.swing_min_adx, cfg.swing_min_score)
+        } else { None };
+
+        // 3) En yüksek skoru seç (Scalp ve Swing eşit ise Scalp önce —
+        //    kısa-vade fırsat sermayeyi daha az bağlar).
+        let opp = match (scalp_opp, swing_opp) {
+            (Some(a), Some(b)) => if a.score >= b.score { a } else { b },
+            (Some(a), None)    => a,
+            (None,    Some(b)) => b,
+            (None,    None)    => return false,
+        };
+
+        // 4) SlotGuard: kanal-bazlı kapasite + hedge engeli.
+        let (ok, reason) = SlotGuard::can_open(
+            &existing_slots, symbol, opp.trade_type, opp.is_long,
+            cfg.max_scalp_per_symbol, cfg.max_swing_per_symbol,
+        );
+        if !ok {
+            log::debug!(
+                "ScalpSwing {} {} reddedildi: {}",
+                opp.trade_type.label(), symbol, reason,
+            );
+            return false;
+        }
+
+        // 5) Açılış — kind=Some(TradeType) yolu. strategy_name etiketinde
+        //    kanal kısaltması var ki UI/log paneli ayırt edebilsin.
+        let signal = if opp.is_long {
+            crate::core::types::Signal::Buy
+        } else {
+            crate::core::types::Signal::Sell
+        };
+        let strategy_name = format!(
+            "{}_{}", opp.trade_type.label(),
+            if opp.is_long { "BUY" } else { "SELL" },
+        );
+        if let Ok(mut st) = state.lock() {
+            st.push_log(format!(
+                "⚡ ScalpSwing {} açılış: {} score={:.2} | {}",
+                opp.trade_type.label(), symbol, opp.score, opp.reason,
+            ));
+        }
+        Self::open_paper_position(
+            state, symbol, &signal, candles, &strategy_name, Some(opp.trade_type),
+        ).await;
+        true
+    }
+
     /// 🧬 FAZ F3: OTONOM POZİSYON AÇILIŞ MOTORU (Paper + Live dispatcher)
     /// Kelly oranı, brain.ml_confidence ve loss_streak ile dinamik tahsisat yapar.
     /// Live executor bağlıysa ve dry-run değilse: gerçek market order gönderir.
+    /// `kind` = ScalpSwing kanal mührü (Some(Scalp/Swing) → try_open_scalp_swing
+    /// yolundan, None → klasik strategy yolu). PositionModel.kind alanına
+    /// yazılır; close_paper_position kapanışta ScalpSwingStats güncelliyor.
     async fn open_paper_position(
         state: &Arc<Mutex<AppState>>,
         symbol: &str,
         signal: &Signal,
         candles: &[Candle],
         strategy_name: &str,
+        kind: Option<crate::robot::scalp_swing::TradeType>,
     ) {
         use crate::robot::risk::kelly::KellyCriterion;
         let last_candle = match candles.last() { Some(c) => c, None => return };
@@ -2323,11 +2427,11 @@ impl Engine {
                 stop_loss, take_profit, trailing_stop,
                 max_favorable_price: entry,
                 breakeven_activated: false,
-                // A1: ScalpSwing kanal mührü. Bu açılış engine cycle'ın varsayılan
-                // (SUPERTREND/BB/RSI vb.) yolu — kind=None → Regular. A2 dispatch
-                // ScalpEngine/SwingEngine fırsatı bulup açtığında Some(TradeType)
-                // taşıyan ayrı bir açılış patikası kullanılır.
-                kind: None,
+                // A1+A2: ScalpSwing kanal mührü. None → Regular (klasik strateji
+                // yolu), Some(Scalp/Swing) → try_open_scalp_swing dispatch'i.
+                // close_paper_position kapanışta bu alanı okuyup
+                // ScalpSwingStatsTable'a kanal-bazlı kayıt geçiyor.
+                kind,
             };
             Some(OpenPlan {
                 new_pos, alloc_capital, qty_val,
