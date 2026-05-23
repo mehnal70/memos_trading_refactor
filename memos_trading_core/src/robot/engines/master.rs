@@ -482,26 +482,59 @@ impl Engine {
                             let mut final_status = StepStatus::Done;
                             match trigger_name.as_str() {
                                 "ml" => {
+                                    // Faz 7 (Optimize): ML retrain de bir optimization
+                                    // işidir — GBT modeli + best_params'ı günceller.
+                                    // Backtest gibi periyodik (~30dk), bu yüzden TUI
+                                    // pipeline timeline'ında 7. madde Done görüntüsü
+                                    // ml retrain başarısından da gelir (backtest 2sa'lık
+                                    // cron'u beklemeden).
+                                    Self::mark_pipeline_stage(
+                                        &state_clone,
+                                        crate::robot::data_pipeline::canon::PipelineStage::Optimize,
+                                        crate::robot::data_pipeline::StepStatus::Running,
+                                    );
                                     let st_for_job = Arc::clone(&state_clone);
                                     let out = tokio::task::spawn_blocking(move || {
                                         Self::run_ml_retrain_job(&st_for_job)
                                     }).await;
                                     match out {
-                                        Ok(Ok(())) => {}
+                                        Ok(Ok(())) => {
+                                            Self::mark_pipeline_stage(
+                                                &state_clone,
+                                                crate::robot::data_pipeline::canon::PipelineStage::Optimize,
+                                                crate::robot::data_pipeline::StepStatus::Done,
+                                            );
+                                        }
                                         Ok(Err(e)) => {
                                             log::warn!("🧠 ML retrain başarısız: {}", e);
                                             if let Ok(mut st) = state_clone.lock() {
                                                 st.push_log(format!("❌ ML Retrain başarısız: {}", e));
                                             }
                                             final_status = StepStatus::Failed;
+                                            Self::mark_pipeline_stage(
+                                                &state_clone,
+                                                crate::robot::data_pipeline::canon::PipelineStage::Optimize,
+                                                crate::robot::data_pipeline::StepStatus::Failed,
+                                            );
                                         }
                                         Err(e) => {
                                             log::warn!("🧠 ML retrain join hatası: {}", e);
                                             final_status = StepStatus::Failed;
+                                            Self::mark_pipeline_stage(
+                                                &state_clone,
+                                                crate::robot::data_pipeline::canon::PipelineStage::Optimize,
+                                                crate::robot::data_pipeline::StepStatus::Failed,
+                                            );
                                         }
                                     }
                                 },
                                 "backtest" => {
+                                    // Faz 7 (Optimize) Running: walk-forward başlıyor.
+                                    Self::mark_pipeline_stage(
+                                        &state_clone,
+                                        crate::robot::data_pipeline::canon::PipelineStage::Optimize,
+                                        crate::robot::data_pipeline::StepStatus::Running,
+                                    );
                                     let st_for_job = Arc::clone(&state_clone);
                                     let out = tokio::task::spawn_blocking(move || {
                                         Self::run_backtest_job(&st_for_job)
