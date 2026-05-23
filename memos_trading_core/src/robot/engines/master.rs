@@ -918,6 +918,88 @@ impl Engine {
         // ParameterStore.record_trailing_outcome'a aktarılır. Pencere dolunca patch
         // uygulanır (per sym+strateji target_override).
         Self::spawn_trail_feedback_processor(Arc::clone(&state));
+
+        // ScalpSwing A4: periyodik auto_tune. Her N sn'de bir
+        // brain.scalp_swing_stats okunur, auto_tune Scalp ve Swing kanalları
+        // için ayrı ayrı çağrılır; bounds dahilinde değişiklikler config'e
+        // yazılır. SCALP_SWING_TUNE_EVERY_SECS env yoksa 300sn (5dk) default.
+        Self::spawn_scalp_swing_tuner(Arc::clone(&state));
+    }
+
+    /// ScalpSwing A4: periyodik tuner task. scalp_swing_stats'i okuyup
+    /// `auto_tune(stats, Scalp, cfg)` ve `auto_tune(stats, Swing, cfg)`
+    /// çağırır; değişiklikleri config'e yazar + log push. Stop signal
+    /// veya SCALP_SWING_TUNE_DISABLE=1 ile devre dışı bırakılır.
+    fn spawn_scalp_swing_tuner(state: Arc<Mutex<AppState>>) {
+        tokio::spawn(async move {
+            if std::env::var("SCALP_SWING_TUNE_DISABLE").ok().as_deref() == Some("1") {
+                if let Ok(mut st) = state.lock() {
+                    st.push_log("🎚️ ScalpSwing tuner: DISABLE=1, task pasif".into());
+                }
+                return;
+            }
+            let every_secs: u64 = std::env::var("SCALP_SWING_TUNE_EVERY_SECS")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+
+            // İlk turda warmup için kısa bekle — boot anında stats boş olur.
+            tokio::time::sleep(std::time::Duration::from_secs(every_secs.min(30))).await;
+
+            loop {
+                let stop = state.lock()
+                    .map(|s| s.app_stop_signal.load(Ordering::Relaxed))
+                    .unwrap_or(true);
+                if stop { break; }
+
+                // 1) Stats + cfg snapshot (tek kısa mutex; sleep'ten önce drop).
+                let cfg_stats = {
+                    if let Ok(st) = state.lock() {
+                        let cfg = st.brain.scalp_swing_config.read().ok().map(|c| c.clone());
+                        let stats = st.brain.scalp_swing_stats.read().ok().map(|t| t.clone());
+                        cfg.zip(stats)
+                    } else { None }
+                };
+
+                // 2) auto_tune çağrıları + yazma (mutex'ler block içinde).
+                let mut summary: Vec<String> = Vec::new();
+                if let Some((mut cfg, stats)) = cfg_stats {
+                    if cfg.autonomous_tuning {
+                        if stats.scalp.total_closed >= 5 {
+                            summary.extend(crate::robot::scalp_swing::auto_tune(
+                                &stats.scalp,
+                                crate::robot::scalp_swing::TradeType::Scalp,
+                                &mut cfg,
+                            ));
+                        }
+                        if stats.swing.total_closed >= 5 {
+                            summary.extend(crate::robot::scalp_swing::auto_tune(
+                                &stats.swing,
+                                crate::robot::scalp_swing::TradeType::Swing,
+                                &mut cfg,
+                            ));
+                        }
+                        if !summary.is_empty() {
+                            if let Ok(st) = state.lock() {
+                                if let Ok(mut w) = st.brain.scalp_swing_config.write() {
+                                    *w = cfg;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3) Log (yine kısa scope).
+                if !summary.is_empty() {
+                    if let Ok(mut st) = state.lock() {
+                        st.push_log(format!(
+                            "🎚️ ScalpSwing tuner: {} ayar uygulandı → {}",
+                            summary.len(), summary.join(", "),
+                        ));
+                    }
+                }
+
+                tokio::time::sleep(std::time::Duration::from_secs(every_secs)).await;
+            }
+        });
     }
 
     /// Phase C processor: olgunlaşmış trailing observation'ları evalue edip
