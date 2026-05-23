@@ -2296,6 +2296,16 @@ impl Engine {
                 .unwrap_or(default_mult);
             let trailing_stop = if is_long { entry - atr * atr_mult }
                                 else       { entry + atr * atr_mult };
+            // Otonom leverage: ParameterStore.resolve_leverage rejim/conf/win_rate/noise
+            // ağırlıklı bir değer döndürür. LEVERAGE_ENABLED=false (default) ise 1.0
+            // → spot davranış. Stats yoksa noise faktörü None ile devre dışı.
+            let noise_floor_opt = st.brain.parameters.read().ok().and_then(|p| {
+                p.symbol_stats.get(&(symbol.to_string(), interval_for_resolve.clone()))
+                    .map(|s| s.noise_floor_pct)
+            });
+            let leverage_resolved = st.brain.parameters.read().ok()
+                .map(|p| p.resolve_leverage(regime.as_str(), ml_conf, win_prob, noise_floor_opt))
+                .unwrap_or(1.0);
             // strategy_name caller'dan geliyor — process_symbol_cycle StrategySelector ile
             // rejime göre seçti (SUPERTREND / BB / MA_CROSSOVER vb.). trade_type bunu mühürler;
             // check_exit_conditions açılışla aynı target_pct'i okuyabilsin diye.
@@ -2303,7 +2313,7 @@ impl Engine {
                 pos_id: pos_id_str.clone(),
                 symbol: symbol.to_string(),
                 entry_price: entry, current_price: entry,
-                qty: qty_val, leverage: 1.0,
+                qty: qty_val, leverage: leverage_resolved,
                 // trade_type artık stratejik etiket (önceki "LONG"/"SHORT" zaten
                 // is_long ile aynı bilgiyi tekrar ediyordu); UI "Strateji" sütununda
                 // hangi karar mekanizmasının açtığını göstersin.
