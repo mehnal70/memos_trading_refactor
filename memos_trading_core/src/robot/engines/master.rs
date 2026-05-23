@@ -410,7 +410,16 @@ impl Engine {
                         for (sym, px) in &new_prices { prices.insert(sym.clone(), *px); }
                     }
                     if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
-                        let status = if errors.is_empty() { StepStatus::Done } else { StepStatus::Failed };
+                        // Status mantığı: hepsi başarısızsa Failed (gerçek hata),
+                        // en az 1 başarılı ise Done (kalıcı kötü sembol bütün
+                        // step'i Failed göstermemeli — BEATUSDT/BLESSUSDT gibi
+                        // 1 hatalı 7 sağlıklı durumda step Done görünmeli).
+                        // Hatalı semboller anomaly listesine ayrı yazılır.
+                        let status = if new_prices.is_empty() && !errors.is_empty() {
+                            StepStatus::Failed
+                        } else {
+                            StepStatus::Done
+                        };
                         pipe.record_step("price_poll", status, now_epoch_secs, 0);
                         for (sym, e) in &errors {
                             pipe.push_anomaly(
