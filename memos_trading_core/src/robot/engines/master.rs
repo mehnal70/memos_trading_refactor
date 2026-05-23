@@ -987,6 +987,16 @@ impl Engine {
             let every_secs: u64 = std::env::var("SCALP_SWING_TUNE_EVERY_SECS")
                 .ok().and_then(|v| v.parse().ok()).unwrap_or(300);
 
+            // Tuner devrede olduğunu boot'ta operatöre bildir — aksi halde
+            // "tuner çalışmadı mı?" şüphesi oluşuyordu (summary boş olunca
+            // hiç log atılmıyor → görünürlük kayboluyordu).
+            if let Ok(mut st) = state.lock() {
+                st.push_log(format!(
+                    "🎚️ ScalpSwing tuner devrede (periyot={}sn, min trade=5)",
+                    every_secs,
+                ));
+            }
+
             // İlk turda warmup için kısa bekle — boot anında stats boş olur.
             tokio::time::sleep(std::time::Duration::from_secs(every_secs.min(30))).await;
 

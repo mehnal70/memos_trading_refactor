@@ -262,7 +262,8 @@ fi
 echo ""
 
 # ── Multi-TF durum (default debug seviyede log atmıyor — env kontrolü)
-MTF_DEBUG=$(grep -c "MTF Filter" "$STDERR_LOG" 2>/dev/null || echo 0)
+MTF_DEBUG=$(grep -c "MTF Filter" "$STDERR_LOG" 2>/dev/null | head -1)
+MTF_DEBUG="${MTF_DEBUG:-0}"
 echo -e "${BOLD}🌐 MULTI-TF${NC}"
 if [ "$MTF_DEBUG" -gt 0 ]; then
     echo -e "  ${GREEN}HTF filter tetiklenmesi: ${MTF_DEBUG} kayıt${NC} (RUST_LOG=debug açık görünüyor)"
