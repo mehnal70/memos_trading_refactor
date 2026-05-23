@@ -72,6 +72,7 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
                 exit_reason: t.exit_reason.clone(),
                 closed_at: t.closed_at.clone(),
                 opened_at: t.opened_at.clone(),
+                leverage: t.leverage,
             }
         }).collect();
 
@@ -396,6 +397,7 @@ mod tests {
             exit_reason: "TP".into(),
             opened_at: opened.into(),
             closed_at: closed.into(),
+            leverage: 1.0,
         }
     }
 

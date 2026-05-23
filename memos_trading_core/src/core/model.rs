@@ -393,7 +393,14 @@ pub struct ClosedTradeModel {
     /// gelir (serde default) — scalp/swing istatistiklerinde böyle satırlar atlanır.
     #[serde(default)]
     pub opened_at: String,
+    /// Pozisyonun çözülmüş leverage değeri (1.0 = spot, >1 = futures).
+    /// close anında PositionModel.leverage'tan kopyalanır. Eski kayıtlar için
+    /// default 1.0 (serde) — geriye uyumlu.
+    #[serde(default = "default_leverage_one")]
+    pub leverage: f64,
 }
+
+fn default_leverage_one() -> f64 { 1.0 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeDistribution {

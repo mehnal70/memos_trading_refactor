@@ -94,6 +94,8 @@ impl TradeEvent {
     }
 
     /// Pozisyon KAPANIŞ eventi (TRADE_CLOSE).
+    /// `leverage` = pozisyonun çözülmüş kaldıraç değeri (PositionModel.leverage'tan).
+    #[allow(clippy::too_many_arguments)]
     pub fn trade_close(
         symbol: &str,
         strategy: &str,
@@ -103,6 +105,7 @@ impl TradeEvent {
         pnl: f64,
         equity: f64,
         reason: &str,
+        leverage: f64,
     ) -> Self {
         let side = if is_long { "LONG" } else { "SHORT" };
         let strat_label = crate::core::model::normalize_strategy_label(strategy);
@@ -116,8 +119,8 @@ impl TradeEvent {
             pnl,
             equity,
             message: format!(
-                "CLOSE {} {} qty={:.6} @ ${:.4} | Reason={} | PnL: ${:.4} | Strat={} | Equity: ${:.2}",
-                side, symbol, qty, exit_price, reason, pnl, strat_label, equity,
+                "CLOSE {} {} qty={:.6} @ ${:.4} | Lev={:.1}x | Reason={} | PnL: ${:.4} | Strat={} | Equity: ${:.2}",
+                side, symbol, qty, exit_price, leverage, reason, pnl, strat_label, equity,
             ),
         }
     }
@@ -387,7 +390,7 @@ mod tests {
     #[test]
     fn test_trade_close_normalizes_auto_strategy() {
         let ev = TradeEvent::trade_close(
-            "BTCUSDT", "AUTO", true, 51_000.0, 0.01, 10.0, 10_010.0, "TAKE_PROFIT",
+            "BTCUSDT", "AUTO", true, 51_000.0, 0.01, 10.0, 10_010.0, "TAKE_PROFIT", 1.0,
         );
         assert!(ev.message.contains("Strat=Otonom (rejime göre)"),
             "AUTO normalize edilmedi: {}", ev.message);
@@ -406,7 +409,7 @@ mod tests {
     #[test]
     fn test_trade_close_event_profit() {
         let ev = TradeEvent::trade_close(
-            "BTCUSDT", "MA_CROSSOVER", true, 51_500.0, 0.01, 15.0, 10_015.0, "TAKE_PROFIT",
+            "BTCUSDT", "MA_CROSSOVER", true, 51_500.0, 0.01, 15.0, 10_015.0, "TAKE_PROFIT", 3.0,
         );
         assert_eq!(ev.event_type, "TRADE_CLOSE");
         assert_eq!(ev.signal, "LONG");
@@ -416,12 +419,13 @@ mod tests {
         assert!(ev.message.contains("CLOSE LONG BTCUSDT"));
         assert!(ev.message.contains("TAKE_PROFIT"));
         assert!(ev.message.contains("MA_CROSSOVER"));
+        assert!(ev.message.contains("Lev=3.0x"));
     }
 
     #[test]
     fn test_trade_close_event_loss() {
         let ev = TradeEvent::trade_close(
-            "ETHUSDT", "BOLLINGER", false, 3_050.0, 0.5, -25.0, 9_475.0, "STOP_LOSS",
+            "ETHUSDT", "BOLLINGER", false, 3_050.0, 0.5, -25.0, 9_475.0, "STOP_LOSS", 1.0,
         );
         assert_eq!(ev.event_type, "TRADE_CLOSE");
         assert_eq!(ev.signal, "SHORT");
@@ -524,7 +528,7 @@ mod tests {
         logger.log_event(&TradeEvent::risk_block("test", "BTC")).unwrap();               // yutulur
         // TRADE_OPEN / TRADE_CLOSE / ERROR throttle dışı.
         logger.log_event(&TradeEvent::trade_open("BTC", "S", true, 50_000.0, 0.01, 10_000.0, 1.0)).unwrap();
-        logger.log_event(&TradeEvent::trade_close("BTC", "S", true, 51_000.0, 0.01, 10.0, 10_010.0, "TP")).unwrap();
+        logger.log_event(&TradeEvent::trade_close("BTC", "S", true, 51_000.0, 0.01, 10.0, 10_010.0, "TP", 1.0)).unwrap();
         logger.log_event(&TradeEvent::error("e")).unwrap();
 
         // 1 SIGNAL + 1 RISK_BLOCK + 1 OPEN + 1 CLOSE + 1 ERROR = 5

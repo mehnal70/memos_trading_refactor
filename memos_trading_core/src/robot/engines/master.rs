@@ -3295,6 +3295,7 @@ impl Engine {
                 pnl_pct: pnl_pct_val,
                 closed_at: chrono::Utc::now().to_rfc3339(),
                 opened_at: pos.opened_at.clone(),
+                leverage: pos.leverage,
             };
 
             // [DÜZELTME]: Arşiv listesine itme işlemi izole skopa alındı
@@ -3369,7 +3370,7 @@ impl Engine {
             if let Some(logger) = logger_for_event {
                 let ev = crate::robot::infra::logger::TradeEvent::trade_close(
                     symbol, &strategy_name, pos.is_long, exit_price, pos.qty,
-                    pnl_val, equity_now, reason.as_str(),
+                    pnl_val, equity_now, reason.as_str(), pos.leverage,
                 );
                 let _ = logger.log_event(&ev);
             }
