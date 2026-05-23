@@ -3031,6 +3031,35 @@ impl Engine {
     ) {
         let last_candle = match candles.last() { Some(c) => c, None => return };
 
+        // Min holding süresi koruması — sadece StrategySignal için.
+        // ScalpEngine BUY açıyor → bir sonraki cycle'da klasik Strategy SELL
+        // tetikleyince STRATEGY_SIGNAL ile kapatma döngüsü oluşuyordu (saniyede
+        // 1 cycle × komisyon = $1800/gün live erozyonu). Min hold ile pozisyon
+        // en az N sn yaşamalı (default 30sn; MIN_HOLDING_SECS_STRATEGY env).
+        // SL/TP/Trailing etkilenmez — risk yönetimi anlık olmalı.
+        if matches!(reason, ExitReason::StrategySignal) {
+            let min_hold_secs: i64 = std::env::var("MIN_HOLDING_SECS_STRATEGY")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+            let opened_at_str = state.lock().ok()
+                .and_then(|st| st.finance.live_positions.read().ok()
+                    .and_then(|p| p.get(symbol).map(|pos| pos.opened_at.clone())));
+            if let Some(s) = opened_at_str {
+                if let Ok(opened) = chrono::DateTime::parse_from_rfc3339(&s) {
+                    let age_secs = (chrono::Utc::now() - opened.with_timezone(&chrono::Utc))
+                        .num_seconds();
+                    if age_secs < min_hold_secs {
+                        if let Ok(mut st) = state.lock() {
+                            st.push_log(format!(
+                                "⏳ {} STRATEGY_SIGNAL erken kapanış reddedildi (age={}s < min={}s)",
+                                symbol, age_secs, min_hold_secs,
+                            ));
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+
         // Mutex guard'ı async sınırını geçemez (MutexGuard !Send). Tüm sync iş bu skopta:
         let (target_pos, live_executor, live_dry_run, mode_tag) = {
             let mut st = state.lock().unwrap();
