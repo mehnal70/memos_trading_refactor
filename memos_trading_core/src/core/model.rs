@@ -294,6 +294,12 @@ pub struct PositionModel {
     /// Breakeven aktif mi? Aktif olduktan sonra SL = entry_price'a sabitlenir.
     #[serde(default)]
     pub breakeven_activated: bool,
+    /// ScalpSwing kanal sınıflandırması. None = Regular (varsayılan, eski
+    /// serialize edilmiş pozisyonlar). ScalpEngine / SwingEngine fırsat
+    /// üretirse Some(Scalp/Swing) olarak mühürlenir; ScalpSwingStats ve
+    /// auto_tune feedback loop bu alanı okur.
+    #[serde(default)]
+    pub kind: Option<crate::robot::scalp_swing::TradeType>,
 }
 
 impl PositionModel {

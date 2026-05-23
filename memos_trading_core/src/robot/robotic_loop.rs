@@ -77,6 +77,17 @@ pub struct BrainBox {
     /// olarak doldurulur; HyperOpt/IntelligenceHub runtime'da güncelleyebilir.
     /// Edge eşikleri başta olmak üzere sabit sayılan değerler buradan akıyor.
     pub parameters: Arc<RwLock<crate::robot::parameters::ParameterStore>>,
+
+    /// ScalpSwing kanal konfigürasyonu (A1+). Mevcut SL/TP/leverage bounds
+    /// + auto_tune feedback loop bu alandan okur. Default scalp/swing_enabled=false
+    /// (A2 dispatch hazır olana kadar pasif). `SCALP_SWING_ENABLE=1` env true ise
+    /// AppState::new her ikisini aktive eder.
+    pub scalp_swing_config: Arc<RwLock<crate::robot::scalp_swing::ScalpSwingConfig>>,
+
+    /// ScalpSwing kanal-bazlı istatistik tablosu. close_paper_position kapanışta
+    /// pos.kind'e göre güncelliyor; spawn_scalp_swing_tuner okuyup auto_tune
+    /// çağırıyor. HashMap kullanmıyoruz — sabit 2 kanal (Scalp/Swing).
+    pub scalp_swing_stats: Arc<RwLock<crate::robot::scalp_swing::ScalpSwingStatsTable>>,
 }
 
 /// 🧠 OTONOM DEĞERLENDİRME: `ml_engine::IntelligenceHub`'dan gelen ham 
@@ -225,6 +236,19 @@ impl AppState {
                 crate::evolution::AutonomousControllerConfig::default(),
             ),
         );
+        // ScalpSwing config: env SCALP_SWING_ENABLE=1 ise scalp+swing kanalları
+        // aktive edilir; aksi halde Default (her ikisi de disabled, A2 cycle
+        // dispatch'i pas geçer).
+        let mut scalp_swing_cfg = crate::robot::scalp_swing::ScalpSwingConfig::default();
+        let ss_enable = std::env::var("SCALP_SWING_ENABLE")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        if ss_enable {
+            scalp_swing_cfg.scalp_enabled = true;
+            scalp_swing_cfg.swing_enabled = true;
+        }
+
         let brain = BrainBox {
             ml_signal: "HOLD".to_string(),
             ml_confidence: 0.0,
@@ -240,6 +264,10 @@ impl AppState {
             // Faz 2: parametre store'u boot'ta env override'larıyla beslenir.
             parameters: Arc::new(RwLock::new(
                 crate::robot::parameters::ParameterStore::from_env(),
+            )),
+            scalp_swing_config: Arc::new(RwLock::new(scalp_swing_cfg)),
+            scalp_swing_stats:  Arc::new(RwLock::new(
+                crate::robot::scalp_swing::ScalpSwingStatsTable::default(),
             )),
         };
 

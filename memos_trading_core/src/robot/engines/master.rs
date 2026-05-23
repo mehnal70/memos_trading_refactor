@@ -2323,6 +2323,11 @@ impl Engine {
                 stop_loss, take_profit, trailing_stop,
                 max_favorable_price: entry,
                 breakeven_activated: false,
+                // A1: ScalpSwing kanal mührü. Bu açılış engine cycle'ın varsayılan
+                // (SUPERTREND/BB/RSI vb.) yolu — kind=None → Regular. A2 dispatch
+                // ScalpEngine/SwingEngine fırsatı bulup açtığında Some(TradeType)
+                // taşıyan ayrı bir açılış patikası kullanılır.
+                kind: None,
             };
             Some(OpenPlan {
                 new_pos, alloc_capital, qty_val,

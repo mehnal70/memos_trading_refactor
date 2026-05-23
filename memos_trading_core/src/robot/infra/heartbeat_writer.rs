@@ -287,6 +287,7 @@ mod tests {
                     trailing_stop: 0.0,
                     max_favorable_price: 1.0,
                     breakeven_activated: false,
+                    kind: None,
                 });
             }
         }

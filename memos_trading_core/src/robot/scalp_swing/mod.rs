@@ -75,6 +75,36 @@ pub struct ScalpSwingConfig {
     pub scalp_score_bounds: ParamBounds, pub swing_score_bounds: ParamBounds,
 }
 
+impl Default for ScalpSwingConfig {
+    fn default() -> Self {
+        // Pratik bir başlangıç seti — env override mevcut değilse devreye girer.
+        // adjust_every_n>0 → bounds gerçekten otonom ayar yapar.
+        let sl_b   = ParamBounds { min: 0.10, max: 3.0,  adjust_every_n: 5  };
+        let tp_b   = ParamBounds { min: 0.20, max: 8.0,  adjust_every_n: 5  };
+        let lev_b  = ParamBounds { min: 1.0,  max: 10.0, adjust_every_n: 5  };
+        let sc_b   = ParamBounds { min: 0.30, max: 0.95, adjust_every_n: 0  };
+        Self {
+            scalp_enabled: false,    // Opt-in: A2 cycle dispatch çalışana kadar pasif kalmasın
+            swing_enabled: false,
+            scalp_interval: "3m".into(),
+            swing_interval: "4h".into(),
+            scalp_sl_pct: 0.40, scalp_tp_pct: 0.80,
+            swing_sl_pct: 2.50, swing_tp_pct: 5.00,
+            scalp_leverage: 2.0, swing_leverage: 2.0,
+            scalp_budget_pct: Some(0.10), swing_budget_pct: Some(0.20),
+            commission_pct: Some(0.04), spread_pct: Some(0.02), slippage_pct: Some(0.05),
+            max_daily_loss_pct: 5.0, max_notional_usd: Some(100.0),
+            scalp_min_score: 0.55, swing_min_adx: 25.0, swing_min_score: 0.55,
+            max_scalp_per_symbol: 1, max_swing_per_symbol: 1,
+            scalp_active_hours: [0, 23], autonomous_tuning: true,
+            scalp_sl_bounds: sl_b.clone(), scalp_tp_bounds: tp_b.clone(),
+            swing_sl_bounds: sl_b.clone(), swing_tp_bounds: tp_b.clone(),
+            scalp_lev_bounds: lev_b.clone(), swing_lev_bounds: lev_b,
+            scalp_score_bounds: sc_b.clone(), swing_score_bounds: sc_b,
+        }
+    }
+}
+
 // --- 3. İSTATİSTİK VE OTONOM AYARLAMA ---
 
 #[derive(Debug, Clone, Default)]
@@ -89,6 +119,44 @@ impl ScalpSwingStats {
     pub fn profit_factor(&self) -> f64 {
         let loss = self.total_loss_pnl.abs();
         if loss < f64::EPSILON { 3.0 } else { self.total_win_pnl / loss }
+    }
+
+    /// Bir kapanışı tabloya işler — pnl pozitifse win, negatifse loss kanal'ına;
+    /// streak otomatik güncellenir. Tek-noktadan çağrılır (close_paper_position).
+    pub fn record_close(&mut self, pnl: f64) {
+        self.total_closed += 1;
+        self.total_pnl += pnl;
+        if pnl > 0.0 {
+            self.wins += 1;
+            self.total_win_pnl += pnl;
+            self.loss_streak = 0;
+        } else if pnl < 0.0 {
+            self.total_loss_pnl += -pnl;
+            self.loss_streak += 1;
+            if self.loss_streak > self.max_loss_streak {
+                self.max_loss_streak = self.loss_streak;
+            }
+        }
+    }
+}
+
+/// Scalp ve Swing istatistiklerini tek nokta-altında toplayan tablo.
+/// HashMap yerine sabit alan — yalnız 2 kanal var.
+#[derive(Debug, Clone, Default)]
+pub struct ScalpSwingStatsTable {
+    pub scalp: ScalpSwingStats,
+    pub swing: ScalpSwingStats,
+}
+
+impl ScalpSwingStatsTable {
+    /// Pozisyon kapanışını TradeType'a göre doğru kanal'a yönlendirir.
+    /// Regular ve None için no-op.
+    pub fn record_close(&mut self, kind: TradeType, pnl: f64) {
+        match kind {
+            TradeType::Scalp => self.scalp.record_close(pnl),
+            TradeType::Swing => self.swing.record_close(pnl),
+            TradeType::Regular => {}
+        }
     }
 }
 
