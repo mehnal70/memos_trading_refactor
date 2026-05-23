@@ -110,6 +110,39 @@ impl Default for TradeRiskParams {
     }
 }
 
+/// Otonom Leverage katmanı parametreleri (futures pozisyon açılışları için).
+/// `enabled=false` (default) → davranış legacy: open_paper_position lev=1.0
+/// kullanmaya devam eder (spot). True ise `resolve_leverage` çağrısı
+/// rejim + ML confidence + win rate + noise floor karışımıyla [1.0, max]
+/// arasında bir değer üretir.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct LeverageParams {
+    /// Master kapı. False → tüm pozisyonlar lev=1.0 (spot davranış).
+    pub enabled: bool,
+    /// Modülasyon başlangıç noktası. Rejim/conf/win_rate çarpanları bunun
+    /// üzerine binip [1.0, max]'a clamp edilir.
+    pub base: f64,
+    /// Sert üst sınır — risk filter ve clamp burayı geçmez.
+    pub max: f64,
+    /// ML confidence eşiği — bu değer ve üstünde lev *= 1.2 boost.
+    pub conf_boost_threshold: f64,
+    /// SymbolStats.noise_floor_pct (median ATR%) bu değerin üstündeyse
+    /// lev *= 0.7 (yüksek volatilitede pozisyon küçült).
+    pub vol_floor_pct: f64,
+}
+
+impl Default for LeverageParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,      // futures için opt-in; spot'ta hardcoded 1.0 davranışı korunur
+            base: 3.0,
+            max: 10.0,           // core/model.rs default_leverage_max ile aynı
+            conf_boost_threshold: 0.70,
+            vol_floor_pct: 1.0,  // %1 median ATR — bunun üstü "yüksek wiggle"
+        }
+    }
+}
+
 /// Multi-TF (Faz B) parametreleri. Engine cycle StrategyEval öncesi
 /// `load_htf_candles` çağrısını ve run_download_job HTF fetch'ini kontrol eder.
 /// `enabled=false` → davranış legacy single-TF ile aynı (htf_slice=None,
@@ -248,6 +281,9 @@ pub struct ParameterStore {
     /// Multi-TF (Faz B) parametreleri. Engine cycle ve download path bu alanı okur.
     #[serde(default)]
     pub multi_tf: MultiTfParams,
+    /// Otonom leverage katmanı (futures). Default disabled → lev=1.0.
+    #[serde(default)]
+    pub leverage: LeverageParams,
 }
 
 /// Strateji niyetiyle hizalı default trail target'lar (yüzde, entry'den uzaklık).
@@ -295,6 +331,7 @@ impl Default for ParameterStore {
             strategy_trail_targets: default_strategy_trail_targets(),
             trail_feedback: HashMap::new(),
             multi_tf: MultiTfParams::default(),
+            leverage: LeverageParams::default(),
         }
     }
 }
@@ -351,7 +388,77 @@ impl ParameterStore {
         if let Some(v) = parse_env_bool("MULTI_TF_DOWNLOAD") {
             store.multi_tf.download_htf = v;
         }
+        // Leverage (otonom katman) env override'ları.
+        if let Some(v) = parse_env_bool("LEVERAGE_ENABLED") {
+            store.leverage.enabled = v;
+        }
+        if let Some(v) = parse_env_f64("LEVERAGE_BASE") {
+            store.leverage.base = v;
+        }
+        if let Some(v) = parse_env_f64("LEVERAGE_MAX") {
+            store.leverage.max = v;
+        }
+        if let Some(v) = parse_env_f64("LEVERAGE_CONF_THRESHOLD") {
+            store.leverage.conf_boost_threshold = v;
+        }
+        if let Some(v) = parse_env_f64("LEVERAGE_VOL_FLOOR_PCT") {
+            store.leverage.vol_floor_pct = v;
+        }
         store
+    }
+
+    /// Otonom leverage çözücü. enabled=false ise daima 1.0 döner.
+    /// Formül (base'in üzerine çarpan katmanları, sonda [1.0, max] clamp):
+    ///   - Rejim: HighVolatility → ×0.5, Strong{Up,Down}trend → ×1.3,
+    ///     Ranging/LowVolatility → ×1.0, Weak* / Unknown → ×0.9.
+    ///   - ML confidence ≥ conf_boost_threshold → ×1.2.
+    ///   - win_rate ≥ 0.6 → ×1.15; ∈ (0.0, 0.4] → ×0.75; aksi (0 veya nötr) → ×1.0.
+    ///   - noise_floor_pct > vol_floor_pct → ×0.7 (yüksek wiggle).
+    ///
+    /// `win_rate=0.0` "henüz veri yok" anlamında nötr sayılır (yeni başlangıç
+    /// cezalandırılmaz). `noise_floor_pct=None` (stats yok) → volatilite
+    /// faktörü uygulanmaz.
+    pub fn resolve_leverage(
+        &self,
+        regime: &str,
+        ml_confidence: f64,
+        win_rate: f64,
+        noise_floor_pct: Option<f64>,
+    ) -> f64 {
+        if !self.leverage.enabled {
+            return 1.0;
+        }
+        let mut lev = self.leverage.base;
+
+        // Rejim modülasyonu
+        lev *= match regime {
+            "HighVolatility" | "Volatile"               => 0.5,
+            "StrongUptrend"  | "StrongDowntrend"        => 1.3,
+            "Ranging"        | "LowVolatility"          => 1.0,
+            // Weak trends / Unknown → temkinli
+            _ => 0.9,
+        };
+
+        // ML confidence boost
+        if ml_confidence >= self.leverage.conf_boost_threshold {
+            lev *= 1.2;
+        }
+
+        // Win rate feedback (0.0 = "veri yok" → nötr)
+        if win_rate >= 0.6 {
+            lev *= 1.15;
+        } else if win_rate > 0.0 && win_rate <= 0.4 {
+            lev *= 0.75;
+        }
+
+        // Volatilite tabanı — symbol_stats taze değilse None → atla
+        if let Some(noise) = noise_floor_pct {
+            if noise > self.leverage.vol_floor_pct {
+                lev *= 0.7;
+            }
+        }
+
+        lev.clamp(1.0, self.leverage.max.max(1.0))
     }
 
     /// `EdgeThresholds::for_confidence`'in kestirme erişim noktası.
@@ -836,6 +943,105 @@ mod tests {
         assert_eq!(parse_env_bool("MTF_TEST_BOOL"), None);
         std::env::remove_var("MTF_TEST_BOOL");
         assert_eq!(parse_env_bool("MTF_TEST_BOOL"), None);
+    }
+
+    // ─── Leverage (Otonom katman) ────────────────────────────────────────
+
+    fn enabled_lev_store() -> ParameterStore {
+        let mut s = ParameterStore::default();
+        s.leverage.enabled = true;
+        s.leverage.base = 3.0;
+        s.leverage.max = 10.0;
+        s.leverage.conf_boost_threshold = 0.70;
+        s.leverage.vol_floor_pct = 1.0;
+        s
+    }
+
+    #[test]
+    fn resolve_leverage_returns_one_when_disabled() {
+        let s = ParameterStore::default(); // enabled = false by default
+        assert_eq!(s.resolve_leverage("StrongUptrend", 0.9, 0.7, Some(0.5)), 1.0);
+    }
+
+    #[test]
+    fn resolve_leverage_uses_regime_factor() {
+        let s = enabled_lev_store();
+        // base=3.0, ranging=×1.0, ml=0.5 (no boost), wr=0.5 (neutral), no vol → 3.0
+        let lev = s.resolve_leverage("Ranging", 0.5, 0.5, Some(0.5));
+        assert!((lev - 3.0).abs() < 1e-9, "ranging+neutral → base, got {}", lev);
+    }
+
+    #[test]
+    fn resolve_leverage_high_vol_halves() {
+        let s = enabled_lev_store();
+        // base=3.0 × 0.5 = 1.5
+        let lev = s.resolve_leverage("HighVolatility", 0.5, 0.5, None);
+        assert!((lev - 1.5).abs() < 1e-9, "highvol → ×0.5, got {}", lev);
+    }
+
+    #[test]
+    fn resolve_leverage_strong_trend_with_conf_and_wins() {
+        let s = enabled_lev_store();
+        // 3.0 × 1.3 (strong up) × 1.2 (conf>0.70) × 1.15 (wr≥0.6) = 5.382
+        let lev = s.resolve_leverage("StrongUptrend", 0.85, 0.7, Some(0.3));
+        assert!((lev - 5.382).abs() < 1e-3, "boost stack: 3×1.3×1.2×1.15, got {}", lev);
+    }
+
+    #[test]
+    fn resolve_leverage_clamps_to_max() {
+        let mut s = enabled_lev_store();
+        s.leverage.base = 8.0;
+        // 8.0 × 1.3 × 1.2 × 1.15 = 14.35 → clamp to max 10.0
+        let lev = s.resolve_leverage("StrongDowntrend", 0.9, 0.7, Some(0.3));
+        assert!((lev - 10.0).abs() < 1e-9, "clamp to max, got {}", lev);
+    }
+
+    #[test]
+    fn resolve_leverage_clamps_to_floor_one() {
+        let s = enabled_lev_store();
+        // 3.0 × 0.5 (highvol) × 0.75 (wr=0.3) × 0.7 (high noise) = 0.7875 → clamp 1.0
+        let lev = s.resolve_leverage("HighVolatility", 0.5, 0.3, Some(2.5));
+        assert!((lev - 1.0).abs() < 1e-9, "floor 1.0 koruması, got {}", lev);
+    }
+
+    #[test]
+    fn resolve_leverage_zero_winrate_treated_neutral() {
+        let s = enabled_lev_store();
+        // wr=0.0 ("veri yok") cezalandırılmamalı: base=3.0 × ranging=1.0 = 3.0
+        let lev_zero = s.resolve_leverage("Ranging", 0.5, 0.0, None);
+        let lev_neut = s.resolve_leverage("Ranging", 0.5, 0.5, None);
+        assert!((lev_zero - lev_neut).abs() < 1e-9, "0.0 nötr olmalı, zero={} neut={}", lev_zero, lev_neut);
+    }
+
+    #[test]
+    fn resolve_leverage_noise_floor_optional() {
+        let s = enabled_lev_store();
+        // None → vol faktörü uygulanmaz; Some(altında) → uygulanmaz; Some(üstünde) → ×0.7
+        let lev_none  = s.resolve_leverage("Ranging", 0.5, 0.5, None);
+        let lev_under = s.resolve_leverage("Ranging", 0.5, 0.5, Some(0.5));
+        let lev_over  = s.resolve_leverage("Ranging", 0.5, 0.5, Some(2.0));
+        assert!((lev_none - lev_under).abs() < 1e-9);
+        assert!(lev_over < lev_none, "yüksek noise → düşük lev");
+    }
+
+    #[test]
+    fn from_env_leverage_override_chain() {
+        std::env::set_var("LEVERAGE_ENABLED",        "true");
+        std::env::set_var("LEVERAGE_BASE",           "5.0");
+        std::env::set_var("LEVERAGE_MAX",            "20.0");
+        std::env::set_var("LEVERAGE_CONF_THRESHOLD", "0.80");
+        std::env::set_var("LEVERAGE_VOL_FLOOR_PCT",  "1.5");
+        let s = ParameterStore::from_env();
+        std::env::remove_var("LEVERAGE_ENABLED");
+        std::env::remove_var("LEVERAGE_BASE");
+        std::env::remove_var("LEVERAGE_MAX");
+        std::env::remove_var("LEVERAGE_CONF_THRESHOLD");
+        std::env::remove_var("LEVERAGE_VOL_FLOOR_PCT");
+        assert!(s.leverage.enabled);
+        assert!((s.leverage.base - 5.0).abs() < 1e-9);
+        assert!((s.leverage.max - 20.0).abs() < 1e-9);
+        assert!((s.leverage.conf_boost_threshold - 0.80).abs() < 1e-9);
+        assert!((s.leverage.vol_floor_pct - 1.5).abs() < 1e-9);
     }
 
     #[test]
