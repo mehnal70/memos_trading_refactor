@@ -236,17 +236,17 @@ impl AppState {
                 crate::evolution::AutonomousControllerConfig::default(),
             ),
         );
-        // ScalpSwing config: env SCALP_SWING_ENABLE=1 ise scalp+swing kanalları
-        // aktive edilir; aksi halde Default (her ikisi de disabled, A2 cycle
-        // dispatch'i pas geçer).
+        // ScalpSwing config: A6 sonrası default true (otonom davranış). Operatör
+        // SCALP_SWING_ENABLE=0/false/no/off ile her iki kanalı kapatabilir;
+        // env set değilse veya true ise default'lar geçerli kalır.
         let mut scalp_swing_cfg = crate::robot::scalp_swing::ScalpSwingConfig::default();
-        let ss_enable = std::env::var("SCALP_SWING_ENABLE")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"))
-            .unwrap_or(false);
-        if ss_enable {
-            scalp_swing_cfg.scalp_enabled = true;
-            scalp_swing_cfg.swing_enabled = true;
+        if let Ok(v) = std::env::var("SCALP_SWING_ENABLE") {
+            let off = matches!(v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off");
+            if off {
+                scalp_swing_cfg.scalp_enabled = false;
+                scalp_swing_cfg.swing_enabled = false;
+            }
         }
 
         let brain = BrainBox {

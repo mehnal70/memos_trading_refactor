@@ -84,8 +84,12 @@ impl Default for ScalpSwingConfig {
         let lev_b  = ParamBounds { min: 1.0,  max: 10.0, adjust_every_n: 5  };
         let sc_b   = ParamBounds { min: 0.30, max: 0.95, adjust_every_n: 0  };
         Self {
-            scalp_enabled: false,    // Opt-in: A2 cycle dispatch çalışana kadar pasif kalmasın
-            swing_enabled: false,
+            // A6: default true → otonom davranış. Cycle içindeki rejim auto-gate
+            // (try_open_scalp_swing) HighVolatility'de skip eder; tuner ise
+            // düşük win_rate kanalını kendi kendine kapatır. Operatör override
+            // istiyorsa SCALP_SWING_ENABLE=0 set ederek tamamen pasifleştirir.
+            scalp_enabled: true,
+            swing_enabled: true,
             scalp_interval: "3m".into(),
             swing_interval: "4h".into(),
             scalp_sl_pct: 0.40, scalp_tp_pct: 0.80,
@@ -435,11 +439,13 @@ mod tests {
     }
 
     #[test]
-    fn config_default_starts_disabled() {
+    fn config_default_is_autonomous() {
+        // A6: default scalp/swing açık (otonom davranış). Rejim auto-gate
+        // ve win_rate-bazlı kapama bunları runtime'da modüle eder.
         let cfg = ScalpSwingConfig::default();
-        assert!(!cfg.scalp_enabled);
-        assert!(!cfg.swing_enabled);
-        assert!(cfg.autonomous_tuning); // ama tuner kendisi aktif
+        assert!(cfg.scalp_enabled);
+        assert!(cfg.swing_enabled);
+        assert!(cfg.autonomous_tuning);
         assert!(cfg.scalp_lev_bounds.adjust_every_n > 0);
         assert!(cfg.swing_lev_bounds.adjust_every_n > 0);
     }

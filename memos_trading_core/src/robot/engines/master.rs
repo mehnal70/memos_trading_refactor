@@ -977,6 +977,31 @@ impl Engine {
                                 &mut cfg,
                             ));
                         }
+                        // A6: Otonom kanal-kapama. 20+ trade'lik yeterli sample
+                        // varsa ve win_rate < 0.30 ise kanal kalıcı olarak
+                        // pasifleştirilir → ScalpSwing fırsatı üretmeyi durur.
+                        // Operatör override: cfg.scalp_enabled/swing_enabled
+                        // manuel re-enable (UI veya config dosyası).
+                        if cfg.scalp_enabled
+                            && stats.scalp.total_closed >= 20
+                            && stats.scalp.win_rate() < 0.30
+                        {
+                            cfg.scalp_enabled = false;
+                            summary.push(format!(
+                                "SCP Auto-Disabled (wr={:.2}, n={})",
+                                stats.scalp.win_rate(), stats.scalp.total_closed,
+                            ));
+                        }
+                        if cfg.swing_enabled
+                            && stats.swing.total_closed >= 20
+                            && stats.swing.win_rate() < 0.30
+                        {
+                            cfg.swing_enabled = false;
+                            summary.push(format!(
+                                "SWG Auto-Disabled (wr={:.2}, n={})",
+                                stats.swing.win_rate(), stats.swing.total_closed,
+                            ));
+                        }
                         if !summary.is_empty() {
                             if let Ok(st) = state.lock() {
                                 if let Ok(mut w) = st.brain.scalp_swing_config.write() {
@@ -2309,11 +2334,29 @@ impl Engine {
             (cfg, slots)
         };
 
-        // 2) Adayları topla — disabled olan engine boş döner.
-        let scalp_opp = if cfg.scalp_enabled {
+        // A6: Rejim-bazlı auto-gate. ScalpSwing'i otonomca rejim sinyaliyle
+        // modüle eder — operatör flag'iyle değil:
+        //   HighVolatility       → her iki kanal skip (kaos savunması)
+        //   Ranging/LowVolatility → sadece Scalp uygun (kısa-vade fırsat)
+        //   StrongUp/StrongDown   → sadece Swing uygun (trend takip)
+        //   Weak*/Unknown         → her ikisi de aday (genel)
+        // cfg.scalp_enabled/swing_enabled'in üstüne biner — disabled kanal
+        // hiçbir koşulda açılmaz; enabled kanal yalnız uygun rejimde aday olur.
+        use crate::evolution::MarketRegime;
+        let regime = Self::classify_regime(candles);
+        if matches!(regime, MarketRegime::HighVolatility) {
+            return false; // savunma
+        }
+        let (scalp_ok, swing_ok) = match regime {
+            MarketRegime::Ranging | MarketRegime::LowVolatility => (true,  false),
+            MarketRegime::StrongUptrend | MarketRegime::StrongDowntrend => (false, true),
+            _ => (true, true),
+        };
+
+        let scalp_opp = if cfg.scalp_enabled && scalp_ok {
             ScalpEngine::evaluate(candles, cfg.scalp_min_score)
         } else { None };
-        let swing_opp = if cfg.swing_enabled {
+        let swing_opp = if cfg.swing_enabled && swing_ok {
             SwingEngine::evaluate(candles, cfg.swing_min_adx, cfg.swing_min_score)
         } else { None };
 
