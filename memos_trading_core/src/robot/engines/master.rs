@@ -2792,6 +2792,7 @@ impl Engine {
         if let Some(logger) = logger_for_event {
             let ev = crate::robot::infra::logger::TradeEvent::trade_open(
                 symbol, &strategy_name, is_long, entry, qty_val, equity_now,
+                pos_for_log.leverage,
             );
             let _ = logger.log_event(&ev);
         }
