@@ -315,6 +315,10 @@ impl Engine {
             // İlk başarılı çekimde özet log'u TUI'ye düşür (sonrasında sessiz, sadece anomalide konuşur).
             let mut first_summary_pending = true;
             let mut last_error_summary_at: u64 = 0;
+            // Aynı mesaj içeriği art arda spam'lamasın — son özet bellekte tutulur;
+            // sonraki çağrıda içerik birebir aynıysa atılır. BEATUSDT/BLESSUSDT gibi
+            // kalıcı geçersiz sembollerin TUI'de tekrar tekrar görünmesini engeller.
+            let mut last_error_summary_msg: String = String::new();
 
             loop {
                 let (symbols, interval, stop) = {
@@ -377,13 +381,22 @@ impl Engine {
                             .take(3).collect::<Vec<_>>().join(" · "),
                     ))
                 } else if !errors.is_empty()
-                    && now_secs.saturating_sub(last_error_summary_at) >= 30 {
-                    last_error_summary_at = now_secs;
-                    Some(format!(
+                    && now_secs.saturating_sub(last_error_summary_at) >= 300 {
+                    // Throttle 300sn (5dk) — kalıcı kötü sembolün 30sn'de bir
+                    // tekrarlanmasının operatör değeri yok. + dedupe: özet
+                    // metni bir öncekiyle aynıysa skip (hata seti değişmemişse).
+                    let msg = format!(
                         "⚠️ Price-poll: {}/{} sembolde hata. Örn: {}",
                         errors.len(), symbols.len(),
                         errors.first().map(|(s, e)| format!("{}: {}", s, e)).unwrap_or_default(),
-                    ))
+                    );
+                    if msg == last_error_summary_msg {
+                        None
+                    } else {
+                        last_error_summary_at = now_secs;
+                        last_error_summary_msg = msg.clone();
+                        Some(msg)
+                    }
                 } else { None };
 
                 // `now_secs` task başlangıcından elapsed; record_step ise bridge.rs
