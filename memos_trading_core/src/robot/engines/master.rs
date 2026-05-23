@@ -3075,6 +3075,16 @@ impl Engine {
                 }
             }
 
+            // ─── ScalpSwing A3: kanal-bazlı stats güncellemesi ──────────────
+            // pos.kind None ise Regular akış (klasik strateji yolu) → no-op.
+            // Some(Scalp/Swing) ise ilgili ScalpSwingStats kanal'ına pnl
+            // kaydı geçer (wins/losses/total_pnl/streak otomatik).
+            if let Some(kind) = pos.kind {
+                if let Ok(mut tbl) = st.brain.scalp_swing_stats.write() {
+                    tbl.record_close(kind, pnl_val);
+                }
+            }
+
             st.push_log(format!(
                 "{} [{}-CLOSE/{}] {} kapatıldı @ {:.2} (entry={:.2}) | Net PnL: {:.2} USDT ({:+.2}%)",
                 reason.emoji(), mode_tag, reason.as_str(), symbol, exit_price, pos.entry_price, pnl_val, pnl_pct_val,
