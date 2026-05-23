@@ -26,13 +26,17 @@ pub fn htf_trend_filter(
     let slow_ma = CoreIndicatorEngine::sma(htf, slow);
     if fast_ma == 0.0 || slow_ma == 0.0 { return signal; }
 
+    // Log seviyesi debug: bu filter her cycle her stratejide tetiklenir
+    // (~10 sembol × 3 strateji × saniyede 1 = ~30 log/sn) → INFO seviyesinde
+    // operatör logunu spam'ler. Debug seviyesinde sorun debug modunda
+    // görünür kalır; canlı kategori 'sessizce filtrelendi'.
     match signal {
         Signal::Buy if fast_ma < slow_ma => {
-            log::info!("[{}] MTF Filter: Bearish HTF -> Hold", name);
+            log::debug!("[{}] MTF Filter: Bearish HTF -> Hold", name);
             Signal::Hold
         }
         Signal::Sell if fast_ma > slow_ma => {
-            log::info!("[{}] MTF Filter: Bullish HTF -> Hold", name);
+            log::debug!("[{}] MTF Filter: Bullish HTF -> Hold", name);
             Signal::Hold
         }
         other => other,
