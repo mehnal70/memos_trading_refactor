@@ -376,4 +376,71 @@ mod tests {
         assert_eq!(cfg.scalp_leverage, 2.0);
         assert_eq!(cfg.swing_leverage, 2.0);
     }
+
+    // ─── A1-A4 zinciri: StatsTable + record_close + auto_tune ────────────
+
+    #[test]
+    fn stats_table_routes_to_scalp_channel() {
+        let mut tbl = ScalpSwingStatsTable::default();
+        tbl.record_close(TradeType::Scalp, 5.0);
+        tbl.record_close(TradeType::Scalp, -2.0);
+        tbl.record_close(TradeType::Swing, 10.0);
+        assert_eq!(tbl.scalp.total_closed, 2);
+        assert_eq!(tbl.scalp.wins, 1);
+        assert!((tbl.scalp.total_pnl - 3.0).abs() < 1e-9);
+        assert_eq!(tbl.swing.total_closed, 1);
+        assert_eq!(tbl.swing.wins, 1);
+        assert_eq!(tbl.swing.loss_streak, 0);
+    }
+
+    #[test]
+    fn stats_table_regular_is_noop() {
+        let mut tbl = ScalpSwingStatsTable::default();
+        tbl.record_close(TradeType::Regular, 100.0);
+        assert_eq!(tbl.scalp.total_closed, 0);
+        assert_eq!(tbl.swing.total_closed, 0);
+    }
+
+    #[test]
+    fn record_close_increments_loss_streak() {
+        let mut s = ScalpSwingStats::default();
+        s.record_close(-1.0);
+        s.record_close(-1.0);
+        s.record_close(-1.0);
+        assert_eq!(s.loss_streak, 3);
+        assert_eq!(s.max_loss_streak, 3);
+        s.record_close(2.0); // win → streak sıfır
+        assert_eq!(s.loss_streak, 0);
+        assert_eq!(s.max_loss_streak, 3); // max bozulmaz
+    }
+
+    #[test]
+    fn end_to_end_close_then_tune_cycle() {
+        // Tuner döngüsünün manuel simülasyonu: önce 3 kayıp, sonra 7 kazanç →
+        // final loss_streak=0 (win'ler streak'i sıfırlar). Aksi sırada `pf<0.80
+        // || streak>=3` ekstra ×0.70 lev cut tetiklenir ve TP/Lev boost'u ezer.
+        let mut tbl = ScalpSwingStatsTable::default();
+        for _ in 0..3 { tbl.record_close(TradeType::Scalp, -1.0); }
+        for _ in 0..7 { tbl.record_close(TradeType::Scalp,  2.0); }
+        // wr = 7/10 = 0.70, pf = 14/3 ≈ 4.67, loss_streak=0
+        let mut cfg = make_cfg();
+        let before_lev = cfg.scalp_leverage;
+        let before_tp  = cfg.scalp_tp_pct;
+        let changes = auto_tune(&tbl.scalp, TradeType::Scalp, &mut cfg);
+        assert!(cfg.scalp_leverage > before_lev,
+            "Lev artmalı, before={} after={}", before_lev, cfg.scalp_leverage);
+        assert!(cfg.scalp_tp_pct > before_tp);
+        assert!(changes.iter().any(|c| c.contains("TP Widened")));
+        assert!(changes.iter().any(|c| c.contains("Leverage Raised")));
+    }
+
+    #[test]
+    fn config_default_starts_disabled() {
+        let cfg = ScalpSwingConfig::default();
+        assert!(!cfg.scalp_enabled);
+        assert!(!cfg.swing_enabled);
+        assert!(cfg.autonomous_tuning); // ama tuner kendisi aktif
+        assert!(cfg.scalp_lev_bounds.adjust_every_n > 0);
+        assert!(cfg.swing_lev_bounds.adjust_every_n > 0);
+    }
 }
