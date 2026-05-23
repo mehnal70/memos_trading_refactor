@@ -110,6 +110,31 @@ impl Default for TradeRiskParams {
     }
 }
 
+/// Multi-TF (Faz B) parametreleri. Engine cycle StrategyEval öncesi
+/// `load_htf_candles` çağrısını ve run_download_job HTF fetch'ini kontrol eder.
+/// `enabled=false` → davranış legacy single-TF ile aynı (htf_slice=None,
+/// htf_trend_filter pass-through).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct MultiTfParams {
+    /// Master kapı. False ise loader çağrılmaz, generate_signal `None` htf alır.
+    pub enabled: bool,
+    /// Loader minimum mum eşiği. Daha az gelirse htf=None (filtre pass-through).
+    pub min_required: usize,
+    /// run_download_job HTF interval'i de indirsin mi.
+    /// False ise base interval yeterli sayılır (cycle 1m fallback'a yaslanır).
+    pub download_htf: bool,
+}
+
+impl Default for MultiTfParams {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_required: 30, // htf_trend_filter slow SMA = 30 → bu altında zaten guard
+            download_htf: true,
+        }
+    }
+}
+
 /// Partial fill anomali tespiti eşikleri (master.rs::detect_partial_fill_anomalies).
 /// Overfill ve cum-tutarsızlık için rounding payı + adverse slipaj limiti.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -220,6 +245,9 @@ pub struct ParameterStore {
     /// hedef genişler, düşükse daralır. `target_override` Phase B default'unu by-pass eder.
     #[serde(default)]
     pub trail_feedback: HashMap<(String, String), TrailFeedback>,
+    /// Multi-TF (Faz B) parametreleri. Engine cycle ve download path bu alanı okur.
+    #[serde(default)]
+    pub multi_tf: MultiTfParams,
 }
 
 /// Strateji niyetiyle hizalı default trail target'lar (yüzde, entry'den uzaklık).
@@ -266,6 +294,7 @@ impl Default for ParameterStore {
             symbol_stats: HashMap::new(),
             strategy_trail_targets: default_strategy_trail_targets(),
             trail_feedback: HashMap::new(),
+            multi_tf: MultiTfParams::default(),
         }
     }
 }
@@ -310,6 +339,17 @@ impl ParameterStore {
         if let Some(v) = std::env::var("SR_UPDATE_EVERY_SECS").ok()
             .and_then(|v| v.parse::<u64>().ok()) {
             store.sr_update_every_secs = v;
+        }
+        // Multi-TF (Faz B) env override'ları.
+        if let Some(v) = parse_env_bool("MULTI_TF_ENABLED") {
+            store.multi_tf.enabled = v;
+        }
+        if let Some(v) = std::env::var("MULTI_TF_MIN_REQUIRED").ok()
+            .and_then(|v| v.parse::<usize>().ok()) {
+            store.multi_tf.min_required = v;
+        }
+        if let Some(v) = parse_env_bool("MULTI_TF_DOWNLOAD") {
+            store.multi_tf.download_htf = v;
         }
         store
     }
@@ -587,6 +627,18 @@ fn parse_env_f64(key: &str) -> Option<f64> {
     std::env::var(key).ok().and_then(|v| v.parse().ok())
 }
 
+/// Bool env okuyucu — kabul edilen değerler: "1"/"0", "true"/"false",
+/// "yes"/"no", "on"/"off" (case-insensitive). Tanımsız veya tanınmayan
+/// değerlerde None döner → çağıran default değeri korur.
+fn parse_env_bool(key: &str) -> Option<bool> {
+    let v = std::env::var(key).ok()?;
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on"  => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 /// Sistemden epoch saniyesini okur; SystemTime hatasında 0 döner (cooldown
 /// kapanır → güvenli taraf: hiç drift atma değil, eski davranışla aynı).
 fn now_epoch_secs() -> u64 {
@@ -748,6 +800,42 @@ mod tests {
         let s = ParameterStore::from_env();
         std::env::remove_var("EDGE_THRESHOLD_COLD");
         assert_eq!(s.edge_thresholds.cold, 0.20);
+    }
+
+    // ─── Multi-TF (Faz B) ────────────────────────────────────────────────
+
+    #[test]
+    fn multi_tf_default_enabled() {
+        let s = ParameterStore::default();
+        assert!(s.multi_tf.enabled, "default'ta multi-TF açık olmalı");
+        assert_eq!(s.multi_tf.min_required, 30);
+        assert!(s.multi_tf.download_htf);
+    }
+
+    #[test]
+    fn from_env_multi_tf_disabled_via_env() {
+        std::env::set_var("MULTI_TF_ENABLED", "false");
+        std::env::set_var("MULTI_TF_DOWNLOAD", "0");
+        std::env::set_var("MULTI_TF_MIN_REQUIRED", "50");
+        let s = ParameterStore::from_env();
+        std::env::remove_var("MULTI_TF_ENABLED");
+        std::env::remove_var("MULTI_TF_DOWNLOAD");
+        std::env::remove_var("MULTI_TF_MIN_REQUIRED");
+        assert!(!s.multi_tf.enabled);
+        assert!(!s.multi_tf.download_htf);
+        assert_eq!(s.multi_tf.min_required, 50);
+    }
+
+    #[test]
+    fn parse_env_bool_accepts_common_forms() {
+        std::env::set_var("MTF_TEST_BOOL", "yes");
+        assert_eq!(parse_env_bool("MTF_TEST_BOOL"), Some(true));
+        std::env::set_var("MTF_TEST_BOOL", "OFF");
+        assert_eq!(parse_env_bool("MTF_TEST_BOOL"), Some(false));
+        std::env::set_var("MTF_TEST_BOOL", "garbage");
+        assert_eq!(parse_env_bool("MTF_TEST_BOOL"), None);
+        std::env::remove_var("MTF_TEST_BOOL");
+        assert_eq!(parse_env_bool("MTF_TEST_BOOL"), None);
     }
 
     #[test]

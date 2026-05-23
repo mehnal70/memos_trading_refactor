@@ -1858,14 +1858,22 @@ impl Engine {
             let strategy = crate::robot::logic::optimizer::make_strategy_pub(&strategy_name);
             let strat_params = crate::core::types::StrategyParams::default();
 
-            // ─── Multi-TF Faz B c2: HTF mumlarını yükle ───────────────────
+            // ─── Multi-TF Faz B c2/c3: HTF mumlarını yükle (env+param gate) ───
             // load_htf_candles önce DB'den (HTF interval), yetersizse 1m'den
             // CandleSynth ile aggregate. Boş Vec → strategies/utils
             // htf_trend_filter `len() < slow` guard'ı ile pass-through yapar.
-            let htf_candles_vec = crate::robot::data_pipeline::load_htf_candles(
-                db_path, symbol, interval,
-                crate::robot::data_pipeline::HTF_MIN_REQUIRED,
-            );
+            // MULTI_TF_ENABLED=false → htf=None ile legacy single-TF davranış.
+            let (multi_tf_enabled, multi_tf_min) = state.lock().ok()
+                .and_then(|st| st.brain.parameters.read().ok()
+                    .map(|p| (p.multi_tf.enabled, p.multi_tf.min_required)))
+                .unwrap_or((true, crate::robot::data_pipeline::HTF_MIN_REQUIRED));
+            let htf_candles_vec = if multi_tf_enabled {
+                crate::robot::data_pipeline::load_htf_candles(
+                    db_path, symbol, interval, multi_tf_min,
+                )
+            } else {
+                Vec::new()
+            };
             let htf_slice: Option<&[crate::core::types::Candle]> =
                 if htf_candles_vec.is_empty() { None } else { Some(&htf_candles_vec) };
 
@@ -3739,12 +3747,17 @@ impl Engine {
                                 st.push_log(format!("    └─ {} ✓ {} mum yazıldı", sym, n));
                             }
 
-                            // Multi-TF Faz B c2: HTF (üst zaman dilimi) mumlarını da indir.
+                            // Multi-TF Faz B c2/c3: HTF (üst zaman dilimi) mumlarını da indir.
                             // get_htf_interval base ile aynıysa atla (1d → 1d). HTF fetch
                             // başarısızsa sessiz geç — htf_trend_filter eksiklikte
                             // pass-through yapar, cycle yine de döner.
+                            // MULTI_TF_DOWNLOAD=false → HTF fetch skip (base interval yeterli).
+                            let download_htf = state.lock().ok()
+                                .and_then(|st| st.brain.parameters.read().ok()
+                                    .map(|p| p.multi_tf.enabled && p.multi_tf.download_htf))
+                                .unwrap_or(true);
                             let htf_interval = crate::robot::data_pipeline::DataPipeline::get_htf_interval(&interval);
-                            if htf_interval != interval {
+                            if download_htf && htf_interval != interval {
                                 let htf_limit = (limit / 4).max(50);
                                 match fetcher.fetch_latest(sym, htf_interval, htf_limit).await {
                                     Ok(htf_candles) if !htf_candles.is_empty() => {
