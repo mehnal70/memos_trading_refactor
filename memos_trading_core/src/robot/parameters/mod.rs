@@ -134,7 +134,11 @@ pub struct LeverageParams {
 impl Default for LeverageParams {
     fn default() -> Self {
         Self {
-            enabled: false,      // futures için opt-in; spot'ta hardcoded 1.0 davranışı korunur
+            // Otonom davranış (multi-TF ve ScalpSwing gibi). Formül rejime göre
+            // 0.5x-1.5x arası modüle eder; HighVolatility'de küçültür, conf+wr
+            // yüksekse büyütür. Risk: kazanç+kayıp lev katı. Kapatmak için
+            // `LEVERAGE_ENABLED=0` env. Manuel override: base/max env'leri.
+            enabled: true,
             base: 3.0,
             max: 10.0,           // core/model.rs default_leverage_max ile aynı
             conf_boost_threshold: 0.70,
@@ -959,8 +963,21 @@ mod tests {
 
     #[test]
     fn resolve_leverage_returns_one_when_disabled() {
-        let s = ParameterStore::default(); // enabled = false by default
+        // Default artık enabled=true (otonom davranış); kapalıya çekip kontrol.
+        let mut s = ParameterStore::default();
+        s.leverage.enabled = false;
         assert_eq!(s.resolve_leverage("StrongUptrend", 0.9, 0.7, Some(0.5)), 1.0);
+    }
+
+    #[test]
+    fn resolve_leverage_default_is_autonomous() {
+        let s = ParameterStore::default();
+        assert!(s.leverage.enabled, "default'ta otonom leverage açık");
+        assert_eq!(s.leverage.base, 3.0);
+        assert_eq!(s.leverage.max, 10.0);
+        // StrongUptrend + yüksek conf + iyi wr → 3.0 * 1.3 * 1.2 * 1.15 = 5.382
+        let lev = s.resolve_leverage("StrongUptrend", 0.85, 0.7, Some(0.3));
+        assert!(lev > 1.0 && lev <= 10.0, "dinamik aralık, got {}", lev);
     }
 
     #[test]

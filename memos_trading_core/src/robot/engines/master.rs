@@ -2780,9 +2780,9 @@ impl Engine {
             pos_for_log.stop_loss, pos_for_log.take_profit, pos_for_log.trailing_stop, atr, atr_mult,
         ));
         st.push_log(format!(
-            "    └─ Kelly f*={:.3} · risk_iştah={:.2} · ML={:.2} · TP%={:.2} SL%={:.2} · Rejim={} · Strat={}",
+            "    └─ Kelly f*={:.3} · risk_iştah={:.2} · ML={:.2} · TP%={:.2} SL%={:.2} · Lev={:.1}x · Rejim={} · Strat={}",
             kelly_fraction, risk_appetite, ml_conf, tp_pct, sl_pct,
-            regime.as_str(), strategy_name,
+            pos_for_log.leverage, regime.as_str(), strategy_name,
         ));
         // 📝 Periyodik dosya logu: TRADE_OPEN. Logger Arc'ını lock altında clone'la,
         // unlock sonrası IO yap.
