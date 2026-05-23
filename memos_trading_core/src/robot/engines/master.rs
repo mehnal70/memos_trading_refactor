@@ -3146,12 +3146,21 @@ impl Engine {
         let mut st = state.lock().unwrap();
 
         if let Some(pos) = target_pos {
-            // Çıkış fiyatı: SL/TP/Trailing'de kapanma seviyesi pos'taki değer; aksi son mum kapanışı.
+            // Çıkış fiyatı: SL/TP/Trailing pos'taki seviye. StrategySignal'da ise
+            // open_paper_position entry policy'siyle simetrik olmak için önce
+            // fleet.live_price (REST 5sn snapshot), yoksa candles.last().close.
+            //
+            // Eski davranış: hep candles.last().close → DB mumu 15dk eskiyse
+            // entry live, exit DB → asimetri sahte PnL üretiyordu (ScalpSwing
+            // dispatch'i bu döngüyü saatlik fiyat farkına göre büyütmüştü).
+            let fleet_live_price = st.fleet.live_price.read().ok()
+                .and_then(|m| m.get(symbol).copied())
+                .filter(|&v| v > 0.0);
             let exit_price = match reason {
                 ExitReason::StopLoss | ExitReason::Breakeven => pos.stop_loss,
                 ExitReason::TakeProfit                       => pos.take_profit,
                 ExitReason::TrailingStop                     => pos.trailing_stop,
-                ExitReason::StrategySignal                   => last_candle.close,
+                ExitReason::StrategySignal => fleet_live_price.unwrap_or(last_candle.close),
             };
             let exit_price = if exit_price > 0.0 { exit_price } else { last_candle.close };
 
