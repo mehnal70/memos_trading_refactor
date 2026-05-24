@@ -414,16 +414,38 @@ impl Engine {
 
                 let mut new_prices: Vec<(String, f64)> = Vec::with_capacity(symbols.len());
                 let mut errors: Vec<(String, String)> = Vec::new();
+                // PRICE_POLL_MAX_CANDLE_AGE_SECS: Binance 1m kline endpoint düşük
+                // likiditeli sembollerde (örn. BTCUSDC) saatler/günler önceki
+                // candle'ı döndürebiliyor. live_price'a stale değer yazılırsa
+                // open_paper_position entry o stale fiyatla açılır, sonra
+                // gerçek fiyatla kapanır → sahte PnL döngüsü (BTCUSDC 24h
+                // auditte 86 trade ile $3500+ sahte kâr basmıştı).
+                // Eşik default 300sn = 5dk × interval; 1m bar için 5 tane mum.
+                let max_candle_age: i64 = std::env::var("PRICE_POLL_MAX_CANDLE_AGE_SECS")
+                    .ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+                let mut stale_skipped: Vec<String> = Vec::new();
                 for sym in &symbols {
                     if sym.is_empty() { continue; }
                     match fetcher.fetch_latest(sym, &interval, 1).await {
                         Ok(candles) => {
                             if let Some(last) = candles.last() {
-                                if last.close > 0.0 { new_prices.push((sym.clone(), last.close)); }
+                                if last.close <= 0.0 { continue; }
+                                let age = (chrono::Utc::now() - last.timestamp).num_seconds();
+                                if max_candle_age > 0 && age > max_candle_age {
+                                    stale_skipped.push(format!("{}({}s)", sym, age));
+                                    continue;
+                                }
+                                new_prices.push((sym.clone(), last.close));
                             }
                         }
                         Err(e) => errors.push((sym.clone(), e)),
                     }
+                }
+                if !stale_skipped.is_empty() {
+                    log::warn!(
+                        "price_poll: {} sembol için stale candle (>{}sn) — live_price güncellenmedi: {}",
+                        stale_skipped.len(), max_candle_age, stale_skipped.join(","),
+                    );
                 }
 
                 let now_secs = started_at.elapsed().as_secs();
@@ -4167,6 +4189,16 @@ impl Engine {
                 if !bist_ok(s) { continue; }
                 if !syms.contains(s) { syms.push(s.clone()); }
             }
+            // Açık pozisyon sembolleri (recovery sonrası orchestrator register'ı
+            // başarısız olursa veya trade pipeline-dışı bir sembolde açıldıysa
+            // defensive olarak buradan da yakalıyoruz). Aksi halde stale candle
+            // → price-sanity guard tetiklenir, pozisyon kapatılamaz.
+            if let Ok(positions) = st.finance.live_positions.read() {
+                for sym in positions.keys() {
+                    if !bist_ok(sym) { continue; }
+                    if !syms.contains(sym) { syms.push(sym.clone()); }
+                }
+            }
             syms.retain(|s| !s.is_empty());
             (syms, st.config.interval.clone(), st.config.db_path.clone(),
              st.config.download_candle_limit.max(50))
@@ -4379,9 +4411,26 @@ impl Engine {
                 let stale_syms: Vec<String> = stale.iter().map(|p| p.symbol.clone()).collect();
                 let bist_syms:  Vec<String> = bist.iter().map(|p| p.symbol.clone()).collect();
 
+                let market_for_orch = {
+                    let st = match state.lock() { Ok(s) => s, Err(_) => return };
+                    st.config.market.clone()
+                };
+                let loaded_syms: Vec<String> = loaded.iter().map(|p| p.symbol.clone()).collect();
                 if let Ok(st) = state.lock() {
                     if let Ok(mut map) = st.finance.live_positions.write() {
                         for pos in loaded { map.insert(pos.symbol.clone(), pos); }
+                    }
+                }
+                // Recovery edilen pozisyon sembollerini orchestrator'a register et.
+                // Aksi halde run_download_job sadece pinned + screener workers'ı
+                // dolduruyor → ATUSDT/BCHUSDT gibi recovery sembollerinin candle'ı
+                // güncellenmiyor (DB 2-3 ay eski kalıyor). Idempotent: zaten
+                // varsa register no-op.
+                if let Ok(st) = state.lock() {
+                    if let Ok(mut orch) = st.fleet.symbol_orchestrator.write() {
+                        for sym in &loaded_syms {
+                            orch.register(sym, &market_for_orch, &interval);
+                        }
                     }
                 }
                 if let Ok(mut st) = state.lock() {
