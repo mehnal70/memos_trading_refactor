@@ -441,7 +441,9 @@ impl Engine {
                         Err(e) => errors.push((sym.clone(), e)),
                     }
                 }
-                if !stale_skipped.is_empty() {
+                if !stale_skipped.is_empty()
+                    && log_throttle_should_emit("price_poll", "stale_candle", 300)
+                {
                     log::warn!(
                         "price_poll: {} sembol için stale candle (>{}sn) — live_price güncellenmedi: {}",
                         stale_skipped.len(), max_candle_age, stale_skipped.join(","),
@@ -4208,6 +4210,10 @@ impl Engine {
             return Err("indirilecek sembol yok (config.symbol + pinned + orchestrator boş)".into());
         }
 
+        log::info!(
+            "🌐 Download başladı: {} sembol × {} mum (interval={}) → {}",
+            symbols.len(), limit, interval, symbols.join(","),
+        );
         if let Ok(mut st) = state.lock() {
             st.push_log(format!(
                 "🌐 Download başladı: {} sembol × {} mum (interval={})",
@@ -4306,6 +4312,7 @@ impl Engine {
                 }
                 Err(e) => {
                     total_failed += 1;
+                    log::warn!("🌐 Download fetch hatası: {} → {}", sym, e);
                     if let Ok(mut st) = state.lock() {
                         st.push_log(format!("    └─ {} ❌ fetch hatası: {}", sym, e));
                     }
@@ -4314,6 +4321,13 @@ impl Engine {
         }
 
         // 4) Özet
+        log::info!(
+            "🌐 Download ✓ tamamlandı: {} mum (başarılı={}, başarısız={}) · {}",
+            total_fetched,
+            symbols.len() - total_failed,
+            total_failed,
+            per_symbol_summary.join(" · "),
+        );
         if let Ok(mut st) = state.lock() {
             st.fleet.download_active = false;
             st.push_log(format!(
