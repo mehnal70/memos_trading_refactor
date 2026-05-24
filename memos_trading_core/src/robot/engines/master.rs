@@ -209,6 +209,25 @@ impl Engine {
             // 2. İNFAZ DÖNGÜSÜ (ML + Q-Table + Risk)
             Self::execute_trade_cycle(&state, &snap).await;
 
+            // 3a. Stale anomaly purge: günlerce kalan Warning'leri (BEATUSDT/
+            // BLESSUSDT ApiError gibi) active sayımdan düş. Eşik default 1800sn
+            // (30 dk); env `ANOMALY_MAX_AGE_SECS` ile ayarlanır. Critical hiç
+            // silinmez. Her 60 tick (~30sn) bir kontrol yeter.
+            if tick_count % 60 == 0 {
+                let max_age: u64 = std::env::var("ANOMALY_MAX_AGE_SECS")
+                    .ok().and_then(|s| s.parse().ok()).unwrap_or(1800);
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                if let Ok(st) = state.lock() {
+                    if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
+                        let n_purged = pipe.purge_stale_warnings(now_secs, max_age);
+                        if n_purged > 0 {
+                            log::info!("anomaly purge: {} stale Warning silindi (>{}sn)", n_purged, max_age);
+                        }
+                    }
+                }
+            }
+
             // 3. SAVUNMA (Anomali Onarımı) — aktif anomali varsa phase = Recovering
             Self::perform_anomaly_recovery(&state, &snap);
 
@@ -2253,15 +2272,22 @@ impl Engine {
                 // (Aksi halde aç/kapa döngüsü ve komisyon erozyonu doğar.)
                 // Görünürlük: throttle'lı RISK_BLOCK olarak işaretle → operatör
                 // "neden trade yok?" sorusunu trades.jsonl'dan yanıtlayabilsin.
+                // Throttle: cycle başına SIGNAL bastığımız için 24h'de bir sembolde
+                // ~2000+ aynı satır birikiyordu (audit'te %99.96 RISK_BLOCK position-aligned).
+                // log_throttle_should_emit ile sembol+kind başına default 60sn cooldown.
                 (crate::core::types::Signal::Buy,  Some(true))
                 | (crate::core::types::Signal::Sell, Some(false)) => {
-                    if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
-                        let dir_label = if matches!(signal, Signal::Buy) { "LONG" } else { "SHORT" };
-                        let ev = crate::robot::infra::logger::TradeEvent::risk_block(
-                            &format!("[position-aligned] {} sinyali, pozisyon zaten {}", signal_label, dir_label),
-                            symbol,
-                        );
-                        let _ = logger.log_event(&ev);
+                    let cooldown: u64 = std::env::var("RISK_BLOCK_LOG_COOLDOWN_SECS")
+                        .ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+                    if log_throttle_should_emit(symbol, "risk_block_pos_aligned", cooldown) {
+                        if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
+                            let dir_label = if matches!(signal, Signal::Buy) { "LONG" } else { "SHORT" };
+                            let ev = crate::robot::infra::logger::TradeEvent::risk_block(
+                                &format!("[position-aligned] {} sinyali, pozisyon zaten {}", signal_label, dir_label),
+                                symbol,
+                            );
+                            let _ = logger.log_event(&ev);
+                        }
                     }
                 }
                 _ => {}
