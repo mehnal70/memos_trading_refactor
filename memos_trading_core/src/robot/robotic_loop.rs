@@ -132,6 +132,11 @@ pub struct FleetCommand {
     /// Ana otonom döngünün en son nabız anı (UNIX epoch saniye). Heartbeat task'ı bu alanı
     /// okuyarak `main_loop` adımının gerçekten ilerleyip ilerlemediğini denetler.
     pub last_loop_tick: Arc<AtomicU64>,
+    /// En son trade gerçekleştirilen an (UNIX epoch saniye). open_paper_position ve
+    /// close_paper_position set eder. Heartbeat snapshot'ı bu değere bakarak phase'i
+    /// "Executing" olarak rapor eder — anlık phase ~500ms süre yaşadığı için snapshot
+    /// alma anında nadiren yakalanıyordu (1540 tick'te 1 kez görülmüştü).
+    pub last_execution_epoch: Arc<AtomicU64>,
 }
 
 impl FleetCommand {
@@ -325,6 +330,7 @@ impl AppState {
             // Başlangıç değeri 0 → heartbeat'i hemen DataStall uyarısı vermesin diye
             // sonradan ana döngünün ilk turunda doldurulur.
             last_loop_tick: Arc::new(AtomicU64::new(0)),
+            last_execution_epoch: Arc::new(AtomicU64::new(0)),
         };
 
         let guardian = GuardianShield {

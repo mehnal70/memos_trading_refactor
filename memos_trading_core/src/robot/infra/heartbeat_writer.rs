@@ -81,10 +81,27 @@ impl HeartbeatRecord {
         let gbt_ready = state.brain.intelligence_hub.read()
             .map(|hub| hub.gbt.is_ready()).unwrap_or(false);
 
+        // Sticky phase: anlık phase yerine "son HEARTBEAT_EXEC_WINDOW_SECS içinde
+        // trade var mı?"a bakarak Executing rapor et. Booting/Stopped ham phase
+        // korunur (kalıcı durum). Default pencere 90sn — heartbeat 60sn periyot
+        // ile +1 snapshot tolerans.
+        let exec_window: u64 = std::env::var("HEARTBEAT_EXEC_WINDOW_SECS")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(90);
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let last_exec = state.fleet.last_execution_epoch.load(std::sync::atomic::Ordering::Relaxed);
+        let recently_executed = last_exec > 0
+            && now_epoch.saturating_sub(last_exec) <= exec_window;
+        let phase = match state.fleet.phase.as_str() {
+            "Booting" | "Stopped" => state.fleet.phase.clone(),
+            _ if recently_executed => "Executing".to_string(),
+            _ => state.fleet.phase.clone(),
+        };
+
         Self {
             timestamp: chrono::Utc::now().to_rfc3339(),
             tick,
-            phase: state.fleet.phase.clone(),
+            phase,
             equity,
             peak_equity: peak,
             drawdown_pct,
@@ -258,6 +275,44 @@ mod tests {
         }
         let rec3 = HeartbeatRecord::snapshot(&st, 2);
         assert_eq!(rec3.strategy, "SUPERTREND");
+    }
+
+    #[test]
+    fn phase_sticky_executing_when_recent_trade() {
+        use std::sync::atomic::Ordering;
+        let cfg = RoboticLoopConfig::default();
+        let st = AppState::new(cfg);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+        // Phase "Recovering" + 30sn önce trade yapıldı → snapshot "Executing" göstermeli.
+        st.fleet.last_execution_epoch.store(now.saturating_sub(30), Ordering::Relaxed);
+        let mut s = st;
+        s.fleet.phase = "Recovering".into();
+        let rec = HeartbeatRecord::snapshot(&s, 1);
+        assert_eq!(rec.phase, "Executing",
+            "Son 30sn'de trade var, sticky Executing dönmedi: {}", rec.phase);
+
+        // Pencere dışına çık (200sn önce) → ham phase Recovering kalmalı.
+        s.fleet.last_execution_epoch.store(now.saturating_sub(200), Ordering::Relaxed);
+        let rec2 = HeartbeatRecord::snapshot(&s, 2);
+        assert_eq!(rec2.phase, "Recovering",
+            "Pencere dışında ham phase yansımadı: {}", rec2.phase);
+
+        // Booting overrride edilmemeli.
+        s.fleet.last_execution_epoch.store(now.saturating_sub(10), Ordering::Relaxed);
+        s.fleet.phase = "Booting".into();
+        let rec3 = HeartbeatRecord::snapshot(&s, 3);
+        assert_eq!(rec3.phase, "Booting",
+            "Booting korunmadı, sticky ezdi: {}", rec3.phase);
+
+        // Hiç trade olmamış (epoch=0) → ham phase dönmeli.
+        s.fleet.last_execution_epoch.store(0, Ordering::Relaxed);
+        s.fleet.phase = "Scanning".into();
+        let rec4 = HeartbeatRecord::snapshot(&s, 4);
+        assert_eq!(rec4.phase, "Scanning",
+            "epoch=0 iken sticky tetiklendi: {}", rec4.phase);
     }
 
     #[tokio::test(flavor = "current_thread")]

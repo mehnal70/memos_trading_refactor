@@ -2916,6 +2916,9 @@ impl Engine {
         Self::persist_open_positions_snapshot(state);
         // Equity entry commission ile düştü → account_state'i de mühürle.
         Self::persist_account_state(state);
+        // Phase Executing göstergesi için: en son trade epoch'unu kaydet
+        // (heartbeat sticky phase okuması bu değere bakar).
+        Self::mark_execution_epoch(state);
     }
 
     /// 🧠 IntelligenceHub periyodik tick: drift hesabı + evrim + retrain kararı.
@@ -3499,6 +3502,8 @@ impl Engine {
         Self::persist_open_positions_snapshot(state);
         // Equity + peak + closed sayacı kapanışta değişti → DB'ye yansıt.
         Self::persist_account_state(state);
+        // Phase Executing göstergesi için: en son trade epoch'unu kaydet.
+        Self::mark_execution_epoch(state);
     }
 
 
@@ -3519,7 +3524,14 @@ impl Engine {
     fn perform_anomaly_recovery(state: &Arc<Mutex<AppState>>, snap: &MissionControl) {
         if snap.active_anomalies == 0 { return; }
         let mut st = state.lock().unwrap();
-        st.fleet.phase = "Recovering".into();
+        // Phase precedence: Booting/Executing > Recovering > Scanning.
+        // Aynı tick'te trade yapıldıysa (execute_trade_cycle phase'i Executing'e
+        // yazmışsa) onu ezme — operatör Executing'i görmeli. Stale ApiError
+        // anomaly'leri (BEATUSDT/BLESSUSDT) sürekli Recovering basıp 1540
+        // tick'te sadece 1 Executing görünmesine yol açıyordu.
+        if !matches!(st.fleet.phase.as_str(), "Executing" | "Booting") {
+            st.fleet.phase = "Recovering".into();
+        }
 
         // Anomalilerin özetini çıkar (severity sayım)
         let mut warning_n = 0u32;
@@ -4474,6 +4486,18 @@ impl Engine {
                     ));
                 }
             }
+        }
+    }
+
+    /// En son trade gerçekleştiği epoch saniyesini AppState'e mühürler. Heartbeat
+    /// snapshot bu değere bakarak "son N saniyede trade var → phase=Executing"
+    /// sticky raporlaması yapar. Tek anlık phase ~500ms yaşadığı için 60sn
+    /// heartbeat snapshot pencereisinde nadiren yakalanıyordu.
+    pub fn mark_execution_epoch(state: &Arc<Mutex<AppState>>) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        if let Ok(st) = state.lock() {
+            st.fleet.last_execution_epoch.store(now_secs, Ordering::Relaxed);
         }
     }
 
