@@ -217,6 +217,30 @@ fn price_sanity_guard_rejects_stale_entry() {
     assert_eq!(price_deviation_pct(100.0, 0.0), 0.0);
 }
 
+/// Candle freshness: stale candle (>300sn) ise guard pas geçmeli (live_price
+/// tek doğru kaynak). İlk canlı doğrulamada (build sonrası) DB candles 2-3
+/// gün eskidiği için guard tüm sembolleri yanlış pozitif bloklamıştı.
+#[test]
+fn candle_freshness_check_distinguishes_recent_from_stale() {
+    use memos_trading_core::robot::engines::master::candle_is_fresh;
+
+    // Default 300sn — 1dk önce taze
+    let recent = chrono::Utc::now() - chrono::Duration::seconds(60);
+    assert!(candle_is_fresh(&recent), "1dk önceki candle taze olmalı");
+
+    // 10dk önce stale
+    let stale = chrono::Utc::now() - chrono::Duration::seconds(600);
+    assert!(!candle_is_fresh(&stale), "10dk önceki candle stale sayılmalı");
+
+    // 2 gün önce kesinlikle stale
+    let ancient = chrono::Utc::now() - chrono::Duration::days(2);
+    assert!(!candle_is_fresh(&ancient), "2 gün önceki candle stale sayılmalı");
+
+    // Gelecek timestamp (saat ayarsız sistem) — negatif yaş, stale say
+    let future = chrono::Utc::now() + chrono::Duration::seconds(60);
+    assert!(!candle_is_fresh(&future), "Gelecek timestamp stale sayılmalı (negatif yaş)");
+}
+
 #[test]
 fn log_throttle_first_emits_then_suppresses_within_cooldown() {
     use memos_trading_core::robot::engines::master::log_throttle_should_emit;

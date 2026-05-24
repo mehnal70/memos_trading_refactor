@@ -80,6 +80,17 @@ pub fn price_deviation_exceeds(entry: f64, reference: f64, max_dev_pct: f64) -> 
     price_deviation_pct(entry, reference) > max_dev_pct
 }
 
+/// Candle'ın "fresh" olduğunu doğrular: now - candle.timestamp <= eşik.
+/// Eşik env `CANDLE_FRESHNESS_SECS` (default 300sn). DB candles günlerce
+/// eski olabilir (BIST veya pasif sembol) → bu durumda candle.close referans
+/// olarak güvenilmez; price sanity guard pas geçer.
+pub fn candle_is_fresh(candle_ts: &chrono::DateTime<chrono::Utc>) -> bool {
+    let max_age_secs: i64 = std::env::var("CANDLE_FRESHNESS_SECS")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+    let age_secs = (chrono::Utc::now() - *candle_ts).num_seconds();
+    age_secs >= 0 && age_secs <= max_age_secs
+}
+
 // Projedeki gerçek tiplerin ve trait'lerin bağlanması için ön hazırlık (Agnostik Katman)
 pub struct MLModel;
 pub struct Monitor;
@@ -2547,8 +2558,13 @@ impl Engine {
         // OPEN @ stale, CLOSE @ fresh → tek trade'de sahte +$58 PnL.
         // Threshold default %5; env `MAX_ENTRY_PRICE_DEVIATION_PCT` ile ayarlanır,
         // 0 verilirse guard kapanır.
+        //
+        // Önemli: candle'ın kendisi stale ise (DB günlerce eski) candle.close
+        // referans olamaz → guard pas geçer, live_price tek doğru kaynak.
+        // Eşik env `CANDLE_FRESHNESS_SECS` (default 300sn = 5dk).
+        let candle_fresh = candle_is_fresh(&last_candle.timestamp);
         let max_dev_pct: f64 = price_deviation_threshold_from_env();
-        if price_deviation_exceeds(entry, candle_close, max_dev_pct) {
+        if candle_fresh && price_deviation_exceeds(entry, candle_close, max_dev_pct) {
             let dev_pct = price_deviation_pct(entry, candle_close);
             if let Ok(mut st) = state.lock() {
                 st.push_log(format!(
