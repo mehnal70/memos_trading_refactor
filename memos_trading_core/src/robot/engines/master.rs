@@ -28,6 +28,48 @@ static PENDING_TRAIL_OBS: std::sync::OnceLock<std::sync::Mutex<
     std::collections::VecDeque<crate::robot::parameters::PendingTrailObservation>
 >> = std::sync::OnceLock::new();
 
+/// Delisted sembol tespit sayacı: sembol → ardışık fetch hatası sayısı.
+/// Eşik (DELISTED_DETECTION_THRESHOLD env, default 3) aşılınca
+/// orchestrator'dan çıkarılır + live pozisyonu varsa force-close. Başarılı
+/// fetch sayacı sıfırlar (geçici Binance hatasının yanlış pozitif olmaması için).
+static DELISTED_FAIL_COUNTERS: std::sync::OnceLock<std::sync::Mutex<
+    std::collections::HashMap<String, u32>
+>> = std::sync::OnceLock::new();
+
+fn delisted_counters() -> &'static std::sync::Mutex<std::collections::HashMap<String, u32>> {
+    DELISTED_FAIL_COUNTERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Ardışık fetch hatası sayacını artırır ve yeni sayıyı döner.
+pub fn delisted_record_failure(symbol: &str) -> u32 {
+    let mut guard = match delisted_counters().lock() {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+    let counter = guard.entry(symbol.to_string()).or_insert(0);
+    *counter += 1;
+    *counter
+}
+
+/// Başarılı fetch sonrası sayacı sıfırlar (geçici hata yanlış pozitif vermesin).
+pub fn delisted_record_success(symbol: &str) {
+    if let Ok(mut guard) = delisted_counters().lock() {
+        guard.remove(symbol);
+    }
+}
+
+/// Sayacı sorgular (test ve teşhis için).
+pub fn delisted_failure_count(symbol: &str) -> u32 {
+    delisted_counters().lock().ok().and_then(|g| g.get(symbol).copied()).unwrap_or(0)
+}
+
+/// Eşik (env DELISTED_DETECTION_THRESHOLD, default 3). 0 verilirse
+/// auto-detect kapanır (manuel müdahale için).
+pub fn delisted_detection_threshold() -> u32 {
+    std::env::var("DELISTED_DETECTION_THRESHOLD")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(3)
+}
+
 fn trail_obs_queue() -> &'static std::sync::Mutex<
     std::collections::VecDeque<crate::robot::parameters::PendingTrailObservation>
 > {
@@ -4230,6 +4272,9 @@ impl Engine {
         for sym in &symbols {
             match fetcher.fetch_latest(sym, &interval, limit).await {
                 Ok(candles) => {
+                    // Başarılı fetch → delisted sayacını sıfırla (geçici hata
+                    // sonrası sembol normalleştiyse yanlış pozitif olmasın).
+                    delisted_record_success(sym);
                     let n = candles.len();
                     total_fetched += n;
                     // 3) SQLite yazımı senkron → spawn_blocking
@@ -4315,6 +4360,12 @@ impl Engine {
                     log::warn!("🌐 Download fetch hatası: {} → {}", sym, e);
                     if let Ok(mut st) = state.lock() {
                         st.push_log(format!("    └─ {} ❌ fetch hatası: {}", sym, e));
+                    }
+                    // Delisted auto-detect: ardışık başarısızlık sayacı.
+                    let n_fail = delisted_record_failure(sym);
+                    let threshold = delisted_detection_threshold();
+                    if threshold > 0 && n_fail >= threshold {
+                        Self::purge_delisted_symbol(state, sym, n_fail);
                     }
                 }
             }
@@ -4592,6 +4643,74 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Delisted sembolü orchestrator + live_positions'tan temizler. Açık pozisyon
+    /// varsa ClosedTradeModel'a PnL=0/reason=DELISTED ile push edilir (gerçek
+    /// kapanış mümkün değil — Binance Invalid symbol döndürüyor).
+    /// Idempotent: tekrar çağırma güvenli (orchestrator/live_positions yoksa no-op).
+    pub fn purge_delisted_symbol(state: &Arc<Mutex<AppState>>, symbol: &str, n_fail: u32) {
+        log::warn!(
+            "🚮 Delisted detection: {} sembolü {} ardışık fetch hatasından sonra purge ediliyor",
+            symbol, n_fail,
+        );
+        if let Ok(mut st) = state.lock() {
+            // 1) Orchestrator'dan çıkar (stop_symbol = workers.remove + stop signal)
+            let removed_from_orch = st.fleet.symbol_orchestrator.write()
+                .map(|mut o| o.stop_symbol(symbol)).unwrap_or(false);
+
+            // 2) live_price map'ten sil
+            if let Ok(mut prices) = st.fleet.live_price.write() {
+                prices.remove(symbol);
+            }
+
+            // 3) Live pozisyon varsa force-close. Gerçek emir gönderilmiyor
+            //    (Binance Invalid symbol) — paper-equivalent: pozisyon kapatılır,
+            //    PnL 0 (giriş fiyatından), ClosedTradeModel arşivlenir.
+            let closed_pos = st.finance.live_positions.write()
+                .ok().and_then(|mut map| map.remove(symbol));
+            let mut force_close_msg = String::new();
+            if let Some(pos) = closed_pos {
+                let closed_trade = crate::core::model::ClosedTradeModel {
+                    symbol: pos.symbol.clone(),
+                    is_long: pos.is_long,
+                    exit_reason: "DELISTED".into(),
+                    pnl: 0.0,
+                    pnl_pct: 0.0,
+                    closed_at: chrono::Utc::now().to_rfc3339(),
+                    opened_at: pos.opened_at.clone(),
+                    leverage: pos.leverage,
+                };
+                if let Ok(mut closed_list) = st.finance.live_closed_trades.write() {
+                    closed_list.push(closed_trade);
+                }
+                st.finance.closed_trades_total.fetch_add(1, Ordering::Relaxed);
+                force_close_msg = format!(
+                    " · live pozisyon force-close (qty={:.4}, entry=${:.4}, PnL=0)",
+                    pos.qty, pos.entry_price,
+                );
+            }
+
+            // 4) Anomaly + log (operatöre görünür)
+            if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
+                use crate::robot::data_pipeline::{AnomalyKind, AnomalySeverity};
+                pipe.push_anomaly(
+                    AnomalySeverity::Warning,
+                    AnomalyKind::Custom,
+                    format!("DELISTED: {} purge edildi ({} ardışık fetch hatası){}",
+                        symbol, n_fail, force_close_msg),
+                );
+            }
+            st.push_log(format!(
+                "🚮 {} DELISTED → orchestrator removed={}{}",
+                symbol, removed_from_orch, force_close_msg,
+            ));
+        }
+        // 5) Snapshot'ları yenile (kalıcılık)
+        Self::persist_open_positions_snapshot(state);
+        Self::persist_account_state(state);
+        // 6) Sayacı sıfırla — purge sonrası gereksiz yere tekrar tetiklenmesin.
+        delisted_record_success(symbol);
     }
 
     /// En son trade gerçekleştiği epoch saniyesini AppState'e mühürler. Heartbeat

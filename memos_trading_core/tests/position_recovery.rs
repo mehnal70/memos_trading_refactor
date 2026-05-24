@@ -217,6 +217,44 @@ fn price_sanity_guard_rejects_stale_entry() {
     assert_eq!(price_deviation_pct(100.0, 0.0), 0.0);
 }
 
+/// Delisted sembol auto-detection: 3 ardışık fetch hatasından sonra
+/// sayaç eşik aşar; başarılı fetch sayacı sıfırlar (geçici hata yanlış
+/// pozitif vermesin).
+#[test]
+fn delisted_counter_increments_and_resets() {
+    use memos_trading_core::robot::engines::master::{
+        delisted_record_failure, delisted_record_success, delisted_failure_count,
+        delisted_detection_threshold,
+    };
+    // Test izolasyonu: ENV mutex/global counter — başka testlerle çakışmasın diye
+    // benzersiz sembol kullanıyoruz.
+    let sym = "DELISTED_TEST_SYM_XYZ";
+
+    delisted_record_success(sym); // baştan temiz
+    assert_eq!(delisted_failure_count(sym), 0);
+
+    // İki başarısız → eşiğin altında
+    let n1 = delisted_record_failure(sym);
+    let n2 = delisted_record_failure(sym);
+    assert_eq!(n1, 1);
+    assert_eq!(n2, 2);
+    assert!(n2 < delisted_detection_threshold(),
+        "Default eşik {} > 2 olmalı", delisted_detection_threshold());
+
+    // Üçüncü başarısız → eşiği yakaladı
+    let n3 = delisted_record_failure(sym);
+    assert_eq!(n3, 3);
+    assert!(n3 >= delisted_detection_threshold());
+
+    // Başarılı fetch sayacı sıfırlar
+    delisted_record_success(sym);
+    assert_eq!(delisted_failure_count(sym), 0);
+
+    // Yeniden başarısız → sayım sıfırdan başlar (sürekli sıfırlama mekaniği)
+    assert_eq!(delisted_record_failure(sym), 1);
+    delisted_record_success(sym); // cleanup
+}
+
 /// Candle freshness: stale candle (>300sn) ise guard pas geçmeli (live_price
 /// tek doğru kaynak). İlk canlı doğrulamada (build sonrası) DB candles 2-3
 /// gün eskidiği için guard tüm sembolleri yanlış pozitif bloklamıştı.
