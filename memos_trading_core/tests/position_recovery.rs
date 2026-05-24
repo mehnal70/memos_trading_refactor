@@ -186,6 +186,37 @@ fn recovery_stale_filter_matches_candles_existence() {
     let _ = std::fs::remove_file(&db);
 }
 
+/// Price sanity guard: stale fiyatın yarattığı sahte PnL'i engelle.
+/// 24 saatlik canlı: BTCUSDC entry $74749 ↔ candle $87840 (%14 sapma) →
+/// tek trade'de sahte +$58 PnL. Guard %5 üstünü reddeder.
+#[test]
+fn price_sanity_guard_rejects_stale_entry() {
+    use memos_trading_core::robot::engines::master::{
+        price_deviation_exceeds, price_deviation_pct,
+    };
+
+    // Eşik %5 — ufak sapma OK
+    assert!(!price_deviation_exceeds(100.0, 102.0, 5.0));
+    assert!(!price_deviation_exceeds(100.0, 95.5, 5.0));
+
+    // %5'i aşan sapma reddedilmeli (her iki yönde)
+    assert!(price_deviation_exceeds(100.0, 90.0, 5.0));
+    assert!(price_deviation_exceeds(100.0, 110.0, 5.0));
+
+    // BTCUSDC gerçek vakası (24 saatlik canlı run)
+    let dev = price_deviation_pct(74749.18, 87840.60);
+    assert!(dev > 14.0 && dev < 15.5, "BTCUSDC sapma %14-15 aralığında olmalı, gerçek: {dev}");
+    assert!(price_deviation_exceeds(74749.18, 87840.60, 5.0));
+
+    // Guard kapalı (max_dev_pct=0) → her zaman false
+    assert!(!price_deviation_exceeds(50_000.0, 100_000.0, 0.0));
+    assert!(!price_deviation_exceeds(50_000.0, 100_000.0, -1.0));
+
+    // Reference 0 → guard inactive (sıfıra bölme korumalı)
+    assert!(!price_deviation_exceeds(100.0, 0.0, 5.0));
+    assert_eq!(price_deviation_pct(100.0, 0.0), 0.0);
+}
+
 #[test]
 fn log_throttle_first_emits_then_suppresses_within_cooldown() {
     use memos_trading_core::robot::engines::master::log_throttle_should_emit;

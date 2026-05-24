@@ -60,6 +60,26 @@ pub fn log_throttle_should_emit(symbol: &str, kind: &'static str, cooldown_secs:
     true
 }
 
+/// `MAX_ENTRY_PRICE_DEVIATION_PCT` env'ini parse eder; geçersiz/eksikse 5.0 döner.
+/// 0 verilirse price sanity guard kapanır (test ve operatör override için).
+pub fn price_deviation_threshold_from_env() -> f64 {
+    std::env::var("MAX_ENTRY_PRICE_DEVIATION_PCT")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(5.0)
+}
+
+/// Entry ile reference (DB son mum) arasındaki yüzde sapma. Reference <= 0 ise 0 döner.
+pub fn price_deviation_pct(entry: f64, reference: f64) -> f64 {
+    if reference > 0.0 {
+        ((entry - reference).abs() / reference) * 100.0
+    } else { 0.0 }
+}
+
+/// Price sanity sınırı aşıldı mı? `max_dev_pct <= 0` ise guard kapalı (false döner).
+pub fn price_deviation_exceeds(entry: f64, reference: f64, max_dev_pct: f64) -> bool {
+    if max_dev_pct <= 0.0 || reference <= 0.0 { return false; }
+    price_deviation_pct(entry, reference) > max_dev_pct
+}
+
 // Projedeki gerçek tiplerin ve trait'lerin bağlanması için ön hazırlık (Agnostik Katman)
 pub struct MLModel;
 pub struct Monitor;
@@ -2521,6 +2541,34 @@ impl Engine {
                 Err(_) => candle_close,
             }
         };
+        // 🛡️ PRICE SANITY GUARD: live_price ile DB son mum kapanışı arasındaki
+        // sapma eşiği aşarsa pozisyon açma. BTCUSDC örneği (24 saatlik canlı):
+        // live_price stale 87840.60 ↔ fresh 74749.18 arası salınıyordu →
+        // OPEN @ stale, CLOSE @ fresh → tek trade'de sahte +$58 PnL.
+        // Threshold default %5; env `MAX_ENTRY_PRICE_DEVIATION_PCT` ile ayarlanır,
+        // 0 verilirse guard kapanır.
+        let max_dev_pct: f64 = price_deviation_threshold_from_env();
+        if price_deviation_exceeds(entry, candle_close, max_dev_pct) {
+            let dev_pct = price_deviation_pct(entry, candle_close);
+            if let Ok(mut st) = state.lock() {
+                st.push_log(format!(
+                    "🚫 {} açılış reddedildi: entry ${:.4} ↔ candle ${:.4} sapması %{:.2} > %{:.2} (stale price)",
+                    symbol, entry, candle_close, dev_pct, max_dev_pct,
+                ));
+                if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
+                    use crate::robot::data_pipeline::{AnomalyKind, AnomalySeverity};
+                    pipe.push_anomaly(
+                        AnomalySeverity::Warning,
+                        AnomalyKind::Custom,
+                        format!(
+                            "price-sanity: {} entry={:.4} candle={:.4} dev=%{:.2}",
+                            symbol, entry, candle_close, dev_pct,
+                        ),
+                    );
+                }
+            }
+            return;
+        }
         let atr = Self::calc_atr(candles, 14);
         let regime = Self::classify_regime(candles);
         let pos_id = crate::core::types::PositionId::new();
