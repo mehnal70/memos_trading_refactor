@@ -55,8 +55,10 @@ impl HeartbeatRecord {
         };
         let open_positions = state.finance.live_positions.read()
             .map(|p| p.len()).unwrap_or(0);
-        let closed_trades = state.finance.live_closed_trades.read()
-            .map(|t| t.len()).unwrap_or(0);
+        // Tüm-zaman sayaç (DB hidrate + live increment). live_closed_trades
+        // Vec'i sadece in-memory oturum geçmişi; restart sonrası boş başlar.
+        let closed_trades = state.finance.closed_trades_total
+            .load(std::sync::atomic::Ordering::Relaxed);
         let (anomalies, anomalies_by_kind) = state.guardian.live_pipeline.read()
             .map(|p| {
                 let mut by_kind: std::collections::BTreeMap<String, usize> =

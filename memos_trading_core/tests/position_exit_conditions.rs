@@ -23,6 +23,7 @@ fn long_position(entry: f64, sl: f64, tp: f64, trail: f64) -> PositionModel {
         trailing_stop: trail,
         max_favorable_price: entry,
         breakeven_activated: false,
+        kind: None,
     }
 }
 
@@ -42,6 +43,7 @@ fn short_position(entry: f64, sl: f64, tp: f64, trail: f64) -> PositionModel {
         trailing_stop: trail,
         max_favorable_price: entry,
         breakeven_activated: false,
+        kind: None,
     }
 }
 

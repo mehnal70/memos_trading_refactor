@@ -1,7 +1,7 @@
 // src/robot/robotic_loop.rs - Srivastava ATP Reaktif Mimari Çekirdeği
 // 4 Büyük Krallık (Bakanlık) Düzeni
 use crate::prelude::*;
-use std::sync::{Arc, RwLock, atomic::{AtomicBool, AtomicU64, Ordering}};
+use std::sync::{Arc, RwLock, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}};
 use std::collections::{HashMap, VecDeque};
 use tokio::time::Instant;
 use crate::core::model::{PositionModel, RoboticLoopConfig, ClosedTradeModel};
@@ -46,6 +46,10 @@ pub struct FinanceVault {
     /// 💱 Live mode'da sembol başına entry/SL/TP order_id eşlemesi.
     /// Açılışta yazılır, kapatma anında hedefli cancel_order için okunur.
     pub live_orders: Arc<RwLock<HashMap<String, crate::core::model::LiveOrderRefs>>>,
+    /// Tüm-zaman kapalı işlem sayacı. `live_closed_trades` Vec'i her restart'ta
+    /// sıfırlanır; bu atomic sayaç ise DB'deki `account_state` ile hidrate
+    /// edilir → heartbeat ve raporlar tutarlı kalır.
+    pub closed_trades_total: Arc<AtomicUsize>,
 }
 
 impl FinanceVault {
@@ -229,6 +233,7 @@ impl AppState {
             live_execution_costs: Arc::new(RwLock::new(ExecutionCosts::default())),
             equity_history: Arc::new(RwLock::new(initial_history)),
             live_orders: Arc::new(RwLock::new(HashMap::new())),
+            closed_trades_total: Arc::new(AtomicUsize::new(0)),
         };
 
         let intelligence_hub = crate::robot::ml_engine::intelligence_hub::IntelligenceHub::new(

@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use memos_trading_core::core::model::{PositionModel, RoboticLoopConfig};
 use memos_trading_core::persistence::{
-    reader::recover_open_positions,
-    writer::save_open_positions_snapshot,
+    reader::{recover_open_positions, load_account_state},
+    writer::{save_account_state, save_open_positions_snapshot},
 };
 use memos_trading_core::robot::engines::master::Engine;
 use memos_trading_core::robot::robotic_loop::AppState;
@@ -32,6 +32,7 @@ fn mk_pos(symbol: &str) -> PositionModel {
         trailing_stop: 0.0,
         max_favorable_price: 100.0,
         breakeven_activated: false,
+        kind: None,
     }
 }
 
@@ -88,6 +89,64 @@ async fn hydrate_loads_snapshot_into_live_positions() {
     assert!(after.is_empty(), "kapanış sonrası snapshot boş olmalı: {:?}", after);
 
     let _ = std::fs::remove_file(&db);
+}
+
+/// Equity/peak/closed_count restart sonrası DB'den hidrate edilmeli; eski run'da
+/// kazanılan PnL yeni run'da equity'de aynen görünmeli. Bu test olmadan
+/// trades.jsonl'a yazılan PnL ile heartbeat equity'si arasında uçurum oluşuyordu.
+#[test]
+fn account_state_roundtrip_persists_equity_and_closed_count() {
+    use std::sync::atomic::Ordering;
+
+    let db = format!("/tmp/memos_account_state_{}.db", std::process::id());
+    let _ = std::fs::remove_file(&db);
+
+    // 1) Önceki run: equity 10500, peak 10750, closed 42.
+    {
+        let conn = Connection::open(&db).unwrap();
+        save_account_state(&conn, 10_500.0, 10_750.0, 10_000.0, 42).unwrap();
+    }
+
+    // 2) Yeni AppState (cold start gibi başlar) — config.capital aynı 10_000.
+    let mut cfg = RoboticLoopConfig::default();
+    cfg.db_path = db.clone();
+    cfg.capital = 10_000.0;
+    let state = Arc::new(Mutex::new(AppState::new(cfg)));
+
+    // Cold-start baseline
+    {
+        let s = state.lock().unwrap();
+        assert_eq!(s.finance.equity, 10_000.0);
+        assert_eq!(s.finance.closed_trades_total.load(Ordering::Relaxed), 0);
+    }
+
+    // 3) load_account_state ile satırı oku → mantığı manuel uygula (hydrate fn
+    //    pub değil; sözleşme: equity/peak/closed yansır).
+    let rec = load_account_state(&db).expect("ok").expect("kayıt var");
+    assert_eq!(rec.closed_trades_count, 42);
+    assert!((rec.equity - 10_500.0).abs() < 1e-9);
+    assert!((rec.peak_equity - 10_750.0).abs() < 1e-9);
+    assert!((rec.starting_capital - 10_000.0).abs() < 1e-9);
+
+    // 4) Yeniden yazım: persist_account_state simülasyonu → roundtrip stabilize.
+    {
+        let conn = Connection::open(&db).unwrap();
+        save_account_state(&conn, 10_600.0, 10_800.0, 10_000.0, 43).unwrap();
+    }
+    let rec2 = load_account_state(&db).expect("ok").expect("kayıt var");
+    assert_eq!(rec2.closed_trades_count, 43);
+    assert!((rec2.equity - 10_600.0).abs() < 1e-9);
+    assert!((rec2.peak_equity - 10_800.0).abs() < 1e-9);
+
+    // 5) Boş DB → None döner (cold-start sözleşmesi).
+    let db_empty = format!("/tmp/memos_account_state_empty_{}.db", std::process::id());
+    let _ = std::fs::remove_file(&db_empty);
+    let none = load_account_state(&db_empty).expect("err olmamalı (tablo yok → None)");
+    assert!(none.is_none(), "tablo yokken Some döndü: {:?}", none);
+
+    let _ = state;
+    let _ = std::fs::remove_file(&db);
+    let _ = std::fs::remove_file(&db_empty);
 }
 
 /// Recovery filter: candles tablosunda sembol+interval için kayıt yoksa

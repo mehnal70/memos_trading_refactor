@@ -19,7 +19,7 @@ fn open_test_position(state: &Arc<Mutex<AppState>>, symbol: &str, qty: f64) {
         trade_type: "LONG".into(),
         opened_at: "2026-05-18T00:00:00Z".into(),
         stop_loss: 95.0, take_profit: 110.0, trailing_stop: 0.0,
-        max_favorable_price: 100.0, breakeven_activated: false,
+        max_favorable_price: 100.0, breakeven_activated: false, kind: None,
     };
     let st = state.lock().unwrap();
     let mut positions = st.finance.live_positions.write().unwrap();

@@ -20,6 +20,7 @@ fn trade(symbol: &str, pnl: f64, exit_reason: &str, closed_at: &str) -> ClosedTr
         exit_reason: exit_reason.into(),
         closed_at: closed_at.into(),
         opened_at: String::new(),
+        leverage: 1.0,
     }
 }
 

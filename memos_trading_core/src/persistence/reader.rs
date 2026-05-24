@@ -28,7 +28,7 @@ pub fn load_config_with_fallback<T: serde::de::DeserializeOwned + Default>(path:
 /// Bu fonksiyon robotun 'ben kimim?' sorusuna yanıtıdır.
 pub fn recover_open_positions(db_path: &str) -> Result<Vec<PositionModel>, String> {
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
-    
+
     let json_str: Option<String> = conn.query_row(
         "SELECT positions FROM open_positions_snapshot WHERE id = 1",
         [],
@@ -39,6 +39,44 @@ pub fn recover_open_positions(db_path: &str) -> Result<Vec<PositionModel>, Strin
     match json_str {
         Some(s) => serde_json::from_str(&s).map_err(|e| format!("Recovery hatası: {}", e)),
         None => Ok(vec![])
+    }
+}
+
+/// Persist edilmiş hesap durumu (writer::save_account_state'in ürettiği).
+#[derive(Debug, Clone)]
+pub struct AccountStateRecord {
+    pub equity: f64,
+    pub peak_equity: f64,
+    pub starting_capital: f64,
+    pub closed_trades_count: usize,
+    pub updated_at: String,
+}
+
+/// Boot'ta önceki run'un `account_state` satırını okur.
+/// - Tablo yoksa veya kayıt yoksa: `Ok(None)` (cold-start).
+/// - DB açılamaz/parse hatası: `Err(String)`; çağıran cold-start'a düşer.
+pub fn load_account_state(db_path: &str) -> Result<Option<AccountStateRecord>, String> {
+    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    let row = conn.query_row(
+        "SELECT equity, peak_equity, starting_capital, closed_trades_count, updated_at \
+         FROM account_state WHERE id = 1",
+        [],
+        |r| Ok(AccountStateRecord {
+            equity: r.get(0)?,
+            peak_equity: r.get(1)?,
+            starting_capital: r.get(2)?,
+            closed_trades_count: r.get::<_, i64>(3)? as usize,
+            updated_at: r.get(4)?,
+        }),
+    );
+    match row {
+        Ok(rec) => Ok(Some(rec)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => {
+            // Tablo henüz oluşturulmamış olabilir (eski DB). Bunu cold-start kabul et.
+            let msg = e.to_string();
+            if msg.contains("no such table") { Ok(None) } else { Err(msg) }
+        }
     }
 }
 

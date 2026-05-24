@@ -132,6 +132,12 @@ impl Engine {
         //     geçer (cold-start). Recovery sayısı TUI log'a yansır.
         Self::hydrate_open_positions_from_db(&state).await;
 
+        // 0c. ACCOUNT RECOVERY: önceki run'un equity/peak/closed_count'ını yükle.
+        //     Yoksa cold-start (config.capital ile başla). Bu adım olmadan
+        //     her restart equity'i 10000'e döndürüyordu → 44 saatte ~3500 USDT
+        //     PnL kaybolmuş gibi görünüyordu (trades.jsonl ile tutarsızlık).
+        Self::hydrate_account_state_from_db(&state);
+
         // 1. INFRASTRUCTURE FLEET (WS, Diagnostic, Pipeline)
         Self::spawn_infrastructure_fleet(Arc::clone(&state)).await;
 
@@ -2860,6 +2866,8 @@ impl Engine {
         // 💾 RECOVERY: pozisyon haritası değişti → DB snapshot'ı güncelle.
         // Crash + restart sonrası hydrate_open_positions_from_db bu durumu okur.
         Self::persist_open_positions_snapshot(state);
+        // Equity entry commission ile düştü → account_state'i de mühürle.
+        Self::persist_account_state(state);
     }
 
     /// 🧠 IntelligenceHub periyodik tick: drift hesabı + evrim + retrain kararı.
@@ -3282,6 +3290,11 @@ impl Engine {
                 costs.total_cost_usd += exit_commission;
             }
             st.finance.equity += pnl_val - exit_commission;
+            if st.finance.equity > st.finance.peak_equity {
+                st.finance.peak_equity = st.finance.equity;
+            }
+            // Tüm-zaman kapalı işlem sayacı (restart'a karşı korunur).
+            st.finance.closed_trades_total.fetch_add(1, Ordering::Relaxed);
 
             let pnl_pct_val = if pos.entry_price > 0.0 && pos.qty > 0.0 {
                 (pnl_val / (pos.entry_price * pos.qty)) * 100.0
@@ -3436,6 +3449,8 @@ impl Engine {
         // İki daldan sonra çağrılır: if-Some içinde st 2704'te drop edildi,
         // else dalında yukarıda drop edildi.
         Self::persist_open_positions_snapshot(state);
+        // Equity + peak + closed sayacı kapanışta değişti → DB'ye yansıt.
+        Self::persist_account_state(state);
     }
 
 
@@ -4207,11 +4222,17 @@ impl Engine {
             }
         } else if let Ok(mut st) = state.lock() {
             st.push_log_mirror(
-                "📐 SQLite şeması doğrulandı (candles + open_positions_snapshot)".to_string(),
+                "📐 SQLite şeması doğrulandı (candles + open_positions_snapshot + account_state)".to_string(),
             );
         }
         // open_positions_snapshot ayrıca save_open_positions_snapshot içinde
         // ilk INSERT öncesi yaratılıyor; ek bir CREATE çağrısına gerek yok.
+        if let Err(e) = crate::persistence::writer::ensure_account_state_table(&conn) {
+            log::warn!("⚠️ account_state tablosu kurulamadı: {}", e);
+            if let Ok(mut st) = state.lock() {
+                st.push_log(format!("⚠️ account_state tablosu kurulamadı: {}", e));
+            }
+        }
     }
 
     /// Boot sırasında önceki run'un `open_positions_snapshot` tablosundan
@@ -4346,6 +4367,88 @@ impl Engine {
         };
         let _ = crate::persistence::writer::save_open_positions_snapshot(
             &conn, &positions,
+        );
+    }
+
+    /// Boot'ta `account_state` tablosundan equity/peak/closed_count'ı okur ve
+    /// FinanceVault'a uygular. Sanity guard: persisted starting_capital config
+    /// ile uyuşmuyorsa (operatör cüzdanı resetledi) recovery atlanır.
+    /// Tablo yoksa veya kayıt yoksa → cold-start (varsayılan değerler korunur).
+    fn hydrate_account_state_from_db(state: &Arc<Mutex<AppState>>) {
+        let (db_path, config_capital) = match state.lock() {
+            Ok(st) => (st.config.db_path.clone(), st.config.capital),
+            Err(_) => return,
+        };
+        match crate::persistence::reader::load_account_state(&db_path) {
+            Ok(Some(rec)) => {
+                // Operatör starting_capital'ı değiştirdiyse (config yeniden yazıldı)
+                // eski equity'i hidrate etmek tutarsız olur → cold-start.
+                let capital_match = (rec.starting_capital - config_capital).abs() < 1e-6;
+                if !capital_match {
+                    if let Ok(mut st) = state.lock() {
+                        st.push_log_mirror(format!(
+                            "♻️ [RECOVERY] account_state atlandı — starting_capital değişmiş (DB={:.2}, cfg={:.2})",
+                            rec.starting_capital, config_capital,
+                        ));
+                    }
+                    return;
+                }
+                if let Ok(mut st) = state.lock() {
+                    st.finance.equity = rec.equity;
+                    st.finance.peak_equity = rec.peak_equity.max(rec.equity);
+                    st.finance.closed_trades_total.store(
+                        rec.closed_trades_count, Ordering::Relaxed,
+                    );
+                    // Equity history baseline'ı: persist edilen equity ile başla.
+                    if let Ok(mut hist) = st.finance.equity_history.write() {
+                        hist.clear();
+                        hist.push_back(rec.equity);
+                    }
+                    st.push_log_mirror(format!(
+                        "♻️ [RECOVERY] equity=${:.2} peak=${:.2} closed={} (snapshot: {})",
+                        rec.equity, rec.peak_equity, rec.closed_trades_count, rec.updated_at,
+                    ));
+                }
+            }
+            Ok(None) => {
+                if let Ok(mut st) = state.lock() {
+                    st.push_log_mirror(
+                        "♻️ [RECOVERY] account_state boş — cold-start (equity başlangıç)".to_string(),
+                    );
+                }
+            }
+            Err(e) => {
+                log::warn!("⚠️ [RECOVERY] account_state okunamadı: {} — cold-start'a düşülüyor", e);
+                if let Ok(mut st) = state.lock() {
+                    st.push_log(format!(
+                        "⚠️ [RECOVERY] account_state okunamadı: {} (cold-start'a düşülüyor)",
+                        e,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Equity, peak, starting capital ve toplam kapalı trade sayacını DB'ye
+    /// mühürler. Pozisyon açılış/kapanış noktalarında çağrılır.
+    /// Senkron — UI lock dışında çağrılmalı.
+    pub fn persist_account_state(state: &Arc<Mutex<AppState>>) {
+        let (db_path, equity, peak, starting, closed_count) = match state.lock() {
+            Ok(st) => (
+                st.config.db_path.clone(),
+                st.finance.equity,
+                st.finance.peak_equity,
+                st.finance.starting_capital,
+                st.finance.closed_trades_total.load(Ordering::Relaxed),
+            ),
+            Err(_) => return,
+        };
+        let conn = match rusqlite::Connection::open(&db_path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _ = crate::persistence::writer::save_account_state(
+            &conn, equity, peak, starting, closed_count,
         );
     }
 }

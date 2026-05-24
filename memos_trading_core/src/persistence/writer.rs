@@ -109,11 +109,52 @@ pub fn save_open_positions_snapshot(conn: &Connection, positions: &[PositionMode
         .map_err(|e| crate::MemosTradingError::Unknown(format!("Snapshot serialization hatası: {}", e)))?;
 
     conn.execute(
-        "INSERT INTO open_positions_snapshot (id, positions, updated_at) 
-         VALUES (1, ?1, ?2) 
+        "INSERT INTO open_positions_snapshot (id, positions, updated_at)
+         VALUES (1, ?1, ?2)
          ON CONFLICT(id) DO UPDATE SET positions=excluded.positions, updated_at=excluded.updated_at",
         params![positions_json, Utc::now().to_rfc3339()]
     )?;
+    Ok(())
+}
+
+/// `account_state` tablosunu (singleton, id=1) idempotent yaratır.
+pub fn ensure_account_state_table(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS account_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            equity REAL NOT NULL,
+            peak_equity REAL NOT NULL,
+            starting_capital REAL NOT NULL,
+            closed_trades_count INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+        [],
+    ).map_err(|e| crate::MemosTradingError::Database(format!("account_state tablo hatası: {}", e)))?;
+    Ok(())
+}
+
+/// Account state'i (equity, peak, starting capital, closed_trades_count) tek-satır
+/// singleton kayıt olarak DB'ye mühürler. Restart sonrası `load_account_state`
+/// bunu okuyup FinanceVault'u hidrate eder → equity ve PnL geçmişi kaybolmaz.
+pub fn save_account_state(
+    conn: &Connection,
+    equity: f64,
+    peak_equity: f64,
+    starting_capital: f64,
+    closed_trades_count: usize,
+) -> Result<()> {
+    ensure_account_state_table(conn)?;
+    conn.execute(
+        "INSERT INTO account_state (id, equity, peak_equity, starting_capital, closed_trades_count, updated_at)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(id) DO UPDATE SET
+            equity=excluded.equity,
+            peak_equity=excluded.peak_equity,
+            starting_capital=excluded.starting_capital,
+            closed_trades_count=excluded.closed_trades_count,
+            updated_at=excluded.updated_at",
+        params![equity, peak_equity, starting_capital, closed_trades_count as i64, Utc::now().to_rfc3339()],
+    ).map_err(|e| crate::MemosTradingError::Database(format!("account_state yazma hatası: {}", e)))?;
     Ok(())
 }
 
