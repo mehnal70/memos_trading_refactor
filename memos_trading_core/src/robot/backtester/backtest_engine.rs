@@ -62,6 +62,7 @@ pub struct BacktestResult {
 struct BacktestPos {
     entry_price: f64,
     entry_idx: usize,
+    entry_ts: DateTime<Utc>,
     qty: f64,
     sl_price: f64,
     tp_price: f64,
@@ -166,6 +167,7 @@ impl Backtester {
                 pos = Some(BacktestPos {
                     entry_price: entry,
                     entry_idx: idx,
+                    entry_ts: candle.timestamp,
                     qty: self.config.max_position_size,
                     sl_price: sl,
                     tp_price: entry * (1.0 + self.config.take_profit_pct / 100.0),
@@ -193,19 +195,38 @@ impl Backtester {
             symbol: c.symbol.clone(),
             entry_price: p.entry_price,
             exit_price: c.close,
-            entry_time: Utc::now().to_rfc3339(), // Örnekleme, gerçekte idx'ten alınmalı
+            entry_time: p.entry_ts.to_rfc3339(),
             exit_time: c.timestamp.to_rfc3339(),
             amount: qty,
             pnl: net,
             pnl_pct: (net / (p.entry_price * qty + f64::EPSILON)) * 100.0,
-            duration_minutes: (c.timestamp - c.timestamp).num_minutes(), // Simplified
+            duration_minutes: (c.timestamp - p.entry_ts).num_minutes(),
         }
     }
 
     fn finalize_result(&self, balance: f64, max_dd: f64) -> Result<BacktestResult> {
         let total_pnl = balance - self.config.initial_balance;
         let win_count = self.trades.iter().filter(|t| t.pnl > 0.0).count();
-        
+
+        // Profit factor = brüt kâr / brüt zarar (gerçek hesap; eski hardcode 1.5 idi).
+        // Zarar yokken kâr varsa anlamlı bir tavan (999) — INF JSON'da sorun çıkarır.
+        let gross_profit: f64 = self.trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).sum();
+        let gross_loss: f64   = self.trades.iter().filter(|t| t.pnl < 0.0).map(|t| -t.pnl).sum();
+        let profit_factor = if gross_loss > f64::EPSILON { gross_profit / gross_loss }
+            else if gross_profit > 0.0 { 999.0 } else { 0.0 };
+
+        // Per-trade Sharpe = ortalama getiri / getiri std (gerçek hesap; eski hardcode 2.0).
+        // sqrt(n) ölçeklemesi YOK — A/B karşılaştırmasında trade sayısı farklı olabilir,
+        // bu yüzden trade-başına risk-ayarlı getiri daha adil bir kıyas metriğidir.
+        let rets: Vec<f64> = self.trades.iter().map(|t| t.pnl_pct).collect();
+        let n = rets.len();
+        let sharpe_ratio = if n >= 2 {
+            let mean = rets.iter().sum::<f64>() / n as f64;
+            let var = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
+            let sd = var.sqrt();
+            if sd > f64::EPSILON { mean / sd } else { 0.0 }
+        } else { 0.0 };
+
         Ok(BacktestResult {
             symbol: self.config.symbol.clone(),
             strategy: self.config.strategy_name.clone(),
@@ -214,8 +235,8 @@ impl Backtester {
             total_pnl,
             total_pnl_pct: (total_pnl / self.config.initial_balance) * 100.0,
             max_drawdown_pct: max_dd,
-            profit_factor: 1.5, // Örnek sabit, iteratörle hesaplanmalı
-            sharpe_ratio: 2.0,   // Örnek sabit
+            profit_factor,
+            sharpe_ratio,
             trades: self.trades.clone(),
         })
     }
