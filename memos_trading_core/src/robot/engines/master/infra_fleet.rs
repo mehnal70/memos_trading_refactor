@@ -107,19 +107,17 @@ impl Engine {
                     if st.app_stop_signal.load(Ordering::Relaxed) {
                         (vec![], String::new(), true)
                     } else {
-                        // BIST exclude — Binance API'ye BIST sembolü göndermek
-                        // "Veri Format Hatası" döndürüyor (ApiError anomaly).
-                        // ALLOW_BIST=1 ile geri açılır.
-                        let allow_bist = std::env::var("ALLOW_BIST")
-                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                            .unwrap_or(false);
-                        let bist_ok = |s: &str| allow_bist || !Self::looks_like_bist_symbol(s);
+                        // Canlı feed'i olmayan borsa sembolleri (örn. BIST) Binance API'ye
+                        // gönderilmez ("Veri Format Hatası" → ApiError anomaly). Market-agnostik
+                        // tek nokta: RuntimeTuning.symbol_eligible_for_live.
+                        let tuning = Arc::clone(&st.tuning);
+                        let eligible = |s: &str| tuning.symbol_eligible_for_live(s);
 
                         let mut syms: Vec<String> = vec![];
-                        if bist_ok(&st.config.symbol) { syms.push(st.config.symbol.clone()); }
+                        if eligible(&st.config.symbol) { syms.push(st.config.symbol.clone()); }
                         if let Ok(orch) = st.fleet.symbol_orchestrator.read() {
                             for w in orch.get_worker_status() {
-                                if !bist_ok(&w.symbol) { continue; }
+                                if !eligible(&w.symbol) { continue; }
                                 if !syms.contains(&w.symbol) { syms.push(w.symbol); }
                             }
                         }
@@ -128,7 +126,7 @@ impl Engine {
                         // takılı kalır, PnL=0 görünür, SL/TP denetimi yapılamaz.
                         if let Ok(positions) = st.finance.live_positions.read() {
                             for sym in positions.keys() {
-                                if !bist_ok(sym) { continue; }
+                                if !eligible(sym) { continue; }
                                 if !syms.contains(sym) { syms.push(sym.clone()); }
                             }
                         }
@@ -974,29 +972,28 @@ impl Engine {
                 let stop = state.lock().map(|s| s.app_stop_signal.load(Ordering::Relaxed)).unwrap_or(true);
                 if stop { break; }
 
-                // 1) Aktif sembolleri topla.
-                // BIST exclude — hydrate/price_poll/perform_download/execute_trade_cycle
-                // ile aynı politika. Eski BIST mumları DB'de duruyor; filtre yokken
-                // SR zone'lar hesaplanıp Market Gözetimi'nde fiyatsız BIST'ler gözükür.
+                // 1) Aktif sembolleri topla. Canlı feed'i olmayan borsa sembolleri
+                // (örn. eski BIST mumları DB'de durur) SR/Market Gözetimi'ne girmesin →
+                // market-agnostik tek nokta: RuntimeTuning.symbol_eligible_for_live.
                 let (db_path, interval, symbols) = {
                     let st = match state.lock() { Ok(s) => s, Err(_) => break };
-                    let allow_bist = env_truthy("ALLOW_BIST");
-                    let bist_ok = |s: &str| allow_bist || !Self::looks_like_bist_symbol(s);
+                    let tuning = Arc::clone(&st.tuning);
+                    let eligible = |s: &str| tuning.symbol_eligible_for_live(s);
 
                     let mut symbols: Vec<String> = vec![];
-                    if bist_ok(&st.config.symbol)
+                    if eligible(&st.config.symbol)
                         && !st.config.symbol.is_empty()
                         && !symbols.contains(&st.config.symbol)
                     {
                         symbols.push(st.config.symbol.clone());
                     }
                     for s in &st.config.pinned_symbols {
-                        if !bist_ok(s) { continue; }
+                        if !eligible(s) { continue; }
                         if !symbols.contains(s) { symbols.push(s.clone()); }
                     }
                     if let Ok(orch) = st.fleet.symbol_orchestrator.read() {
                         for w in orch.get_worker_status() {
-                            if !bist_ok(&w.symbol) { continue; }
+                            if !eligible(&w.symbol) { continue; }
                             if !symbols.contains(&w.symbol) { symbols.push(w.symbol); }
                         }
                     }

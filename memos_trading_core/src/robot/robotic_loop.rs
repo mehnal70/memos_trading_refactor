@@ -215,6 +215,11 @@ pub struct AppState {
     // Global Durdurma Sinyalleri
     pub app_stop_signal: Arc<AtomicBool>,
     pub pause_signal: Arc<AtomicBool>,
+
+    /// ⚙️ Boot'ta env'den bir kez okunan runtime ayarları (komisyon oranı,
+    /// freshness/sapma eşikleri, log cooldown'ları, BIST toggle). Cycle hot-path'i
+    /// per-tick getenv yapmak yerine bu Arc'tan okur. Bkz. master::RuntimeTuning.
+    pub tuning: Arc<crate::robot::engines::master::RuntimeTuning>,
 }
 
 impl AppState {
@@ -222,6 +227,9 @@ impl AppState {
     pub fn new(config: RoboticLoopConfig) -> Self {
         // Global durdurma sinyallerini oluştur
         let stop_sig = Arc::new(AtomicBool::new(false));
+
+        // ⚙️ Runtime ayarlarını env'den bir kez oku (cycle hot-path bunu kullanır).
+        let tuning = Arc::new(crate::robot::engines::master::RuntimeTuning::from_env());
         
         // Bakanlıkları varsayılan (safe) değerlerle kur
         // Live positions Arc paylaşılır: FinanceVault yazar, SymbolOrchestrator okur.
@@ -296,16 +304,12 @@ impl AppState {
 
         // 3. Kalıcı hafızadaki (SQLite) en çok kazandıran sembolleri hasat et (Elite Fleet)
         // Eğer veritabanı yolu üzerinde kayıtlı semboller varsa, onları da otonom listeye ekler.
-        // BIST exclude: eski runlardan DB'de kalmış BIST sembolleri orchestrator'a worker
-        // olarak girmesin → market gözetimi/SR zones/price_poll hepsinde fiyatsız BIST satırları
-        // birikiyordu. ALLOW_BIST=1 ile geri açılır.
-        let allow_bist = std::env::var("ALLOW_BIST")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        // Canlı feed'i olmayan borsa sembolleri (örn. eski runlardan kalmış BIST) orchestrator'a
+        // worker olarak girmesin → fiyatsız satırlar market gözetimi/SR/price_poll'de anomaly
+        // birikimi yapıyordu. Karar market-agnostik: RuntimeTuning.symbol_eligible_for_live.
         if let Ok(elite_symbols) = crate::persistence::reader::list_symbols(&config.db_path) {
             for sym in elite_symbols {
-                if !allow_bist
-                    && crate::robot::engines::master::Engine::looks_like_bist_symbol(&sym)
-                {
+                if !tuning.symbol_eligible_for_live(&sym) {
                     continue;
                 }
                 // Mükerrer kaydı engellemek için kontrol bariyeri (Double-execution koruması)
@@ -427,6 +431,7 @@ impl AppState {
             trading_logger,
             app_stop_signal: stop_sig,
             pause_signal: Arc::new(AtomicBool::new(false)),
+            tuning,
         }
     }
 

@@ -42,26 +42,22 @@ impl Engine {
     /// - Halihazırda live_positions'ta aynı sembol varsa: DB tarafı ezilir
     ///   (recovery sırasında live state boş olmalı; defensive).
     pub(crate) async fn hydrate_open_positions_from_db(state: &Arc<Mutex<AppState>>) {
-        let (db_path, interval) = match state.lock() {
-            Ok(st) => (st.config.db_path.clone(), st.config.interval.clone()),
+        let (db_path, interval, tuning) = match state.lock() {
+            Ok(st) => (st.config.db_path.clone(), st.config.interval.clone(), Arc::clone(&st.tuning)),
             Err(_) => return,
         };
-        // BIST exclude: default ON. BIST canlı feed pratik olarak yok → cycle'a
-        // BIST koymak DataIngest/PriceFetch Failed → anomaly birikimi.
-        // ALLOW_BIST=1 ile geri açılır (geçmiş data backtest senaryoları için).
-        let allow_bist = env_truthy("ALLOW_BIST");
         match crate::persistence::reader::recover_open_positions(&db_path) {
             Ok(positions) if !positions.is_empty() => {
                 // İki kademeli filtre:
-                //   1) BIST heuristic (allow_bist=false ise BIST'leri atla).
+                //   1) Borsa eligibility (canlı feed yok → cycle dışı; market-agnostik).
                 //   2) Candles existence — sembol+interval için en az 1 candle.
                 // Atlananlar repair_log'a düşürülür; operatör görür.
-                let mut loaded = Vec::new();
-                let mut stale  = Vec::new();   // candles yok
-                let mut bist   = Vec::new();   // BIST exclude
+                let mut loaded  = Vec::new();
+                let mut stale   = Vec::new();   // candles yok
+                let mut no_feed = Vec::new();   // borsasının canlı feed'i yok (örn. BIST)
                 for pos in positions {
-                    if !allow_bist && Self::looks_like_bist_symbol(&pos.symbol) {
-                        bist.push(pos);
+                    if !tuning.symbol_eligible_for_live(&pos.symbol) {
+                        no_feed.push(pos);
                         continue;
                     }
                     let has_candles = crate::persistence::reader::read_candles(
@@ -70,11 +66,11 @@ impl Engine {
                     if has_candles { loaded.push(pos); }
                     else            { stale.push(pos); }
                 }
-                let n_loaded = loaded.len();
-                let n_stale  = stale.len();
-                let n_bist   = bist.len();
-                let stale_syms: Vec<String> = stale.iter().map(|p| p.symbol.clone()).collect();
-                let bist_syms:  Vec<String> = bist.iter().map(|p| p.symbol.clone()).collect();
+                let n_loaded  = loaded.len();
+                let n_stale   = stale.len();
+                let n_no_feed = no_feed.len();
+                let stale_syms:   Vec<String> = stale.iter().map(|p| p.symbol.clone()).collect();
+                let no_feed_syms: Vec<String> = no_feed.iter().map(|p| p.symbol.clone()).collect();
 
                 let market_for_orch = {
                     let st = match state.lock() { Ok(s) => s, Err(_) => return };
@@ -106,18 +102,18 @@ impl Engine {
                             n_stale, interval, stale_syms.join(","),
                         ));
                     }
-                    if n_bist > 0 {
+                    if n_no_feed > 0 {
                         msg.push_str(&format!(
-                            " · {} BIST-excluded (canlı feed yok; ALLOW_BIST=1 ile aç): {}",
-                            n_bist, bist_syms.join(","),
+                            " · {} feed'siz borsa-excluded (FORCE_LIVE_EXCHANGES ile aç): {}",
+                            n_no_feed, no_feed_syms.join(","),
                         ));
                     }
                     st.push_log_mirror(msg);
-                    if n_stale > 0 || n_bist > 0 {
+                    if n_stale > 0 || n_no_feed > 0 {
                         st.guardian.repair_log.push_back(format!(
-                            "[{}] recovery: yüklendi={} stale={} bist={}",
+                            "[{}] recovery: yüklendi={} stale={} no_feed={}",
                             chrono::Local::now().format("%H:%M:%S"),
-                            n_loaded, n_stale, n_bist,
+                            n_loaded, n_stale, n_no_feed,
                         ));
                         while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
                     }
@@ -148,16 +144,10 @@ impl Engine {
     /// Yanılgı payı: 5-6 char crypto pair'leri (ETHBTC, BNBBTC vb.) BIST sayılabilir.
     /// Bu yüzden BIST exclude default ON ama opt-out env (ALLOW_BIST=1) var.
     /// Operatör kripto-only çalışıyorsa default ON güvenli (BIST verisi pratikte yok).
+    /// Geriye-uyum sarmalayıcı: artık tek-kaynak `Exchange::classify`'a delege eder.
+    /// Yeni kodda market-agnostik `RuntimeTuning::symbol_eligible_for_live` tercih edilmeli.
     pub fn looks_like_bist_symbol(sym: &str) -> bool {
-        if sym.len() < 3 || sym.len() > 6 { return false; }
-        if !sym.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) {
-            return false;
-        }
-        const CRYPTO_QUOTES: &[&str] = &["USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI"];
-        for q in CRYPTO_QUOTES {
-            if sym.ends_with(q) { return false; }
-        }
-        true
+        crate::core::types::Exchange::classify(sym) == crate::core::types::Exchange::Bist
     }
 
     /// Mevcut `live_positions` haritasını DB'ye snapshot'lar. Pozisyon açılış

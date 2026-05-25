@@ -142,14 +142,21 @@ impl Engine {
         // ile gerçek fiyat arasındaki fark TP eşiğini aştığı için) → phantom kazanç
         // döngüsü: aç @ stale → kapat @ TP → tekrar aç → tekrar TP. Equity sahte şişer.
         let candle_close = last_candle.close;
-        let entry = {
-            let st_lock = state.lock();
-            match st_lock {
-                Ok(st) => st.fleet.live_price.read().ok()
-                    .and_then(|m| m.get(symbol).copied())
-                    .filter(|&v| v > 0.0)
-                    .unwrap_or(candle_close),
-                Err(_) => candle_close,
+        // Entry fiyatı + price-sanity eşikleri tek lock skopunda okunur (eşikler
+        // RuntimeTuning'den → per-open getenv yok).
+        let (entry, max_dev_pct, candle_freshness_secs) = {
+            match state.lock() {
+                Ok(st) => {
+                    let e = st.fleet.live_price.read().ok()
+                        .and_then(|m| m.get(symbol).copied())
+                        .filter(|&v| v > 0.0)
+                        .unwrap_or(candle_close);
+                    (e, st.tuning.max_entry_price_dev_pct, st.tuning.candle_freshness_secs)
+                }
+                Err(_) => {
+                    let d = RuntimeTuning::default();
+                    (candle_close, d.max_entry_price_dev_pct, d.candle_freshness_secs)
+                }
             }
         };
         // 🛡️ PRICE SANITY GUARD: live_price ile DB son mum kapanışı arasındaki
@@ -161,9 +168,8 @@ impl Engine {
         //
         // Önemli: candle'ın kendisi stale ise (DB günlerce eski) candle.close
         // referans olamaz → guard pas geçer, live_price tek doğru kaynak.
-        // Eşik env `CANDLE_FRESHNESS_SECS` (default 300sn = 5dk).
-        let candle_fresh = candle_is_fresh(&last_candle.timestamp);
-        let max_dev_pct: f64 = price_deviation_threshold_from_env();
+        // Eşik (candle_freshness_secs, max_dev_pct) RuntimeTuning'den geldi.
+        let candle_fresh = candle_is_fresh_within(&last_candle.timestamp, candle_freshness_secs);
         if candle_fresh && price_deviation_exceeds(entry, candle_close, max_dev_pct) {
             let dev_pct = price_deviation_pct(entry, candle_close);
             if let Ok(mut st) = state.lock() {
@@ -483,7 +489,7 @@ impl Engine {
         // entry hiç düşmüyordu = asimetri). Bu, paper performansını gerçeğinden
         // yüksek gösteriyordu ve "fee sonrası gerçekten karlı mı?" sorusunu maskeliyordu.
         // Artık entry/exit komisyon muhasebesi simetrik.
-        let commission = alloc_capital * 0.001;
+        let commission = alloc_capital * st.tuning.commission_rate;
         if let Ok(mut costs) = st.finance.live_execution_costs.write() {
             costs.commission_usd += commission;
             costs.total_cost_usd += commission;
@@ -649,11 +655,14 @@ impl Engine {
         // en az N sn yaşamalı (default 30sn; MIN_HOLDING_SECS_STRATEGY env).
         // SL/TP/Trailing etkilenmez — risk yönetimi anlık olmalı.
         if matches!(reason, ExitReason::StrategySignal) {
-            let min_hold_secs: i64 = std::env::var("MIN_HOLDING_SECS_STRATEGY")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(30);
-            let opened_at_str = state.lock().ok()
-                .and_then(|st| st.finance.live_positions.read().ok()
-                    .and_then(|p| p.get(symbol).map(|pos| pos.opened_at.clone())));
+            // Eşik + opened_at tek lock skopunda (min_hold RuntimeTuning'den → getenv yok).
+            let (min_hold_secs, opened_at_str) = state.lock().ok()
+                .map(|st| (
+                    st.tuning.min_holding_secs_strategy,
+                    st.finance.live_positions.read().ok()
+                        .and_then(|p| p.get(symbol).map(|pos| pos.opened_at.clone())),
+                ))
+                .unwrap_or((RuntimeTuning::default().min_holding_secs_strategy, None));
             if let Some(s) = opened_at_str {
                 if let Ok(opened) = chrono::DateTime::parse_from_rfc3339(&s) {
                     let age_secs = (chrono::Utc::now() - opened.with_timezone(&chrono::Utc))
@@ -825,7 +834,7 @@ impl Engine {
 
             let pnl_val = crate::core::math::calculate_pnl(pos.entry_price, exit_price, pos.qty, pos.is_long);
             // Çıkış komisyonu (0.1%) — exit notional üzerinden
-            let exit_commission = (exit_price * pos.qty) * 0.001;
+            let exit_commission = (exit_price * pos.qty) * st.tuning.commission_rate;
             if let Ok(mut costs) = st.finance.live_execution_costs.write() {
                 costs.commission_usd += exit_commission;
                 costs.total_cost_usd += exit_commission;

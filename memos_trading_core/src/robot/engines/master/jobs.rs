@@ -667,26 +667,25 @@ impl Engine {
         log::info!("🌐 E2: Data pipeline download başlatıldı...");
 
         // 1) Çalışma listesi — kilit kısa
-        // BIST exclude: hydrate/price_poll/execute_trade_cycle ile aynı politika.
-        // Burada filtre yoktu → her 15dk scheduler tetiklendiğinde BIST sembolleri
-        // (orchestrator veya pinned'den) Binance'a gönderiliyor → "Veri Format
-        // Hatası" log'u kirletiyordu. ALLOW_BIST=1 ile opt-out.
+        // Canlı feed'i olmayan borsa sembolleri (örn. BIST) download'a gönderilmez →
+        // aksi halde "Veri Format Hatası" log kirliliği. Karar market-agnostik tek nokta:
+        // RuntimeTuning.symbol_eligible_for_live (hydrate/price_poll/cycle ile aynı).
         let (symbols, interval, db_path, limit) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
-            let allow_bist = env_truthy("ALLOW_BIST");
-            let bist_ok = |s: &str| allow_bist || !Self::looks_like_bist_symbol(s);
+            let tuning = Arc::clone(&st.tuning);
+            let eligible = |s: &str| tuning.symbol_eligible_for_live(s);
 
             let mut syms: Vec<String> = vec![];
-            if bist_ok(&st.config.symbol) { syms.push(st.config.symbol.clone()); }
+            if eligible(&st.config.symbol) { syms.push(st.config.symbol.clone()); }
             // SymbolOrchestrator + pinned
             if let Ok(orch) = st.fleet.symbol_orchestrator.read() {
                 for w in orch.get_worker_status() {
-                    if !bist_ok(&w.symbol) { continue; }
+                    if !eligible(&w.symbol) { continue; }
                     if !syms.contains(&w.symbol) { syms.push(w.symbol); }
                 }
             }
             for s in &st.config.pinned_symbols {
-                if !bist_ok(s) { continue; }
+                if !eligible(s) { continue; }
                 if !syms.contains(s) { syms.push(s.clone()); }
             }
             // Açık pozisyon sembolleri (recovery sonrası orchestrator register'ı
@@ -695,7 +694,7 @@ impl Engine {
             // → price-sanity guard tetiklenir, pozisyon kapatılamaz.
             if let Ok(positions) = st.finance.live_positions.read() {
                 for sym in positions.keys() {
-                    if !bist_ok(sym) { continue; }
+                    if !eligible(sym) { continue; }
                     if !syms.contains(sym) { syms.push(sym.clone()); }
                 }
             }

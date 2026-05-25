@@ -121,6 +121,53 @@ impl Exchange {
             Self::Kucoin => "kucoin",
         }
     }
+
+    /// Token'dan borsa (env listesi / config parse için). Bilinmeyen → None.
+    pub fn from_token(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "binance" => Some(Self::Binance),
+            "bist"    => Some(Self::Bist),
+            "coinbase" => Some(Self::Coinbase),
+            "kucoin"  => Some(Self::Kucoin),
+            _ => None,
+        }
+    }
+
+    /// Bu borsanın bu kurulumda gerçek-zamanlı veri/fiyat feed'i var mı?
+    /// Feed'i olmayan borsa sembolleri canlı cycle'a alınmaz (fiyatsız satırlar
+    /// DataIngest/PriceFetch Failed → anomaly birikimi yapar). Yeni borsa eklerken
+    /// feed durumunu BURAYA bir kol olarak ekle; motor çağrı yerlerine dokunma.
+    pub fn has_live_feed(&self) -> bool {
+        match self {
+            // BIST: bu dağıtımda canlı feed yok (manuel/gecikmeli liste). Operatör
+            // RuntimeTuning.force_live_exchanges ile yine de zorlayabilir.
+            Self::Bist => false,
+            Self::Binance | Self::Coinbase | Self::Kucoin => true,
+        }
+    }
+
+    /// Sembol adı biçiminden borsa sınıflandırması (heuristic, tek kaynak).
+    /// Kripto quote ile biten / format dışı → Binance (kripto). 3-6 karakterlik
+    /// büyük-harf+rakam (kripto quote'suz) → Bist (BIST equity). Yeni borsanın
+    /// sembol biçimi farklıysa buraya bir kol ekle.
+    pub fn classify(symbol: &str) -> Self {
+        if bist_symbol_shape(symbol) { Self::Bist } else { Self::Binance }
+    }
+}
+
+/// BIST equity sembol biçimi heuristic'i: 3-6 büyük-harf/rakam, kripto quote'suz.
+/// (THYAO, GARAN, A1CAP ✓ · BTCUSDT ✗). Exchange::classify ve master katmanındaki
+/// looks_like_bist_symbol tek bu fonksiyondan beslenir.
+pub fn bist_symbol_shape(sym: &str) -> bool {
+    if sym.len() < 3 || sym.len() > 6 { return false; }
+    if !sym.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) {
+        return false;
+    }
+    const CRYPTO_QUOTES: &[&str] = &["USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI"];
+    for q in CRYPTO_QUOTES {
+        if sym.ends_with(q) { return false; }
+    }
+    true
 }
 
 /// Market türü - Copy eklendi

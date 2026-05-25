@@ -147,7 +147,7 @@ impl Engine {
     /// → aç/kapat kararı.
     pub(crate) async fn execute_trade_cycle(state: &Arc<Mutex<AppState>>, snap: &MissionControl) {
         // 1) Mark-to-market: aktif pozisyonların current_price'ı güncel.
-        let (candidates, db_path, interval, live_strategy, ml_confidence) = {
+        let (candidates, db_path, interval, live_strategy, ml_confidence, tuning) = {
             let st = match state.lock() { Ok(s) => s, Err(_) => return };
             let price_map = st.fleet.live_price.read().ok().map(|g| g.clone()).unwrap_or_default();
             if let Ok(mut positions) = st.finance.live_positions.write() {
@@ -158,14 +158,13 @@ impl Engine {
                 }
             }
             let mut candidates = Vec::new();
-            // BIST exclude — recovery filter ile aynı politika. Orchestrator
-            // veya pinned semboller üzerinden BIST sembolleri de gelirse cycle
-            // başına eklemeyelim → DataIngest/PriceFetch Failed → anomaly birikimi
-            // zincirinin asıl kaynağı buydu. ALLOW_BIST=1 ile opt-out.
-            let allow_bist_cycle = env_truthy("ALLOW_BIST");
+            // Canlı feed'i olmayan borsa sembolleri (örn. BIST) cycle'a alınmaz →
+            // fiyatsız satırlar DataIngest/PriceFetch Failed → anomaly birikimi yapardı.
+            // Karar market-agnostik tek noktada: RuntimeTuning.symbol_eligible_for_live.
+            let tuning = Arc::clone(&st.tuning);
             if let Ok(orch) = st.fleet.symbol_orchestrator.read() {
                 for worker in orch.get_worker_status() {
-                    if !allow_bist_cycle && Self::looks_like_bist_symbol(&worker.symbol) {
+                    if !tuning.symbol_eligible_for_live(&worker.symbol) {
                         continue;
                     }
                     candidates.push(worker.symbol.clone());
@@ -173,18 +172,16 @@ impl Engine {
             }
             // Yetim pozisyonları da işle: orchestrator worker'ı yok ama açık pozisyon
             // var → SL/TP/Trailing denetimi en azından buradan akar, current_price güncel kalır.
-            // BIST yetim pozisyonu olamaz (recovery filter zaten engelledi), ama defensive
-            // olarak yine aynı kontrol.
             if let Ok(positions) = st.finance.live_positions.read() {
                 for sym in positions.keys() {
-                    if !allow_bist_cycle && Self::looks_like_bist_symbol(sym) { continue; }
+                    if !tuning.symbol_eligible_for_live(sym) { continue; }
                     if !candidates.contains(sym) { candidates.push(sym.clone()); }
                 }
             }
             let live_strategy = st.brain.live_strategy.read()
                 .map(|s| s.clone()).unwrap_or_else(|_| "MA_CROSSOVER".to_string());
             (candidates, st.config.db_path.clone(), st.config.interval.clone(),
-             live_strategy, st.brain.ml_confidence)
+             live_strategy, st.brain.ml_confidence, tuning)
         };
 
         // 2) Paralel sembol infazı — her sembol için ayrı tokio task. State Arc<Mutex> üzerinden
@@ -200,10 +197,11 @@ impl Engine {
             let interval_c = interval.clone();
             let live_strategy_c = live_strategy.clone();
             let snap_clone = snap.clone();
+            let tuning_c = Arc::clone(&tuning);
             handles.push(tokio::spawn(async move {
                 Self::process_symbol_cycle(
                     &state_clone, &symbol, &db_path_c, &interval_c,
-                    &live_strategy_c, ml_confidence, &snap_clone,
+                    &live_strategy_c, ml_confidence, &snap_clone, &tuning_c,
                 ).await;
             }));
         }
@@ -222,6 +220,7 @@ impl Engine {
         live_strategy: &str,
         ml_confidence: f64,
         snap: &MissionControl,
+        tuning: &RuntimeTuning,
     ) {
         use crate::robot::data_pipeline::canon::PipelineStage;
         use crate::robot::data_pipeline::StepStatus;
@@ -231,7 +230,7 @@ impl Engine {
         // Aşağıda `continue` yerine `return` kullanılır (kısa devre tek sembolde).
         {
             // ─── Faz 1 (DataIngest): SQLite'tan son 200 candle ────────────
-            let candles = match Self::cycle_load_candles(state, symbol, db_path, interval) {
+            let candles = match Self::cycle_load_candles(state, symbol, db_path, interval, tuning) {
                 Some(c) => c,
                 None => return,
             };
@@ -456,7 +455,7 @@ impl Engine {
                 // log_throttle_should_emit ile sembol+kind başına default 60sn cooldown.
                 (crate::core::types::Signal::Buy,  Some(true))
                 | (crate::core::types::Signal::Sell, Some(false)) => {
-                    let cooldown: u64 = env_parse("RISK_BLOCK_LOG_COOLDOWN_SECS", 60);
+                    let cooldown = tuning.risk_block_log_cooldown_secs;
                     if log_throttle_should_emit(symbol, "risk_block_pos_aligned", cooldown) {
                         if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
                             let dir_label = if matches!(signal, Signal::Buy) { "LONG" } else { "SHORT" };
@@ -480,6 +479,7 @@ impl Engine {
         symbol: &str,
         db_path: &str,
         interval: &str,
+        tuning: &RuntimeTuning,
     ) -> Option<Vec<Candle>> {
         use crate::robot::data_pipeline::canon::PipelineStage;
         use crate::robot::data_pipeline::StepStatus;
@@ -491,7 +491,7 @@ impl Engine {
                 Some(c)
             }
             Ok(_) => {
-                let cooldown = env_parse("LOG_DATAINGEST_COOLDOWN_SECS", 300);
+                let cooldown = tuning.log_dataingest_cooldown_secs;
                 if log_throttle_should_emit(symbol, "dataingest_empty", cooldown) {
                     log::warn!("DataIngest empty: {} {} (candles tablo'da 1m kayıt yok)", symbol, interval);
                 }
@@ -503,7 +503,7 @@ impl Engine {
                 None
             }
             Err(e) => {
-                let cooldown = env_parse("LOG_DATAINGEST_COOLDOWN_SECS", 300);
+                let cooldown = tuning.log_dataingest_cooldown_secs;
                 if log_throttle_should_emit(symbol, "dataingest_error", cooldown) {
                     log::warn!("DataIngest error: {} {} → {}", symbol, interval, e);
                 }

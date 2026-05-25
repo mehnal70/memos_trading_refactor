@@ -124,6 +124,92 @@ pub(crate) fn env_truthy(key: &str) -> bool {
     std::env::var(key).map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
 }
 
+/// Boot'ta env'den BİR KEZ okunan runtime ayar paketi. `AppState.tuning` alanında
+/// `Arc` olarak tutulur; cycle hot-path'i her tur `getenv` yapmak yerine bu struct'tan
+/// okur. Env hâlâ kaynaktır (operatör override eder) ama yalnızca `AppState::new`'da
+/// okunur → per-cycle syscall + alloc yok. OnceLock global'inden farkı: her `AppState`
+/// kendi env snapshot'ını alır → env-mutasyonlu testlerle de uyumlu.
+#[derive(Debug, Clone)]
+pub struct RuntimeTuning {
+    /// Default'ta canlı feed'i OLMAYAN ama operatörün yine de cycle'a zorladığı
+    /// borsalar (market-agnostik override). Default boş. Eligibility kararı
+    /// `symbol_eligible_for_live` üzerinden tek noktada verilir → motorun hiçbir
+    /// yerinde borsa-adı sabiti yok. Env: FORCE_LIVE_EXCHANGES=bist,kucoin
+    /// (+ geriye uyum: ALLOW_BIST=1 → listeye Bist ekler).
+    pub force_live_exchanges: Vec<crate::core::types::Exchange>,
+    /// Tek emir komisyon oranı (entry+exit'te ayrı ayrı uygulanır). Default 0.001.
+    /// Binance USDⓈ-M taker ≈ 0.0004 → gerçekçi live için `COMMISSION_RATE=0.0004`.
+    pub commission_rate: f64,
+    /// StrategySignal kapanışı için min tutma süresi (sn). SL/TP/Trailing etkilenmez.
+    pub min_holding_secs_strategy: i64,
+    /// Açılışta entry↔candle sapma tavanı (%). 0 → price sanity guard kapalı.
+    pub max_entry_price_dev_pct: f64,
+    /// Candle "taze" eşiği (sn). Bundan eski candle.close fiyat referansı sayılmaz.
+    pub candle_freshness_secs: i64,
+    /// DataIngest empty/error log throttle penceresi (sn, sembol başına).
+    pub log_dataingest_cooldown_secs: u64,
+    /// Position-aligned RISK_BLOCK log throttle penceresi (sn, sembol başına).
+    pub risk_block_log_cooldown_secs: u64,
+}
+
+impl Default for RuntimeTuning {
+    fn default() -> Self {
+        Self {
+            force_live_exchanges: Vec::new(),
+            commission_rate: 0.001,
+            min_holding_secs_strategy: 30,
+            max_entry_price_dev_pct: 5.0,
+            candle_freshness_secs: 300,
+            log_dataingest_cooldown_secs: 300,
+            risk_block_log_cooldown_secs: 60,
+        }
+    }
+}
+
+impl RuntimeTuning {
+    /// Env'den okur; eksik/geçersiz değerlerde `Default` kullanılır. AppState::new'da
+    /// bir kez çağrılır. Eski inline env okumalarıyla birebir aynı default'lar.
+    pub fn from_env() -> Self {
+        let d = Self::default();
+        let commission_rate = {
+            let v = env_parse("COMMISSION_RATE", d.commission_rate);
+            if v.is_finite() && v >= 0.0 { v } else { d.commission_rate }
+        };
+        Self {
+            force_live_exchanges: Self::parse_force_live_exchanges(),
+            commission_rate,
+            min_holding_secs_strategy: env_parse("MIN_HOLDING_SECS_STRATEGY", d.min_holding_secs_strategy),
+            max_entry_price_dev_pct: env_parse("MAX_ENTRY_PRICE_DEVIATION_PCT", d.max_entry_price_dev_pct),
+            candle_freshness_secs: env_parse("CANDLE_FRESHNESS_SECS", d.candle_freshness_secs),
+            log_dataingest_cooldown_secs: env_parse("LOG_DATAINGEST_COOLDOWN_SECS", d.log_dataingest_cooldown_secs),
+            risk_block_log_cooldown_secs: env_parse("RISK_BLOCK_LOG_COOLDOWN_SECS", d.risk_block_log_cooldown_secs),
+        }
+    }
+
+    /// FORCE_LIVE_EXCHANGES env'ini (virgül/boşluk ayraçlı) parse eder; bilinmeyen
+    /// token'lar yok sayılır. Geriye uyum: ALLOW_BIST=1 → listeye Bist eklenir.
+    fn parse_force_live_exchanges() -> Vec<crate::core::types::Exchange> {
+        use crate::core::types::Exchange;
+        let mut out: Vec<Exchange> = std::env::var("FORCE_LIVE_EXCHANGES")
+            .unwrap_or_default()
+            .split(|c| c == ',' || c == ' ' || c == ';')
+            .filter_map(Exchange::from_token)
+            .collect();
+        if env_truthy("ALLOW_BIST") && !out.contains(&Exchange::Bist) {
+            out.push(Exchange::Bist); // legacy alias
+        }
+        out
+    }
+
+    /// Sembol canlı cycle'a (DataIngest + trade) uygun mu? Borsasının canlı feed'i
+    /// varsa ya da operatör force ettiyse true. **Tüm market-bazlı dışlama tek nokta** —
+    /// motorun başka hiçbir yerinde borsa-adı sabiti olmamalı.
+    pub fn symbol_eligible_for_live(&self, symbol: &str) -> bool {
+        let ex = crate::core::types::Exchange::classify(symbol);
+        ex.has_live_feed() || self.force_live_exchanges.contains(&ex)
+    }
+}
+
 /// `MAX_ENTRY_PRICE_DEVIATION_PCT` env'ini parse eder; geçersiz/eksikse 5.0 döner.
 /// 0 verilirse price sanity guard kapanır (test ve operatör override için).
 pub fn price_deviation_threshold_from_env() -> f64 {
@@ -149,8 +235,13 @@ pub fn price_deviation_exceeds(entry: f64, reference: f64, max_dev_pct: f64) -> 
 /// eski olabilir (BIST veya pasif sembol) → bu durumda candle.close referans
 /// olarak güvenilmez; price sanity guard pas geçer.
 pub fn candle_is_fresh(candle_ts: &chrono::DateTime<chrono::Utc>) -> bool {
-    let max_age_secs: i64 = std::env::var("CANDLE_FRESHNESS_SECS")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+    candle_is_fresh_within(candle_ts, env_parse("CANDLE_FRESHNESS_SECS", 300))
+}
+
+/// Saf freshness kontrolü: 0 <= (now - ts) <= max_age_secs. `candle_is_fresh` bunun
+/// env-default sarmalayıcısı (testler default'la çağırıyor); hot-path RuntimeTuning'den
+/// gelen cached eşikle bu saf sürümü çağırır → per-call getenv yok.
+pub fn candle_is_fresh_within(candle_ts: &chrono::DateTime<chrono::Utc>, max_age_secs: i64) -> bool {
     let age_secs = (chrono::Utc::now() - *candle_ts).num_seconds();
     age_secs >= 0 && age_secs <= max_age_secs
 }
