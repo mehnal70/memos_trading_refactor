@@ -250,8 +250,15 @@ impl Engine {
                     (tr.take_profit_pct, tr.stop_loss_pct)
                 })
                 .unwrap_or((3.0, 1.5));
-            let tp_pct = tp_pct.max(0.1);
             let sl_pct = sl_pct.max(0.1);
+            // LET_WINNERS_RUN: sabit TP'yi çok uzağa it (≥%50) → kâr çıkışını ATR
+            // trailing yönetir. Geçerli pozitif bir TP kalır (live koruma emri bozulmaz)
+            // ama normal hareketlerde tetiklenmez. Backtest: HTF'de net pozitif (opt-in).
+            let tp_pct = if st.tuning.let_winners_run {
+                tp_pct.max(50.0)
+            } else {
+                tp_pct.max(0.1)
+            };
             let (stop_loss, take_profit) = if is_long {
                 (entry * (1.0 - sl_pct / 100.0), entry * (1.0 + tp_pct / 100.0))
             } else {

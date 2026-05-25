@@ -140,6 +140,10 @@ pub struct RuntimeTuning {
     /// Tek emir komisyon oranı (entry+exit'te ayrı ayrı uygulanır). Default 0.001.
     /// Binance USDⓈ-M taker ≈ 0.0004 → gerçekçi live için `COMMISSION_RATE=0.0004`.
     pub commission_rate: f64,
+    /// "Winner'ı koştur": açılışta sabit TP'yi çok uzağa it → kâr çıkışını ATR
+    /// trailing yönetir. Env `LET_WINNERS_RUN`, default false. Backtest (bt_ab_exit_mgmt)
+    /// yüksek zaman diliminde net pozitif, 1m'de marjinal gösterdi → opt-in.
+    pub let_winners_run: bool,
     /// StrategySignal kapanışı için min tutma süresi (sn). SL/TP/Trailing etkilenmez.
     pub min_holding_secs_strategy: i64,
     /// Açılışta entry↔candle sapma tavanı (%). 0 → price sanity guard kapalı.
@@ -157,6 +161,7 @@ impl Default for RuntimeTuning {
         Self {
             force_live_exchanges: Vec::new(),
             commission_rate: 0.001,
+            let_winners_run: false,
             min_holding_secs_strategy: 30,
             max_entry_price_dev_pct: 5.0,
             candle_freshness_secs: 300,
@@ -178,6 +183,7 @@ impl RuntimeTuning {
         Self {
             force_live_exchanges: Self::parse_force_live_exchanges(),
             commission_rate,
+            let_winners_run: env_truthy("LET_WINNERS_RUN"),
             min_holding_secs_strategy: env_parse("MIN_HOLDING_SECS_STRATEGY", d.min_holding_secs_strategy),
             max_entry_price_dev_pct: env_parse("MAX_ENTRY_PRICE_DEVIATION_PCT", d.max_entry_price_dev_pct),
             candle_freshness_secs: env_parse("CANDLE_FRESHNESS_SECS", d.candle_freshness_secs),
