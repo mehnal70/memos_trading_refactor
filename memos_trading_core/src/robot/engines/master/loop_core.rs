@@ -569,6 +569,17 @@ impl Engine {
     /// en az 1 katı yön yapması "tam güç" sayılır. Ham getiriyi kullanmak yerine ATR normalizasyonu
     /// 1m gibi düşük volatilite timeframe'lerinde edge'in pratik olarak ölçülebilir kalmasını sağlar.
     pub(crate) fn compute_edge_score(candles: &[Candle], signal: &Signal, ml_confidence: f64) -> f64 {
+        // Canlı yol sabit ters-momentum cezası 0.4 ile çağırır (davranış birebir).
+        // Parametrik sürüm backtest A/B'si (#3) için ayrı eşik denemesine izin verir.
+        Self::compute_edge_score_with(candles, signal, ml_confidence, 0.4)
+    }
+
+    /// `compute_edge_score`'un ters-momentum cezası parametrik sürümü. `reverse_penalty`:
+    /// sinyal momentumla ters yöndeyse uygulanan dir_match çarpanı (canlı: 0.4).
+    /// Düşürmek (örn. 0.2) ters girişleri daha çok bastırır; 1.0 cezayı kaldırır.
+    pub(crate) fn compute_edge_score_with(
+        candles: &[Candle], signal: &Signal, ml_confidence: f64, reverse_penalty: f64,
+    ) -> f64 {
         if candles.len() < 20 { return 0.0; }
         let recent = &candles[candles.len() - 20..];
         let first = recent.first().map(|c| c.close).unwrap_or(0.0);
@@ -589,7 +600,7 @@ impl Engine {
             Signal::Buy  if mom > 0.0  => 1.0,
             Signal::Sell if mom < 0.0  => 1.0,
             Signal::Hold               => 0.0,
-            _                          => 0.4, // ters yön sinyali → ciddi ceza
+            _                          => reverse_penalty, // ters yön sinyali → ceza
         };
         let ml = ml_confidence.clamp(0.0, 1.0);
         // ML henüz hazır değilse (0.0) momentum tek başına baskın olsun.
