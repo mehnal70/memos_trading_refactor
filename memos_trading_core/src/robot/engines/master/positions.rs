@@ -477,13 +477,19 @@ impl Engine {
             }
         }
 
-        // Komisyon (0.1%) live_execution_costs'a yazılır.
+        // Açılış komisyonu (0.1%): hem cost tracker'a yazılır HEM equity'den düşülür.
+        // Önceki davranış sadece tracker'a yazıyordu → equity her trade'de açılış
+        // komisyonu kadar abartılıyordu (kapanışta exit_commission düşülüyor ama
+        // entry hiç düşmüyordu = asimetri). Bu, paper performansını gerçeğinden
+        // yüksek gösteriyordu ve "fee sonrası gerçekten karlı mı?" sorusunu maskeliyordu.
+        // Artık entry/exit komisyon muhasebesi simetrik.
         let commission = alloc_capital * 0.001;
         if let Ok(mut costs) = st.finance.live_execution_costs.write() {
             costs.commission_usd += commission;
             costs.total_cost_usd += commission;
             costs.trade_count    += 1;
         }
+        st.finance.equity -= commission;
 
         // IntelligenceHub.track_trade — kapanışta learn_from_exit ile eşleşecek.
         if let Ok(mut hub) = st.brain.intelligence_hub.write() {
