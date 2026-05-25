@@ -231,83 +231,14 @@ impl Engine {
         // Aşağıda `continue` yerine `return` kullanılır (kısa devre tek sembolde).
         {
             // ─── Faz 1 (DataIngest): SQLite'tan son 200 candle ────────────
-            // Üç ayrım: Ok(non-empty) Done. Ok(empty) sessiz Skipped (sembol
-            // için 1m candle DB'de yok = veri kaynağı eksikliği, alarm değil).
-            // Err = gerçek DB hatası, anomaly emit.
-            let candles = match crate::persistence::reader::read_candles(db_path, symbol, interval, 200) {
-                Ok(c) if !c.is_empty() => {
-                    Self::mark_pipeline_stage(state, PipelineStage::DataIngest, StepStatus::Done);
-                    c
-                }
-                Ok(_) => {
-                    // Sembol candle'sız → bir sonraki cycle yine aynı sonuç
-                    // verecek. push_anomaly etmeden chain_steps'i Failed işaretle
-                    // (TUI Pipeline panelinde görünür, anomaly cap'ini doldurmaz).
-                    // Log throttle: aynı sembol için 300sn pencere (env override).
-                    let cooldown = env_parse("LOG_DATAINGEST_COOLDOWN_SECS", 300);
-                    if log_throttle_should_emit(symbol, "dataingest_empty", cooldown) {
-                        log::warn!("DataIngest empty: {} {} (candles tablo'da 1m kayıt yok)", symbol, interval);
-                    }
-                    if let Ok(st) = state.lock() {
-                        if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
-                            pipe.mark_stage_completed(
-                                PipelineStage::DataIngest,
-                                StepStatus::Failed,
-                            );
-                        }
-                    }
-                    return;
-                }
-                Err(e) => {
-                    let cooldown = env_parse("LOG_DATAINGEST_COOLDOWN_SECS", 300);
-                    if log_throttle_should_emit(symbol, "dataingest_error", cooldown) {
-                        log::warn!("DataIngest error: {} {} → {}", symbol, interval, e);
-                    }
-                    Self::mark_pipeline_stage(state, PipelineStage::DataIngest, StepStatus::Failed);
-                    return;
-                }
+            let candles = match Self::cycle_load_candles(state, symbol, db_path, interval) {
+                Some(c) => c,
+                None => return,
             };
 
             // === 1.5) AÇIK POZİSYON İSE: önce SL/TP/Trailing/Breakeven denetle ===
-            // En taze fiyat öncelik sırası:
-            //   1) st.fleet.live_price (price_poll task'ı her 5sn REST'den çeker)
-            //   2) candles.last().close (DB'deki son mum; download 15dk'da bir → eski olabilir)
-            // Daha önce sadece (2) kullanılıyordu → outer mark-to-market (line ~1572)
-            // taze fiyat yazsa bile bu blok her sembol task'ında eski mum close'u ile
-            // pos.current_price'ı geri eziyordu → TUI sermaye/PnL hep entry'de sıkışıyordu.
-            let candle_close = candles.last().map(|c| c.close).unwrap_or(0.0);
-            let atr_value  = Self::calc_atr(&candles, 14);
-            let (live_price, exit_reason) = {
-                let st = match state.lock() { Ok(s) => s, Err(_) => return };
-                // ATR-trail mult: sembol×interval noise floor + pozisyonu açan stratejinin
-                // target_pct'i (SUPERTREND=geniş, BB=sıkı vb.). pos.trade_type açılışta
-                // strategy_name ile mühürleniyor → trail kararı strateji niyetiyle hizalı.
-                let default_mult = st.brain.best_params.get("pos_atr_trail_mult").copied().unwrap_or(2.0);
-                let pos_strategy: String = st.finance.live_positions.read().ok()
-                    .and_then(|m| m.get(symbol).map(|p| p.trade_type.clone()))
-                    .unwrap_or_else(|| "default".to_string());
-                let atr_mult = st.brain.parameters.read().ok()
-                    .map(|p| p.resolve_atr_mult(symbol, interval, &pos_strategy, default_mult))
-                    .unwrap_or(default_mult);
-                let be_rr    = st.brain.best_params.get("pos_breakeven_at_rr").copied().unwrap_or(1.0);
-                let fleet_price = st.fleet.live_price.read().ok()
-                    .and_then(|m| m.get(symbol).copied())
-                    .filter(|&v| v > 0.0);
-                let live_price = fleet_price.unwrap_or(candle_close);
-                let reason_opt = if let Ok(mut positions) = st.finance.live_positions.write() {
-                    if let Some(pos) = positions.get_mut(symbol) {
-                        pos.current_price = live_price;
-                        Self::check_exit_conditions(pos, live_price, atr_value, atr_mult, be_rr)
-                    } else { None }
-                } else { None };
-                (live_price, reason_opt)
-            };
-            if let Some(reason) = exit_reason {
-                push_state_log(state, format!(
-                    "{} {} {} koşulu tetiklendi @ {:.4}",
-                    reason.emoji(), symbol, reason.as_str(), live_price,
-                ));
-                Self::close_paper_position(state, symbol, &candles, reason).await;
+            // Tetiklenirse close_paper_position çağrılır ve tur biter.
+            if Self::cycle_try_close_open_position(state, symbol, interval, &candles).await {
                 return; // bu sembolde tur bitti, yeniden açılış aynı turda denenmesin
             }
 
@@ -443,8 +374,15 @@ impl Engine {
 
             // SIGNAL eventi: yalnız Buy/Sell için logla (HOLD spam yapmasın).
             if matches!(signal, Signal::Buy | Signal::Sell) {
+                // Referans fiyat: fleet.live_price (5sn REST) > candle close — exit
+                // denetimiyle (cycle_try_close_open_position) birebir aynı öncelik.
+                let signal_price = state.lock().ok()
+                    .and_then(|st| st.fleet.live_price.read().ok()
+                        .and_then(|m| m.get(symbol).copied()))
+                    .filter(|&v| v > 0.0)
+                    .unwrap_or_else(|| candles.last().map(|c| c.close).unwrap_or(0.0));
                 if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
-                    let ev = crate::robot::infra::logger::TradeEvent::signal(symbol, signal, live_price);
+                    let ev = crate::robot::infra::logger::TradeEvent::signal(symbol, signal, signal_price);
                     let _ = logger.log_event(&ev);
                 }
             }
@@ -534,6 +472,95 @@ impl Engine {
             }
         }
     }
+    /// Faz 1 (DataIngest): sembol için son 200 mumu DB'den okur. Empty/Err
+    /// durumlarında pipeline aşamasını işaretler + throttle'lı log basar ve None
+    /// döner (caller cycle'ı kısa-devre eder). process_symbol_cycle'dan birebir taşındı.
+    pub(crate) fn cycle_load_candles(
+        state: &Arc<Mutex<AppState>>,
+        symbol: &str,
+        db_path: &str,
+        interval: &str,
+    ) -> Option<Vec<Candle>> {
+        use crate::robot::data_pipeline::canon::PipelineStage;
+        use crate::robot::data_pipeline::StepStatus;
+        // Üç ayrım: Ok(non-empty) Done. Ok(empty) sessiz Failed (sembol için 1m
+        // candle DB'de yok = veri kaynağı eksikliği, alarm değil). Err = gerçek DB hatası.
+        match crate::persistence::reader::read_candles(db_path, symbol, interval, 200) {
+            Ok(c) if !c.is_empty() => {
+                Self::mark_pipeline_stage(state, PipelineStage::DataIngest, StepStatus::Done);
+                Some(c)
+            }
+            Ok(_) => {
+                let cooldown = env_parse("LOG_DATAINGEST_COOLDOWN_SECS", 300);
+                if log_throttle_should_emit(symbol, "dataingest_empty", cooldown) {
+                    log::warn!("DataIngest empty: {} {} (candles tablo'da 1m kayıt yok)", symbol, interval);
+                }
+                if let Ok(st) = state.lock() {
+                    if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
+                        pipe.mark_stage_completed(PipelineStage::DataIngest, StepStatus::Failed);
+                    }
+                }
+                None
+            }
+            Err(e) => {
+                let cooldown = env_parse("LOG_DATAINGEST_COOLDOWN_SECS", 300);
+                if log_throttle_should_emit(symbol, "dataingest_error", cooldown) {
+                    log::warn!("DataIngest error: {} {} → {}", symbol, interval, e);
+                }
+                Self::mark_pipeline_stage(state, PipelineStage::DataIngest, StepStatus::Failed);
+                None
+            }
+        }
+    }
+
+    /// Açık pozisyon varsa en taze fiyatla (fleet.live_price > candle close) SL/TP/
+    /// Trailing/Breakeven denetler; tetiklenirse kapatır. `true` → bu sembolde tur
+    /// bitti (caller return etmeli). Pozisyon yok / exit yok → `false`.
+    /// process_symbol_cycle'dan birebir taşındı (lock skopları dahil).
+    pub(crate) async fn cycle_try_close_open_position(
+        state: &Arc<Mutex<AppState>>,
+        symbol: &str,
+        interval: &str,
+        candles: &[Candle],
+    ) -> bool {
+        // En taze fiyat önceliği: 1) fleet.live_price (5sn REST), 2) candle close.
+        let candle_close = candles.last().map(|c| c.close).unwrap_or(0.0);
+        let atr_value = Self::calc_atr(candles, 14);
+        let (live_price, exit_reason) = {
+            let st = match state.lock() { Ok(s) => s, Err(_) => return true };
+            // ATR-trail mult: sembol×interval noise floor + pozisyonu açan stratejinin
+            // target_pct'i. pos.trade_type açılışta strategy_name ile mühürleniyor.
+            let default_mult = st.brain.best_params.get("pos_atr_trail_mult").copied().unwrap_or(2.0);
+            let pos_strategy: String = st.finance.live_positions.read().ok()
+                .and_then(|m| m.get(symbol).map(|p| p.trade_type.clone()))
+                .unwrap_or_else(|| "default".to_string());
+            let atr_mult = st.brain.parameters.read().ok()
+                .map(|p| p.resolve_atr_mult(symbol, interval, &pos_strategy, default_mult))
+                .unwrap_or(default_mult);
+            let be_rr = st.brain.best_params.get("pos_breakeven_at_rr").copied().unwrap_or(1.0);
+            let fleet_price = st.fleet.live_price.read().ok()
+                .and_then(|m| m.get(symbol).copied())
+                .filter(|&v| v > 0.0);
+            let live_price = fleet_price.unwrap_or(candle_close);
+            let reason_opt = if let Ok(mut positions) = st.finance.live_positions.write() {
+                if let Some(pos) = positions.get_mut(symbol) {
+                    pos.current_price = live_price;
+                    Self::check_exit_conditions(pos, live_price, atr_value, atr_mult, be_rr)
+                } else { None }
+            } else { None };
+            (live_price, reason_opt)
+        };
+        if let Some(reason) = exit_reason {
+            push_state_log(state, format!(
+                "{} {} {} koşulu tetiklendi @ {:.4}",
+                reason.emoji(), symbol, reason.as_str(), live_price,
+            ));
+            Self::close_paper_position(state, symbol, candles, reason).await;
+            return true;
+        }
+        false
+    }
+
 
     /// Edge skoru: son 20 mumun momentum gücü (ATR'ye göre normalize) ile ML confidence ortalaması.
     /// Sinyal yönü momentum ile uyumlu değilse ceza uygulanır.
