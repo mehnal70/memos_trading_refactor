@@ -15,17 +15,13 @@ impl Engine {
         let conn = match rusqlite::Connection::open(&db_path) {
             Ok(c) => c,
             Err(e) => {
-                if let Ok(mut st) = state.lock() {
-                    st.push_log(format!("⚠️ ensure_db_schema: DB açılamadı ({}) — devam ediliyor", e));
-                }
+                push_state_log(state, format!("⚠️ ensure_db_schema: DB açılamadı ({}) — devam ediliyor", e));
                 return;
             }
         };
         if let Err(e) = crate::persistence::writer::ensure_candles_table(&conn) {
             log::warn!("⚠️ candles tablosu kurulamadı: {}", e);
-            if let Ok(mut st) = state.lock() {
-                st.push_log(format!("⚠️ candles tablosu kurulamadı: {}", e));
-            }
+            push_state_log(state, format!("⚠️ candles tablosu kurulamadı: {}", e));
         } else if let Ok(mut st) = state.lock() {
             st.push_log_mirror(
                 "📐 SQLite şeması doğrulandı (candles + open_positions_snapshot + account_state)".to_string(),
@@ -35,9 +31,7 @@ impl Engine {
         // ilk INSERT öncesi yaratılıyor; ek bir CREATE çağrısına gerek yok.
         if let Err(e) = crate::persistence::writer::ensure_account_state_table(&conn) {
             log::warn!("⚠️ account_state tablosu kurulamadı: {}", e);
-            if let Ok(mut st) = state.lock() {
-                st.push_log(format!("⚠️ account_state tablosu kurulamadı: {}", e));
-            }
+            push_state_log(state, format!("⚠️ account_state tablosu kurulamadı: {}", e));
         }
     }
 
@@ -55,8 +49,7 @@ impl Engine {
         // BIST exclude: default ON. BIST canlı feed pratik olarak yok → cycle'a
         // BIST koymak DataIngest/PriceFetch Failed → anomaly birikimi.
         // ALLOW_BIST=1 ile geri açılır (geçmiş data backtest senaryoları için).
-        let allow_bist = std::env::var("ALLOW_BIST")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        let allow_bist = env_truthy("ALLOW_BIST");
         match crate::persistence::reader::recover_open_positions(&db_path) {
             Ok(positions) if !positions.is_empty() => {
                 // İki kademeli filtre:
@@ -137,12 +130,10 @@ impl Engine {
             }
             Err(e) => {
                 log::warn!("⚠️ [RECOVERY] snapshot okunamadı: {} — cold-start'a düşülüyor", e);
-                if let Ok(mut st) = state.lock() {
-                    st.push_log(format!(
-                        "⚠️ [RECOVERY] open_positions_snapshot okunamadı: {} (cold-start'a düşülüyor)",
-                        e,
-                    ));
-                }
+                push_state_log(state, format!(
+                    "⚠️ [RECOVERY] open_positions_snapshot okunamadı: {} (cold-start'a düşülüyor)",
+                    e,
+                ));
             }
         }
     }
@@ -242,12 +233,10 @@ impl Engine {
             }
             Err(e) => {
                 log::warn!("⚠️ [RECOVERY] account_state okunamadı: {} — cold-start'a düşülüyor", e);
-                if let Ok(mut st) = state.lock() {
-                    st.push_log(format!(
-                        "⚠️ [RECOVERY] account_state okunamadı: {} (cold-start'a düşülüyor)",
-                        e,
-                    ));
-                }
+                push_state_log(state, format!(
+                    "⚠️ [RECOVERY] account_state okunamadı: {} (cold-start'a düşülüyor)",
+                    e,
+                ));
             }
         }
     }

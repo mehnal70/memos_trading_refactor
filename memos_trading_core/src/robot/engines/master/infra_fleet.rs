@@ -7,9 +7,7 @@ impl Engine {
     /// 🛠️ INFRASTRUCTURE FLEET: Global servisleri non-blocking olarak yönetir.
     pub(crate) async fn spawn_infrastructure_fleet(state: Arc<Mutex<AppState>>) {
         log::info!("⚡ Srivastava Altyapı Filosu sevk ediliyor...");
-        if let Ok(mut st) = state.lock() {
-            st.push_log("⚡ Altyapı filosu sevk edildi: snapshot(5s) · heartbeat-file(60s) · heartbeat(1s) · phase(2s) · price-poll(5s) · trigger(250ms) · scheduler(60s) · psync(30s) · ws-user-data · balance-sync(5dk)".into());
-        }
+        push_state_log(&state, "⚡ Altyapı filosu sevk edildi: snapshot(5s) · heartbeat-file(60s) · heartbeat(1s) · phase(2s) · price-poll(5s) · trigger(250ms) · scheduler(60s) · psync(30s) · ws-user-data · balance-sync(5dk)".into());
 
         // ── Task 0: MissionControl snapshot yazıcısı — her 5 sn'de bir tam state'i
         //    data/mission_control.json'a atomik (tmp+rename) yazar. Headless mod ve
@@ -148,8 +146,7 @@ impl Engine {
                 // gerçek fiyatla kapanır → sahte PnL döngüsü (BTCUSDC 24h
                 // auditte 86 trade ile $3500+ sahte kâr basmıştı).
                 // Eşik default 300sn = 5dk × interval; 1m bar için 5 tane mum.
-                let max_candle_age: i64 = std::env::var("PRICE_POLL_MAX_CANDLE_AGE_SECS")
-                    .ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+                let max_candle_age: i64 = env_parse("PRICE_POLL_MAX_CANDLE_AGE_SECS", 300);
                 let mut stale_skipped: Vec<String> = Vec::new();
                 for sym in &symbols {
                     if sym.is_empty() { continue; }
@@ -502,8 +499,7 @@ impl Engine {
             // davranış aktivleştirilir. Default 30 dk; 0 → screener fire kapalı.
             let screener_enabled = std::env::var("SCHEDULER_SCREENER_ENABLED")
                 .map(|v| v != "false" && v != "0").unwrap_or(true);
-            let screener_period: u64 = std::env::var("SCHEDULER_SCREENER_EVERY_MINS")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(30);
+            let screener_period: u64 = env_parse("SCHEDULER_SCREENER_EVERY_MINS", 30);
 
             // ML periyodik fallback: drift-only fire (intelligence_hub) düşük drift'te
             // hiç eğitim yapmıyordu → kullanıcı "hareketlenme yok" diyor. Periyodik
@@ -511,8 +507,7 @@ impl Engine {
             // Drift cooldown (cefc955) zaten arka arkaya çakışmayı önler.
             let ml_periodic_enabled = std::env::var("SCHEDULER_ML_ENABLED")
                 .map(|v| v != "false" && v != "0").unwrap_or(true);
-            let ml_period: u64 = std::env::var("SCHEDULER_ML_EVERY_MINS")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(120);
+            let ml_period: u64 = env_parse("SCHEDULER_ML_EVERY_MINS", 120);
 
             sleep(Duration::from_secs(WARMUP_SECS)).await; // boot warmup
 
@@ -550,8 +545,7 @@ impl Engine {
                     // sayesinde tetiklenmiyor (DataIngest Failed yok), bu yüzden
                     // ilk run'da 120dk beklemeden GBT'yi cold-start eğitelim.
                     // SCHEDULER_ML_WARMUP_SKIP=1 ile bu tetik kapatılabilir.
-                    let skip_warmup_ml = std::env::var("SCHEDULER_ML_WARMUP_SKIP")
-                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+                    let skip_warmup_ml = env_truthy("SCHEDULER_ML_WARMUP_SKIP");
                     if ml_periodic_enabled && !skip_warmup_ml {
                         if let Ok(st) = st_sched.lock() {
                             if let Some(t) = st.fleet.triggers.get("ml") {
@@ -795,9 +789,7 @@ impl Engine {
     pub(crate) fn spawn_scalp_swing_tuner(state: Arc<Mutex<AppState>>) {
         tokio::spawn(async move {
             if std::env::var("SCALP_SWING_TUNE_DISABLE").ok().as_deref() == Some("1") {
-                if let Ok(mut st) = state.lock() {
-                    st.push_log("🎚️ ScalpSwing tuner: DISABLE=1, task pasif".into());
-                }
+                push_state_log(&state, "🎚️ ScalpSwing tuner: DISABLE=1, task pasif".into());
                 return;
             }
             let every_secs: u64 = std::env::var("SCALP_SWING_TUNE_EVERY_SECS")
@@ -806,12 +798,10 @@ impl Engine {
             // Tuner devrede olduğunu boot'ta operatöre bildir — aksi halde
             // "tuner çalışmadı mı?" şüphesi oluşuyordu (summary boş olunca
             // hiç log atılmıyor → görünürlük kayboluyordu).
-            if let Ok(mut st) = state.lock() {
-                st.push_log(format!(
-                    "🎚️ ScalpSwing tuner devrede (periyot={}sn, min trade=5)",
-                    every_secs,
-                ));
-            }
+            push_state_log(&state, format!(
+                "🎚️ ScalpSwing tuner devrede (periyot={}sn, min trade=5)",
+                every_secs,
+            ));
 
             // İlk turda warmup için kısa bekle — boot anında stats boş olur.
             tokio::time::sleep(std::time::Duration::from_secs(every_secs.min(30))).await;
@@ -886,12 +876,10 @@ impl Engine {
 
                 // 3) Log (yine kısa scope).
                 if !summary.is_empty() {
-                    if let Ok(mut st) = state.lock() {
-                        st.push_log(format!(
-                            "🎚️ ScalpSwing tuner: {} ayar uygulandı → {}",
-                            summary.len(), summary.join(", "),
-                        ));
-                    }
+                    push_state_log(&state, format!(
+                        "🎚️ ScalpSwing tuner: {} ayar uygulandı → {}",
+                        summary.len(), summary.join(", "),
+                    ));
                 }
 
                 tokio::time::sleep(std::time::Duration::from_secs(every_secs)).await;
@@ -968,9 +956,7 @@ impl Engine {
     pub(crate) fn spawn_sr_updater(state: Arc<Mutex<AppState>>) {
         tokio::spawn(async move {
             if std::env::var("SR_UPDATER_DISABLE").ok().as_deref() == Some("1") {
-                if let Ok(mut st) = state.lock() {
-                    st.push_log("📐 SR updater: SR_UPDATER_DISABLE=1, task pasif".into());
-                }
+                push_state_log(&state, "📐 SR updater: SR_UPDATER_DISABLE=1, task pasif".into());
                 return;
             }
             // Faz 2: interval ParameterStore'dan okunur. SR_UPDATE_EVERY_SECS env'i
@@ -994,8 +980,7 @@ impl Engine {
                 // SR zone'lar hesaplanıp Market Gözetimi'nde fiyatsız BIST'ler gözükür.
                 let (db_path, interval, symbols) = {
                     let st = match state.lock() { Ok(s) => s, Err(_) => break };
-                    let allow_bist = std::env::var("ALLOW_BIST")
-                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+                    let allow_bist = env_truthy("ALLOW_BIST");
                     let bist_ok = |s: &str| allow_bist || !Self::looks_like_bist_symbol(s);
 
                     let mut symbols: Vec<String> = vec![];
@@ -1043,12 +1028,10 @@ impl Engine {
                 }
 
                 if !first_run_logged {
-                    if let Ok(mut st) = state.lock() {
-                        st.push_log(format!(
-                            "📐 SR updater: {} sembol, {} bölge, her {}sn",
-                            symbols.len(), total_zones, interval_secs,
-                        ));
-                    }
+                    push_state_log(&state, format!(
+                        "📐 SR updater: {} sembol, {} bölge, her {}sn",
+                        symbols.len(), total_zones, interval_secs,
+                    ));
                     first_run_logged = true;
                 }
 
@@ -1083,9 +1066,7 @@ impl Engine {
             let executor = match executor {
                 Some(e) if !dry_run => e,
                 _ => {
-                    if let Ok(mut st) = state.lock() {
-                        st.push_log("💰 Balance sync: Paper/DryRun mod, task pasif".into());
-                    }
+                    push_state_log(&state, "💰 Balance sync: Paper/DryRun mod, task pasif".into());
                     return;
                 }
             };
@@ -1161,12 +1142,10 @@ impl Engine {
                         } else {
                             // Eşik altına düştü → sayacı toparla
                             if consecutive_mismatch > 0 {
-                                if let Ok(mut st) = state.lock() {
-                                    st.push_log(format!(
-                                        "💰 [BALANCE-SYNC] mismatch toparlandı (sayaç sıfırlandı): borsa=${:.2} ≈ local=${:.2}",
-                                        exchange_balance, local_equity,
-                                    ));
-                                }
+                                push_state_log(&state, format!(
+                                    "💰 [BALANCE-SYNC] mismatch toparlandı (sayaç sıfırlandı): borsa=${:.2} ≈ local=${:.2}",
+                                    exchange_balance, local_equity,
+                                ));
                             } else if let Ok(mut st) = state.lock() {
                                 st.push_log(format!(
                                     "💰 [BALANCE-SYNC] borsa=${:.2} ≈ local=${:.2} (fark {:.2}%, eşik altı)",
@@ -1177,9 +1156,7 @@ impl Engine {
                         }
                     }
                     Err(e) => {
-                        if let Ok(mut st) = state.lock() {
-                            st.push_log(format!("⚠️ [BALANCE-SYNC] get_balance hatası: {:?}", e));
-                        }
+                        push_state_log(&state, format!("⚠️ [BALANCE-SYNC] get_balance hatası: {:?}", e));
                     }
                 }
 
@@ -1202,9 +1179,7 @@ impl Engine {
             let executor = match executor {
                 Some(e) if !dry_run => e,
                 _ => {
-                    if let Ok(mut st) = state.lock() {
-                        st.push_log("🛰️ WS userDataStream: Paper/DryRun mod, task pasif".into());
-                    }
+                    push_state_log(&state, "🛰️ WS userDataStream: Paper/DryRun mod, task pasif".into());
                     return;
                 }
             };
@@ -1219,20 +1194,16 @@ impl Engine {
                 let listen_key = match executor.create_listen_key().await {
                     Ok(k) => k,
                     Err(e) => {
-                        if let Ok(mut st) = state.lock() {
-                            st.push_log(format!(
-                                "🛰️ WS listenKey hatası: {:?} (backoff={}s)", e, backoff_secs,
-                            ));
-                        }
+                        push_state_log(&state, format!(
+                            "🛰️ WS listenKey hatası: {:?} (backoff={}s)", e, backoff_secs,
+                        ));
                         sleep(Duration::from_secs(backoff_secs)).await;
                         backoff_secs = (backoff_secs * 2).min(60);
                         continue;
                     }
                 };
                 let ws_url = executor.user_data_stream_url(&listen_key);
-                if let Ok(mut st) = state.lock() {
-                    st.push_log(format!("🛰️ WS userDataStream bağlanıyor: {}", ws_url));
-                }
+                push_state_log(&state, format!("🛰️ WS userDataStream bağlanıyor: {}", ws_url));
 
                 // 2. WS bağlan
                 let (ws_stream, _) = match connect_async(&ws_url).await {
@@ -1253,9 +1224,7 @@ impl Engine {
                         continue;
                     }
                 };
-                if let Ok(mut st) = state.lock() {
-                    st.push_log("🛰️ WS userDataStream bağlı ✓ — fill event'leri dinleniyor".into());
-                }
+                push_state_log(&state, "🛰️ WS userDataStream bağlı ✓ — fill event'leri dinleniyor".into());
                 backoff_secs = 5; // başarılı bağlantı, backoff reset
 
                 // 3. Keepalive timer (30 dk'da bir listenKey yenile)
@@ -1287,15 +1256,11 @@ impl Engine {
                         }
                         Ok(Message::Ping(p)) => { let _ = p; /* yanıt tungstenite tarafında otomatik */ }
                         Ok(Message::Close(_)) => {
-                            if let Ok(mut st) = state.lock() {
-                                st.push_log("🛰️ WS sunucu Close gönderdi — yeniden bağlanılacak".into());
-                            }
+                            push_state_log(&state, "🛰️ WS sunucu Close gönderdi — yeniden bağlanılacak".into());
                             break;
                         }
                         Err(e) => {
-                            if let Ok(mut st) = state.lock() {
-                                st.push_log(format!("🛰️ WS okuma hatası: {:?} — reconnect", e));
-                            }
+                            push_state_log(&state, format!("🛰️ WS okuma hatası: {:?} — reconnect", e));
                             break;
                         }
                         _ => {}

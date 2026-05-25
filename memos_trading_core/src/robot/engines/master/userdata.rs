@@ -193,13 +193,11 @@ impl Engine {
             let pnl_part = if is_closing {
                 format!(" · pnl=${:+.2}", realized_pnl)
             } else { String::new() };
-            if let Ok(mut st) = state.lock() {
-                st.push_log(format!(
-                    "🌓 [WS-PARTIAL-{}] {} %{:.1} ({} {:.4} @ {:.4}) · qty {:.4} → {:.4}{} · fee=${:.4}",
-                    kind_tag, symbol, fill_pct, side, last_qty, last_price,
-                    local_qty_before, new_q, pnl_part, commission,
-                ));
-            }
+            push_state_log(state, format!(
+                "🌓 [WS-PARTIAL-{}] {} %{:.1} ({} {:.4} @ {:.4}) · qty {:.4} → {:.4}{} · fee=${:.4}",
+                kind_tag, symbol, fill_pct, side, last_qty, last_price,
+                local_qty_before, new_q, pnl_part, commission,
+            ));
 
             // 5. Anomali tespiti → Telegram push_alert.
             //    Üç kriter; her biri farklı throttle anahtarına bağlandı, sembol başına
@@ -318,12 +316,10 @@ impl Engine {
 
         if let Some(exec) = executor {
             let _ = exec.cancel_all_orders(symbol).await;
-            if let Ok(mut st) = state.lock() {
-                st.push_log(format!(
-                    "🛰️ [WS-FILL] {} FILLED yakalandı → orphan emirler temizlendi, local pozisyon kapatılıyor",
-                    symbol,
-                ));
-            }
+            push_state_log(state, format!(
+                "🛰️ [WS-FILL] {} FILLED yakalandı → orphan emirler temizlendi, local pozisyon kapatılıyor",
+                symbol,
+            ));
         }
 
         if let Ok(candles) = crate::persistence::reader::read_candles(&db_path, symbol, &interval, 5) {

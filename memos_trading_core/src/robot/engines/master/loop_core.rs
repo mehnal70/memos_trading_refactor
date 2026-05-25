@@ -44,8 +44,7 @@ impl Engine {
         //   HEARTBEAT_UI_LOG_DISABLE=1/true → tamamen kapat.
         // İlk tick log'u (tick_count == 1) "sistem ayakta" işareti olarak korunur,
         // sadece disable=true ise atılmaz.
-        let heartbeat_log_disabled = std::env::var("HEARTBEAT_UI_LOG_DISABLE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        let heartbeat_log_disabled = env_truthy("HEARTBEAT_UI_LOG_DISABLE");
         let heartbeat_log_ticks: u64 = std::env::var("HEARTBEAT_UI_LOG_TICKS")
             .ok().and_then(|s| s.parse().ok()).filter(|n| *n > 0).unwrap_or(600);
         let mut tick_count: u64 = 0;
@@ -79,8 +78,7 @@ impl Engine {
             // (30 dk); env `ANOMALY_MAX_AGE_SECS` ile ayarlanır. Critical hiç
             // silinmez. Her 60 tick (~30sn) bir kontrol yeter.
             if tick_count % 60 == 0 {
-                let max_age: u64 = std::env::var("ANOMALY_MAX_AGE_SECS")
-                    .ok().and_then(|s| s.parse().ok()).unwrap_or(1800);
+                let max_age: u64 = env_parse("ANOMALY_MAX_AGE_SECS", 1800);
                 let now_secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                 if let Ok(st) = state.lock() {
@@ -164,8 +162,7 @@ impl Engine {
             // veya pinned semboller üzerinden BIST sembolleri de gelirse cycle
             // başına eklemeyelim → DataIngest/PriceFetch Failed → anomaly birikimi
             // zincirinin asıl kaynağı buydu. ALLOW_BIST=1 ile opt-out.
-            let allow_bist_cycle = std::env::var("ALLOW_BIST")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+            let allow_bist_cycle = env_truthy("ALLOW_BIST");
             if let Ok(orch) = st.fleet.symbol_orchestrator.read() {
                 for worker in orch.get_worker_status() {
                     if !allow_bist_cycle && Self::looks_like_bist_symbol(&worker.symbol) {
@@ -247,8 +244,7 @@ impl Engine {
                     // verecek. push_anomaly etmeden chain_steps'i Failed işaretle
                     // (TUI Pipeline panelinde görünür, anomaly cap'ini doldurmaz).
                     // Log throttle: aynı sembol için 300sn pencere (env override).
-                    let cooldown = std::env::var("LOG_DATAINGEST_COOLDOWN_SECS")
-                        .ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+                    let cooldown = env_parse("LOG_DATAINGEST_COOLDOWN_SECS", 300);
                     if log_throttle_should_emit(symbol, "dataingest_empty", cooldown) {
                         log::warn!("DataIngest empty: {} {} (candles tablo'da 1m kayıt yok)", symbol, interval);
                     }
@@ -263,8 +259,7 @@ impl Engine {
                     return;
                 }
                 Err(e) => {
-                    let cooldown = std::env::var("LOG_DATAINGEST_COOLDOWN_SECS")
-                        .ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+                    let cooldown = env_parse("LOG_DATAINGEST_COOLDOWN_SECS", 300);
                     if log_throttle_should_emit(symbol, "dataingest_error", cooldown) {
                         log::warn!("DataIngest error: {} {} → {}", symbol, interval, e);
                     }
@@ -308,12 +303,10 @@ impl Engine {
                 (live_price, reason_opt)
             };
             if let Some(reason) = exit_reason {
-                if let Ok(mut st) = state.lock() {
-                    st.push_log(format!(
-                        "{} {} {} koşulu tetiklendi @ {:.4}",
-                        reason.emoji(), symbol, reason.as_str(), live_price,
-                    ));
-                }
+                push_state_log(state, format!(
+                    "{} {} {} koşulu tetiklendi @ {:.4}",
+                    reason.emoji(), symbol, reason.as_str(), live_price,
+                ));
                 Self::close_paper_position(state, symbol, &candles, reason).await;
                 return; // bu sembolde tur bitti, yeniden açılış aynı turda denenmesin
             }
@@ -462,12 +455,10 @@ impl Engine {
                     if edge < edge_threshold {
                         // Spam'i kısmak için sadece eşiğe yakın aday sinyalleri logla.
                         if edge >= edge_log_floor {
-                            if let Ok(mut st) = state.lock() {
-                                st.push_log(format!(
-                                    "📊 {} {} edge={:.2} eşik={:.2} ⇒ REDDEDİLDİ (zayıf edge, strat={})",
-                                    symbol, signal_label, edge, edge_threshold, strategy_name,
-                                ));
-                            }
+                            push_state_log(state, format!(
+                                "📊 {} {} edge={:.2} eşik={:.2} ⇒ REDDEDİLDİ (zayıf edge, strat={})",
+                                symbol, signal_label, edge, edge_threshold, strategy_name,
+                            ));
                         }
                         return;
                     }
@@ -487,12 +478,10 @@ impl Engine {
                         let should_log = halt
                             || log_throttle_should_emit(symbol, "risk_block_safemode", 60);
                         if should_log {
-                            if let Ok(mut st) = state.lock() {
-                                st.push_log(format!(
-                                    "🛡️ {} {} edge={:.2} ✓ ama RiskManager [{}]: {}",
-                                    symbol, signal_label, edge, mode, reasons.join(" · "),
-                                ));
-                            }
+                            push_state_log(state, format!(
+                                "🛡️ {} {} edge={:.2} ✓ ama RiskManager [{}]: {}",
+                                symbol, signal_label, edge, mode, reasons.join(" · "),
+                            ));
                         }
                         if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
                             let ev = crate::robot::infra::logger::TradeEvent::risk_block(
@@ -503,12 +492,10 @@ impl Engine {
                         return;
                     }
                     Self::mark_pipeline_stage(state, PipelineStage::RiskGate, StepStatus::Done);
-                    if let Ok(mut st) = state.lock() {
-                        st.push_log(format!(
-                            "📊 {} {} edge={:.2} ✓ + risk ✓ ⇒ POZİSYON AÇILIYOR (strat={})",
-                            symbol, signal_label, edge, strategy_name,
-                        ));
-                    }
+                    push_state_log(state, format!(
+                        "📊 {} {} edge={:.2} ✓ + risk ✓ ⇒ POZİSYON AÇILIYOR (strat={})",
+                        symbol, signal_label, edge, strategy_name,
+                    ));
                     Self::open_paper_position(state, symbol, &signal, &candles, &strategy_name, None).await;
                 }
                 // Pozisyon varken TERS yönde sinyal → kapanış (edge filtresi gevşek).
@@ -531,8 +518,7 @@ impl Engine {
                 // log_throttle_should_emit ile sembol+kind başına default 60sn cooldown.
                 (crate::core::types::Signal::Buy,  Some(true))
                 | (crate::core::types::Signal::Sell, Some(false)) => {
-                    let cooldown: u64 = std::env::var("RISK_BLOCK_LOG_COOLDOWN_SECS")
-                        .ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+                    let cooldown: u64 = env_parse("RISK_BLOCK_LOG_COOLDOWN_SECS", 60);
                     if log_throttle_should_emit(symbol, "risk_block_pos_aligned", cooldown) {
                         if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
                             let dir_label = if matches!(signal, Signal::Buy) { "LONG" } else { "SHORT" };

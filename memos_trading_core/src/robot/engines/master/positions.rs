@@ -99,12 +99,10 @@ impl Engine {
             "{}_{}", opp.trade_type.label(),
             if opp.is_long { "BUY" } else { "SELL" },
         );
-        if let Ok(mut st) = state.lock() {
-            st.push_log(format!(
-                "⚡ ScalpSwing {} açılış: {} score={:.2} | {}",
-                opp.trade_type.label(), symbol, opp.score, opp.reason,
-            ));
-        }
+        push_state_log(state, format!(
+            "⚡ ScalpSwing {} açılış: {} score={:.2} | {}",
+            opp.trade_type.label(), symbol, opp.score, opp.reason,
+        ));
         Self::open_paper_position(
             state, symbol, &signal, candles, &strategy_name, Some(opp.trade_type),
         ).await;
@@ -132,9 +130,7 @@ impl Engine {
         // açılışı kısa-devre reddedilir. Mevcut açık pozisyonlar bu engelden etkilenmez
         // (execute_trade_cycle yetim pozisyon kuralı onları yönetmeye devam eder).
         if Self::is_symbol_blocked(state, symbol) {
-            if let Ok(mut st) = state.lock() {
-                st.push_log(format!("🚫 {} açılış reddedildi: blocked_symbols listesinde", symbol));
-            }
+            push_state_log(state, format!("🚫 {} açılış reddedildi: blocked_symbols listesinde", symbol));
             return;
         }
 
@@ -662,12 +658,10 @@ impl Engine {
                         // gözlendi). Sembol başına 60sn cooldown — tek "hâlâ erken"
                         // bildirimi yeterli.
                         if log_throttle_should_emit(symbol, "strategy_min_hold", 60) {
-                            if let Ok(mut st) = state.lock() {
-                                st.push_log(format!(
-                                    "⏳ {} STRATEGY_SIGNAL erken kapanış reddedildi (age={}s < min={}s)",
-                                    symbol, age_secs, min_hold_secs,
-                                ));
-                            }
+                            push_state_log(state, format!(
+                                "⏳ {} STRATEGY_SIGNAL erken kapanış reddedildi (age={}s < min={}s)",
+                                symbol, age_secs, min_hold_secs,
+                            ));
                         }
                         return;
                     }
@@ -947,12 +941,10 @@ impl Engine {
                 tightened
             };
             if tightened {
-                if let Ok(mut st) = state.lock() {
-                    st.push_log(format!(
-                        "🛡️ Adaptive: rejim '{}' düşük win-rate → patch sıkılaştırıldı",
-                        regime_key,
-                    ));
-                }
+                push_state_log(state, format!(
+                    "🛡️ Adaptive: rejim '{}' düşük win-rate → patch sıkılaştırıldı",
+                    regime_key,
+                ));
             }
 
             // ─── Faz 5 (Execute): kapanış icrası tamamlandı ─────────────────

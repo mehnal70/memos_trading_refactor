@@ -102,6 +102,28 @@ pub fn log_throttle_should_emit(symbol: &str, kind: &'static str, cooldown_secs:
     true
 }
 
+/// `state` kilidini kısa süreliğine alıp tek bir log satırı düşürür.
+/// `if let Ok(mut st) = state.lock() { st.push_log(msg); }` boilerplate'ini DRY'lar.
+/// Davranış birebir: kilit poisoned ise sessizce geçer (eski blok da öyleydi).
+pub(crate) fn push_state_log(state: &Arc<Mutex<AppState>>, msg: String) {
+    if let Ok(mut st) = state.lock() {
+        st.push_log(msg);
+    }
+}
+
+/// Env değişkenini `T`'ye parse eder; eksik/geçersizse `default`. Per-call (cache yok)
+/// → env-mutasyonlu testlerle uyumlu. `.ok().and_then(|s| s.parse().ok()).unwrap_or(d)`
+/// kalıbını tek noktaya toplar.
+pub(crate) fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
+    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+}
+
+/// "Açık mı?" tarzı bayrak: yalnızca "1" / "true" (case-insensitive) → true; aksi
+/// halde false. ALLOW_BIST, *_DISABLE, *_ENABLED gibi default-false toggle'lar için.
+pub(crate) fn env_truthy(key: &str) -> bool {
+    std::env::var(key).map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
+}
+
 /// `MAX_ENTRY_PRICE_DEVIATION_PCT` env'ini parse eder; geçersiz/eksikse 5.0 döner.
 /// 0 verilirse price sanity guard kapanır (test ve operatör override için).
 pub fn price_deviation_threshold_from_env() -> f64 {

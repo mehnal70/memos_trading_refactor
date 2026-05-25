@@ -173,12 +173,10 @@ impl Engine {
              st.config.db_path.clone(), st.finance.equity)
         };
 
-        if let Ok(mut st) = state.lock() {
-            st.push_log(format!(
-                "🧠 ML Retrain başladı: sembol={} aralık={} kapital=${:.0}",
-                symbol, interval, capital,
-            ));
-        }
+        push_state_log(state, format!(
+            "🧠 ML Retrain başladı: sembol={} aralık={} kapital=${:.0}",
+            symbol, interval, capital,
+        ));
 
         let candles = crate::persistence::reader::read_candles(&db_path, &symbol, &interval, 1000)
             .map_err(|e| format!("read_candles: {}", e))?;
@@ -196,12 +194,10 @@ impl Engine {
             "MA_CROSSOVER".to_string()
         } else { strategy_name };
 
-        if let Ok(mut st) = state.lock() {
-            st.push_log(format!(
-                "🧠 ML Retrain: {} mum yüklendi, strateji={}, random search 60 iter çalışıyor...",
-                candles.len(), strategy_name,
-            ));
-        }
+        push_state_log(state, format!(
+            "🧠 ML Retrain: {} mum yüklendi, strateji={}, random search 60 iter çalışıyor...",
+            candles.len(), strategy_name,
+        ));
 
         let opt = crate::robot::backtester::parameter_optimizer::ParameterOptimizer::new(
             symbol.clone(), interval.clone(), capital, strategy_name.clone(),
@@ -252,11 +248,9 @@ impl Engine {
             &candles, gbt_window_bars, gbt_forward_bars,
         );
         if gbt_ds.len() < 20 {
-            if let Ok(mut st) = state.lock() {
-                st.push_log(format!(
-                    "🌲 GBT atlandı: yetersiz training örneği ({} < 20)", gbt_ds.len(),
-                ));
-            }
+            push_state_log(state, format!(
+                "🌲 GBT atlandı: yetersiz training örneği ({} < 20)", gbt_ds.len(),
+            ));
         } else {
             use crate::robot::ml_engine::{gbt_grid_search, GradientBoostedTrees};
             let tune = gbt_grid_search(&gbt_ds);
@@ -365,29 +359,23 @@ impl Engine {
         pool.retain(|s| !blocked.iter().any(|b| b.eq_ignore_ascii_case(s)));
         let blocked_filtered = blocked_n_before.saturating_sub(pool.len());
         if blocked_filtered > 0 {
-            if let Ok(mut st) = state.lock() {
-                st.push_log(format!(
-                    "🚫 Screener: {} engellenmiş sembol havuzdan çıkarıldı (blocked_symbols)",
-                    blocked_filtered,
-                ));
-            }
+            push_state_log(state, format!(
+                "🚫 Screener: {} engellenmiş sembol havuzdan çıkarıldı (blocked_symbols)",
+                blocked_filtered,
+            ));
         }
         if pool.is_empty() {
-            if let Ok(mut st) = state.lock() {
-                st.push_log(format!(
-                    "🔭 Screener: havuz boş (market={} interval={} için DB'de sembol yok ve SCREENER_EXTRA_SYMBOLS verilmedi)",
-                    market, interval,
-                ));
-            }
+            push_state_log(state, format!(
+                "🔭 Screener: havuz boş (market={} interval={} için DB'de sembol yok ve SCREENER_EXTRA_SYMBOLS verilmedi)",
+                market, interval,
+            ));
             return Ok(());
         }
 
-        if let Ok(mut st) = state.lock() {
-            st.push_log(format!(
-                "🔭 Screener: havuz={} aday (market={} interval={}), top_n={} max_workers={} strateji={}",
-                pool.len(), market, interval, top_n, max_workers, active_strategy,
-            ));
-        }
+        push_state_log(state, format!(
+            "🔭 Screener: havuz={} aday (market={} interval={}), top_n={} max_workers={} strateji={}",
+            pool.len(), market, interval, top_n, max_workers, active_strategy,
+        ));
 
         // 4) Her aday için skor (paralel — rayon).
         use rayon::prelude::*;
@@ -460,12 +448,10 @@ impl Engine {
              st.config.db_path.clone(), st.finance.equity)
         };
 
-        if let Ok(mut st) = state.lock() {
-            st.push_log(format!(
-                "🔬 Backtest başladı: sembol={} aralık={} kapital=${:.0}",
-                symbol, interval, capital,
-            ));
-        }
+        push_state_log(state, format!(
+            "🔬 Backtest başladı: sembol={} aralık={} kapital=${:.0}",
+            symbol, interval, capital,
+        ));
 
         // Walk-Forward konfigürasyonu — env'den override edilebilir.
         // Varsayılan IS=200 / OOS=50 / step=50: 1500 mumda ~26 pencere.
@@ -492,12 +478,10 @@ impl Engine {
         let strat_pool: Vec<String> =
             crate::robot::strategies::default_registry().canonical_pool();
         let est_windows = candles.len().saturating_sub(wf_min) / wf_step.max(1) + 1;
-        if let Ok(mut st) = state.lock() {
-            st.push_log(format!(
-                "🔬 Backtest (Walk-Forward): {} mum, {} strateji × ~{} pencere (IS={} OOS={} step={})",
-                candles.len(), strat_pool.len(), est_windows, wf_is, wf_oos, wf_step,
-            ));
-        }
+        push_state_log(state, format!(
+            "🔬 Backtest (Walk-Forward): {} mum, {} strateji × ~{} pencere (IS={} OOS={} step={})",
+            candles.len(), strat_pool.len(), est_windows, wf_is, wf_oos, wf_step,
+        ));
 
         // ─── 1) Strateji aday seçimi: her aday için Walk-Forward → OOS sharpe + tutarlılık ───
         //
@@ -522,23 +506,19 @@ impl Engine {
                 commission_pct: 0.001,
             };
             let Some(wf_res) = WalkForwardTester::new(wf_cfg).run(&candles) else {
-                if let Ok(mut st) = state.lock() {
-                    st.push_log(format!("🔬   aday {} → WF sonuç alınamadı", name));
-                }
+                push_state_log(state, format!("🔬   aday {} → WF sonuç alınamadı", name));
                 continue;
             };
 
             let wf_score = wf_res.avg_oos_sharpe * (1.0 - WF_CONSISTENCY_WEIGHT)
                          + wf_res.consistency_score * WF_CONSISTENCY_WEIGHT;
-            if let Ok(mut st) = state.lock() {
-                st.push_log(format!(
-                    "🔬   aday {} → OOS Sharpe={:.2} Tutarlılık={:.0}% ({} pencere) skor={:.3}",
-                    name, wf_res.avg_oos_sharpe,
-                    wf_res.consistency_score * 100.0,
-                    wf_res.windows.len(),
-                    wf_score,
-                ));
-            }
+            push_state_log(state, format!(
+                "🔬   aday {} → OOS Sharpe={:.2} Tutarlılık={:.0}% ({} pencere) skor={:.3}",
+                name, wf_res.avg_oos_sharpe,
+                wf_res.consistency_score * 100.0,
+                wf_res.windows.len(),
+                wf_score,
+            ));
             if best_wf.as_ref().map(|(_, s, _)| *s).unwrap_or(f64::NEG_INFINITY) < wf_score {
                 best_wf = Some((name.clone(), wf_score, wf_res));
             }
@@ -693,8 +673,7 @@ impl Engine {
         // Hatası" log'u kirletiyordu. ALLOW_BIST=1 ile opt-out.
         let (symbols, interval, db_path, limit) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
-            let allow_bist = std::env::var("ALLOW_BIST")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+            let allow_bist = env_truthy("ALLOW_BIST");
             let bist_ok = |s: &str| allow_bist || !Self::looks_like_bist_symbol(s);
 
             let mut syms: Vec<String> = vec![];
@@ -733,12 +712,10 @@ impl Engine {
             "🌐 Download başladı: {} sembol × {} mum (interval={}) → {}",
             symbols.len(), limit, interval, symbols.join(","),
         );
-        if let Ok(mut st) = state.lock() {
-            st.push_log(format!(
-                "🌐 Download başladı: {} sembol × {} mum (interval={})",
-                symbols.len(), limit, interval,
-            ));
-        }
+        push_state_log(state, format!(
+            "🌐 Download başladı: {} sembol × {} mum (interval={})",
+            symbols.len(), limit, interval,
+        ));
 
         // 2) Her sembol için sırayla mum çek + DB'ye yaz
         let fetcher = BinanceFetcher::new();
@@ -779,9 +756,7 @@ impl Engine {
                                     }
                                 }
                             }
-                            if let Ok(mut st) = state.lock() {
-                                st.push_log(format!("    └─ {} ✓ {} mum yazıldı", sym, n));
-                            }
+                            push_state_log(state, format!("    └─ {} ✓ {} mum yazıldı", sym, n));
 
                             // Multi-TF Faz B c2/c3: HTF (üst zaman dilimi) mumlarını da indir.
                             // get_htf_interval base ile aynıysa atla (1d → 1d). HTF fetch
@@ -807,9 +782,7 @@ impl Engine {
                                                 }
                                             }
                                         }).await;
-                                        if let Ok(mut st) = state.lock() {
-                                            st.push_log(format!("        └─ {} HTF {} ✓ {} mum", sym, htf_interval, htf_n));
-                                        }
+                                        push_state_log(state, format!("        └─ {} HTF {} ✓ {} mum", sym, htf_interval, htf_n));
                                     }
                                     _ => {
                                         // HTF eksikliği fatal değil — loader fallback'i 1m varsa
@@ -820,24 +793,18 @@ impl Engine {
                         }
                         Ok(Err(e)) => {
                             total_failed += 1;
-                            if let Ok(mut st) = state.lock() {
-                                st.push_log(format!("    └─ {} ❌ yazma hatası: {}", sym, e));
-                            }
+                            push_state_log(state, format!("    └─ {} ❌ yazma hatası: {}", sym, e));
                         }
                         Err(e) => {
                             total_failed += 1;
-                            if let Ok(mut st) = state.lock() {
-                                st.push_log(format!("    └─ {} ❌ blocking join hatası: {}", sym, e));
-                            }
+                            push_state_log(state, format!("    └─ {} ❌ blocking join hatası: {}", sym, e));
                         }
                     }
                 }
                 Err(e) => {
                     total_failed += 1;
                     log::warn!("🌐 Download fetch hatası: {} → {}", sym, e);
-                    if let Ok(mut st) = state.lock() {
-                        st.push_log(format!("    └─ {} ❌ fetch hatası: {}", sym, e));
-                    }
+                    push_state_log(state, format!("    └─ {} ❌ fetch hatası: {}", sym, e));
                     // Delisted auto-detect: ardışık başarısızlık sayacı.
                     let n_fail = delisted_record_failure(sym);
                     let threshold = delisted_detection_threshold();
