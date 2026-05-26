@@ -6,6 +6,15 @@ target/
 logs/
 *.log
 
+# SQLite veritabanları (runtime'da üretilir, ~GB olabilir)
+*.db
+*.db-wal
+*.db-shm
+
+# Test çıktı artıkları (her run'da yeniden üretilir)
+test_results.json
+test_results_array.json
+
 # Runtime data klasörleri (DB binary'leri ~GB ölçeğinde, snapshot, reports, cache)
 data/
 memos_trading_core/data/
