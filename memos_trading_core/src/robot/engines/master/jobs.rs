@@ -483,8 +483,15 @@ impl Engine {
             symbol, interval, capital,
         ));
 
+        // Veri derinliği — env BACKTEST_CANDLE_LIMIT (default 5000). Sağlıklı
+        // backtest için istatistiksel anlamlı işlem + çok-rejim kapsama gerekir;
+        // eski sabit 1500 sığdı (1m'de ~1 gün, tek rejim). TF'e göre öneri:
+        // 1h≈6-12 ay (4.3k-8.8k), 1m sadece infaz simülasyonu (fee/gürültü baskın).
+        let candle_limit: usize = env_parse("BACKTEST_CANDLE_LIMIT", 5000usize).max(300);
+
         // Walk-Forward konfigürasyonu — env'den override edilebilir.
-        // Varsayılan IS=200 / OOS=50 / step=50: 1500 mumda ~26 pencere.
+        // Varsayılan IS=200 / OOS=50 / step=50. Daha derin veride IS/OOS'u TF'e
+        // ölçeklemek için WALK_FORWARD_* env'leri kullanılır (örn. 1m'de IS≥1000).
         let wf_is   = std::env::var("WALK_FORWARD_IS_BARS").ok()
             .and_then(|s| s.parse::<usize>().ok()).unwrap_or(200);
         let wf_oos  = std::env::var("WALK_FORWARD_OOS_BARS").ok()
@@ -493,7 +500,7 @@ impl Engine {
             .and_then(|s| s.parse::<usize>().ok()).unwrap_or(50);
         let wf_min  = wf_is + wf_oos;
 
-        let candles = crate::persistence::reader::read_candles(&db_path, &symbol, &interval, 1500)
+        let candles = crate::persistence::reader::read_candles(&db_path, &symbol, &interval, candle_limit)
             .map_err(|e| format!("read_candles: {}", e))?;
         if candles.len() < wf_min {
             return Err(format!(

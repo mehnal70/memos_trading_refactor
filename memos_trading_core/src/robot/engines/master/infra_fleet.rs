@@ -507,6 +507,15 @@ impl Engine {
                 .map(|v| v != "false" && v != "0").unwrap_or(true);
             let ml_period: u64 = env_parse("SCHEDULER_ML_EVERY_MINS", 120);
 
+            // Backtest cadence — screener/ml gibi env-ayarlı (eskiden tek
+            // config.pipeline_every_mins=120 sabitiyle gelir, env override yoktu →
+            // backtest scheduler'ın tek env-dışı görevi idi). SCHEDULER_BACKTEST_EVERY_MINS
+            // set ise config'i geçersiz kılar. SCHEDULER_BACKTEST_WARMUP=1 → boot
+            // warmup'ında bir kez tetikle (ops/test: ilk periyodu beklemeden çalıştır).
+            let bt_period_override: Option<u64> = std::env::var("SCHEDULER_BACKTEST_EVERY_MINS")
+                .ok().and_then(|s| s.parse().ok());
+            let bt_warmup = env_truthy("SCHEDULER_BACKTEST_WARMUP");
+
             sleep(Duration::from_secs(WARMUP_SECS)).await; // boot warmup
 
             loop {
@@ -517,7 +526,8 @@ impl Engine {
                 let (dl_enabled, dl_period, bt_enabled, bt_period) = {
                     let st = match st_sched.lock() { Ok(s) => s, Err(_) => break };
                     (st.config.download_enabled, st.config.download_every_mins,
-                     st.config.pipeline_enabled, st.config.pipeline_every_mins)
+                     st.config.pipeline_enabled,
+                     bt_period_override.unwrap_or(st.config.pipeline_every_mins))
                 };
 
                 let now = std::time::Instant::now();
@@ -554,6 +564,21 @@ impl Engine {
                             st.push_log("⏰ Scheduler: warmup → ilk ML retrain tetiği (GBT cold-train)".into());
                         }
                         last_ml_at = Some(now);
+                    }
+                    // Backtest warmup tetiği (opt-in): ilk periyodu beklemeden bir kez
+                    // çalıştır. Backtest geçmiş mumları kullanır (taze real-time veri
+                    // gerekmez), DB'deki tarihsel seri yeterli. last_backtest_at warmup'a
+                    // set edilir → periyot sayacı buradan başlar, hemen tekrar fire etmez.
+                    if bt_enabled && bt_warmup {
+                        if let Ok(st) = st_sched.lock() {
+                            if let Some(t) = st.fleet.triggers.get("backtest") {
+                                t.store(true, Ordering::Relaxed);
+                            }
+                        }
+                        if let Ok(mut st) = st_sched.lock() {
+                            st.push_log("⏰ Scheduler: warmup → ilk backtest tetiği (SCHEDULER_BACKTEST_WARMUP)".into());
+                        }
+                        last_backtest_at = Some(now);
                     }
                 }
 

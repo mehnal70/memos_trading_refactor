@@ -55,6 +55,9 @@ async fn main() -> Result<()> {
 
     let symbol      = env::var("TRADE_SYMBOL").unwrap_or_else(|_| "BTCUSDT".to_owned());
     let market      = env::var("TRADE_MARKET").unwrap_or_else(|_| "spot".to_owned());
+    // İşlem/analiz zaman dilimi (cycle + backtest + screener bu interval'i kullanır).
+    // Default 1m. TF seçimi healthier backtest için kritik (1h/4h trend, 1m sadece infaz).
+    let interval    = env::var("TRADE_INTERVAL").unwrap_or_else(|_| "1m".to_owned());
     // Kanonik DB: data/trader.db. Tüm interface'ler (rtc_tui, rtc_healthcheck,
     // RoboticLoopConfig::default) aynı path'i kullanır → engine'in yazdığı DB
     // ile TUI'nin okuduğu DB uyumlu. Override için env DB_PATH.
@@ -74,8 +77,8 @@ async fn main() -> Result<()> {
     let api_key = env::var("BINANCE_API_KEY").ok();
     let secret_key = env::var("BINANCE_API_SECRET").ok();
 
-    println!("⚡ [INIT] rtc_headless | sembol={} | borsa={} | mod={}",
-        symbol, market, trading_mode.as_str());
+    println!("⚡ [INIT] rtc_headless | sembol={} | borsa={} | interval={} | mod={}",
+        symbol, market, interval, trading_mode.as_str());
     if matches!(trading_mode, memos_trading_core::core::model::TradingMode::Live)
        && (api_key.is_none() || secret_key.is_none()) {
         eprintln!("⚠️ TRADING_MODE=Live ama BINANCE_API_KEY/SECRET yok → Paper-fallback");
@@ -92,6 +95,7 @@ async fn main() -> Result<()> {
     let config = RoboticLoopConfig {
         symbol: symbol.clone(),
         market: market.clone(),
+        interval: interval.clone(),
         db_path: db_path.clone(),
         trading_mode,
         api_key,
