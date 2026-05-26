@@ -273,7 +273,14 @@ impl Engine {
             }
 
             let strategy = crate::robot::logic::optimizer::make_strategy_pub(&strategy_name);
-            let strat_params = crate::core::types::StrategyParams::default();
+            // Faz 2: yapısal (indikatör) parametreler artık ParameterStore'dan —
+            // backtest job'ın param_spec araması ile bulduğu en iyi set (yoksa
+            // default). Eskiden burada HER ZAMAN default() geçiliyordu → optimize
+            // edilen indikatör paramları canlıya hiç ulaşmıyordu (kaçak). Tek-kaynak.
+            let strat_params = state.lock().ok()
+                .and_then(|st| st.brain.parameters.read().ok()
+                    .map(|p| p.resolve_strategy_params(&strategy_name)))
+                .unwrap_or_default();
 
             // ─── Multi-TF Faz B c2/c3: HTF mumlarını yükle (env+param gate) ───
             // load_htf_candles önce DB'den (HTF interval), yetersizse 1m'den

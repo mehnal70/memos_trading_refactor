@@ -288,6 +288,12 @@ pub struct ParameterStore {
     /// Otonom leverage katmanı (futures). Default disabled → lev=1.0.
     #[serde(default)]
     pub leverage: LeverageParams,
+    /// Strateji bazlı en iyi YAPISAL parametreler (indikatör periyot/eşikleri),
+    /// backtest job'ın `param_spec` araması ile bulduğu set. Key = kanonik strateji
+    /// adı (best_params gibi global; backtest tek sembol→global uygular). Canlı
+    /// cycle `resolve_strategy_params` ile okur, yoksa `StrategyParams::default()`.
+    #[serde(default)]
+    pub strategy_params: HashMap<String, crate::core::types::StrategyParams>,
 }
 
 /// Strateji niyetiyle hizalı default trail target'lar (yüzde, entry'den uzaklık).
@@ -336,6 +342,7 @@ impl Default for ParameterStore {
             trail_feedback: HashMap::new(),
             multi_tf: MultiTfParams::default(),
             leverage: LeverageParams::default(),
+            strategy_params: HashMap::new(),
         }
     }
 }
@@ -583,6 +590,23 @@ impl ParameterStore {
     ///
     /// `strategy_name` = pozisyonu açan/açacak stratejinin kanonik adı (SUPERTREND, BB, ...).
     /// Target pct strateji niyetine göre değişir; env override (TARGET_TRAIL_PCT) hala onurludur.
+    /// Bu strateji için backtest'in `param_spec` araması ile bulduğu en iyi yapısal
+    /// parametreler; yoksa `StrategyParams::default()`. Canlı cycle bunu
+    /// `generate_signal`'a verir → optimize edilmiş indikatör periyot/eşikleri
+    /// canlıya ulaşır (eskiden her zaman default geçiliyordu — kaçak buradan kapanır).
+    pub fn resolve_strategy_params(&self, strategy_name: &str) -> crate::core::types::StrategyParams {
+        self.strategy_params.get(strategy_name).copied().unwrap_or_default()
+    }
+
+    /// Backtest job kazanan strateji için optimize ettiği yapısal parametreleri buraya yazar.
+    pub fn set_strategy_params(
+        &mut self,
+        strategy_name: impl Into<String>,
+        params: crate::core::types::StrategyParams,
+    ) {
+        self.strategy_params.insert(strategy_name.into(), params);
+    }
+
     pub fn resolve_atr_mult(
         &self,
         symbol: &str,

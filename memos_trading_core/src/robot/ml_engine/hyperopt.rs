@@ -8,6 +8,7 @@
 
 use crate::core::types::{Candle, StrategyParams};
 use crate::robot::backtester::{Backtester, BacktestConfig};
+use crate::robot::strategies::param_spec::{ParamSpec, build_params};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -128,6 +129,28 @@ impl HyperOpt {
             r.combinations_tested = explore.combinations_tested + exploit.combinations_tested;
             r
         })
+    }
+
+    /// §87.4: Spec-tabanlı arama — stratejinin KENDİ `param_spec()` uzayından
+    /// `n` rastgele örnek çeker (eski hardcoded `fast 3-15…` ızgarası yerine).
+    /// `specs` boş ise (yapısal paramı olmayan strateji) None döner → çağıran
+    /// default parametrelerle devam eder. PRNG tohumu determinizm için sabittir.
+    pub fn spec_search(
+        candles: &[Candle],
+        specs: &[ParamSpec],
+        n: usize,
+        b_cfg: &BacktestConfig,
+        seed: Option<u64>,
+    ) -> Option<HyperOptResult> {
+        if specs.is_empty() || n == 0 { return None; }
+        let mut prng = SrivastavaPrng::new(seed);
+        let grid: Vec<StrategyParams> = (0..n).map(|_| {
+            let vals: Vec<f64> = specs.iter()
+                .map(|s| s.sample(prng.float(0.0, 1.0)))
+                .collect();
+            build_params(specs, &vals)
+        }).collect();
+        Self::grid_search(candles, &grid, b_cfg)
     }
 
     fn build_result(mut entries: Vec<HyperOptEntry>) -> Option<HyperOptResult> {

@@ -571,6 +571,42 @@ impl Engine {
             (0.1, 0.4, 0.1),       // PS  0.1 → 0.4
         ).map_err(|e| format!("final optimize_parallel: {:?}", e))?;
 
+        // ─── 2b) Kazanan stratejinin YAPISAL parametreleri (param_spec araması) ───
+        //
+        // Faz 1b: strateji KENDİ param_spec()'ini bildirir; HyperOpt::spec_search bu
+        // uzaydan örnekler. Bulunan en iyi set ParameterStore.strategy_params'a yazılır
+        // ve canlı cycle generate_signal'a verilir (eskiden her zaman default geçiliyordu).
+        // Yapısal paramı olmayan strateji (PRICE_ACTION/FUNDING) → spec boş → None.
+        let best_strategy_params = {
+            let specs = crate::robot::strategies::default_registry()
+                .make(&best_name).param_spec();
+            if specs.is_empty() {
+                None
+            } else {
+                let n_iters: usize = std::env::var("BACKTEST_STRATEGY_PARAM_ITERS").ok()
+                    .and_then(|s| s.parse().ok()).unwrap_or(40);
+                let bt_cfg = crate::robot::backtester::BacktestConfig {
+                    symbol: symbol.clone(),
+                    interval: interval.clone(),
+                    initial_balance: capital,
+                    max_position_size: final_res.best_parameters.max_position_size,
+                    take_profit_pct: final_res.best_parameters.take_profit_pct,
+                    stop_loss_pct: final_res.best_parameters.stop_loss_pct,
+                    strategy_name: best_name.clone(),
+                    strategy_params: None,
+                    commission_pct: 0.001,
+                    breakeven_at_rr: Some(1.0),
+                    atr_trail_mult: Some(2.0),
+                    partial_tp_ratio: None,
+                    position_profile: None,
+                    security_profile: None,
+                };
+                crate::robot::ml_engine::hyperopt::HyperOpt::spec_search(
+                    &candles, &specs, n_iters, &bt_cfg, Some(12345),
+                ).map(|r| (r.best_params, r.best_score, r.combinations_tested))
+            }
+        };
+
         // ─── 3) Rejim-bazlı parametre katmanları ──────────────────────────
         //
         // Her WF penceresinin OOS dilimi `classify_regime` ile sınıflandırılır;
@@ -620,6 +656,10 @@ impl Engine {
                         crate::robot::parameters::RegimePatch::empty().with_trade_risk(trade_risk),
                     );
                 }
+                // Kazanan stratejinin yapısal (indikatör) parametreleri — Faz 1b.
+                if let Some((sp, _, _)) = &best_strategy_params {
+                    params.set_strategy_params(best_name.clone(), *sp);
+                }
             }
             // hyperopt_score WF skoruna mühürlenir — UI/legacy okuyucular için
             // overfitting-koruyucu seçim ölçütü.
@@ -633,6 +673,18 @@ impl Engine {
                 final_res.best_parameters.stop_loss_pct,
                 final_res.best_parameters.max_position_size,
             ));
+            // Yapısal parametre araması özeti (Faz 1b).
+            match &best_strategy_params {
+                Some((sp, score, tested)) => st.push_log(format!(
+                    "🧩 '{}' param_spec ({} kombinasyon, skor={:.3}): fast={:?} slow={:?} period={:?} std_dev={:?} ob={:?} os={:?}",
+                    best_name, tested, score,
+                    sp.fast, sp.slow, sp.period, sp.std_dev, sp.overbought, sp.oversold,
+                )),
+                None => st.push_log(format!(
+                    "🧩 '{}' yapısal parametre uzayı boş veya arama sonuç vermedi → default paramlar",
+                    best_name,
+                )),
+            }
             // Rejim katmanları log'una tek satırlık özet.
             if regime_agg.is_empty() {
                 st.push_log(
