@@ -3,7 +3,8 @@
 // Görev: strateji cycle'ı için üst zaman dilimi (HTF) mumlarını sağlamak.
 // İki kanal:
 //   1) DB önceliği — `read_candles(db_path, symbol, htf_interval, n)` ile
-//      doğrudan oku. (run_download_job HTF de indirmeye başlayınca burası dolu.)
+//      doğrudan oku. run_download_job (jobs.rs) multi_tf.download_htf açıkken
+//      HTF interval'i de indirip aynı `candles` tablosuna yazar → burası dolar.
 //   2) Fallback — base interval "1m" ise, eldeki 1m geçmişini CandleSynth ile
 //      sentezleyerek HTF üret. 5m/15m/30m baz interval'lerinde fallback yok;
 //      DB boşsa boş döner (htf_trend_filter None'da sinyal pass-through eder).
