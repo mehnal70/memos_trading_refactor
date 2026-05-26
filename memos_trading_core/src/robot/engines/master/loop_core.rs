@@ -252,12 +252,35 @@ impl Engine {
                 return;
             }
 
-            // 3) Strateji seçimi: brain.live_strategy "Default"/"AUTO" ise rejime göre otonom seç.
+            // 3) Strateji seçimi: brain.live_strategy "Default"/"AUTO" ise otonom seç.
             let strategy_name = if live_strategy.eq_ignore_ascii_case("default")
                                   || live_strategy.eq_ignore_ascii_case("auto")
                                   || live_strategy.is_empty() {
-                let sel = crate::robot::ml_engine::strategy_selector::StrategySelector::new();
-                sel.select_best(&candles, &crate::core::types::StrategyParams::default()).to_string()
+                if tuning.strategy_select_eval {
+                    // Değerlendirme-tabanlı: her aday KENDİ resolve'lu paramıyla
+                    // mini-backtest skoruna göre yarışır (param_spec optimizasyonu
+                    // seçime de girer). Volatile rejimde IDLE savunması korunur.
+                    use crate::robot::logic::market_regime::{detect_adx_regime, AdxRegime};
+                    if matches!(detect_adx_regime(&candles), AdxRegime::Volatile) {
+                        crate::robot::ml_engine::strategy_selector::IDLE_PROTECT.to_string()
+                    } else {
+                        let ps = state.lock().ok().map(|st| std::sync::Arc::clone(&st.brain.parameters));
+                        let sel = crate::robot::strategies::strategy_selector::StrategySelector::from_registry(
+                            &crate::robot::strategies::default_registry(),
+                            &["SUPERTREND", "MA_CROSSOVER", "EMA_CROSSOVER", "RSI", "MACD", "BB", "DONCHIAN"],
+                        );
+                        let (best_name, _sig) = sel.select_best_name_resolved(&candles, |name| {
+                            ps.as_ref()
+                                .and_then(|p| p.read().ok().map(|g| g.resolve_strategy_params(name)))
+                                .unwrap_or_default()
+                        });
+                        best_name
+                    }
+                } else {
+                    // Default: rejim→strateji lookup (param-free, hızlı, kanıtlı savunma).
+                    let sel = crate::robot::ml_engine::strategy_selector::StrategySelector::new();
+                    sel.select_best(&candles, &crate::core::types::StrategyParams::default()).to_string()
+                }
             } else {
                 live_strategy.to_string()
             };

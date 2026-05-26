@@ -16,6 +16,10 @@ use crate::robot::strategies::{default_registry, Strategy, StrategyRegistry};
 /// Strateji seçici: walk-forward skoru en yüksek stratejiyi seçer.
 pub struct StrategySelector {
     pub strategies: Vec<Box<dyn Strategy>>,
+    /// `strategies` ile paralel REGISTRY adları (kurulumda verilen). resolver bu adla
+    /// çağrılır → ParameterStore anahtarlarıyla tutarlı (örn. "BB", impl adı
+    /// "BOLLINGER_BANDS" değil). with_strategies'te `strat.name()`'e düşer.
+    pub names: Vec<String>,
     /// Walk-forward penceresi — son `lookback` bar üzerinde strateji çalıştırılır,
     /// her bar için bir sonraki barın getirisi pozitif/negatif yönüne göre sayılır.
     pub lookback: usize,
@@ -41,31 +45,72 @@ impl StrategySelector {
     /// yeniden panik üretmez.
     pub fn from_registry(registry: &StrategyRegistry, names: &[&str]) -> Self {
         let strategies = names.iter().map(|n| registry.make(n)).collect();
-        Self { strategies, lookback: 30, min_trades: 3 }
+        let names = names.iter().map(|n| n.to_string()).collect();
+        Self { strategies, names, lookback: 30, min_trades: 3 }
     }
 
     /// Hazır strateji vektörüyle kurma — testlerde özel/dummy strateji
-    /// enjekte etmek için kullanışlı.
+    /// enjekte etmek için kullanışlı. Registry adı yok → resolver impl `name()` ile çağrılır.
     pub fn with_strategies(strategies: Vec<Box<dyn Strategy>>) -> Self {
-        Self { strategies, lookback: 30, min_trades: 3 }
+        let names = strategies.iter().map(|s| s.name().to_string()).collect();
+        Self { strategies, names, lookback: 30, min_trades: 3 }
     }
 
     /// Hepsini dener, walk-forward skoru en yüksek stratejiyi ve onun şu anki
     /// sinyalini döndürür. Skor "ortalama işlem getirisi" (bir sonraki bar return'ü).
     pub fn select_best(&self, candles: &[Candle], params: &StrategyParams) -> (&dyn Strategy, Signal) {
+        // Tek params tüm adaylara — resolver'sız geriye-uyum yolu.
+        self.select_best_resolved(candles, |_| *params)
+    }
+
+    /// `select_best`'in resolver'lı sürümü: her aday KENDİ resolve'lu paramıyla
+    /// skorlanır (ParameterStore'un strateji-bazlı en iyi seti). Backtest job'ın
+    /// param_spec araması ile bulduğu paramlar artık SEÇİM aşamasına da girer —
+    /// eskiden tüm adaylar default param ile yarışıyordu. `resolve(name)` ilgili
+    /// stratejinin paramını döndürür (yoksa default).
+    pub fn select_best_resolved(
+        &self,
+        candles: &[Candle],
+        resolve: impl Fn(&str) -> StrategyParams,
+    ) -> (&dyn Strategy, Signal) {
+        let (idx, sig) = self.best_index_resolved(candles, resolve);
+        (self.strategies[idx].as_ref(), sig)
+    }
+
+    /// `select_best_resolved`'in ad-döndüren sürümü: seçilen stratejinin REGISTRY
+    /// adını (kurulumda verilen, örn. "BB") + sinyalini döndürür. Canlı motor bu adı
+    /// hem make_strategy_pub'a hem resolve_strategy_params'a verir → PS anahtarlarıyla
+    /// tutarlı (impl adı "BOLLINGER_BANDS" ile sapma olmaz).
+    pub fn select_best_name_resolved(
+        &self,
+        candles: &[Candle],
+        resolve: impl Fn(&str) -> StrategyParams,
+    ) -> (String, Signal) {
+        let (idx, sig) = self.best_index_resolved(candles, resolve);
+        (self.names[idx].clone(), sig)
+    }
+
+    /// Ortak çekirdek: her adayı KENDİ registry-adıyla resolve edilen paramıyla
+    /// skorlar, en yüksek skorlunun indeksini + güncel sinyalini döndürür.
+    fn best_index_resolved(
+        &self,
+        candles: &[Candle],
+        resolve: impl Fn(&str) -> StrategyParams,
+    ) -> (usize, Signal) {
         let mut best_score = f64::NEG_INFINITY;
-        let mut best_strat = &*self.strategies[0];
+        let mut best_idx = 0usize;
         let mut best_signal = Signal::Hold;
-        for strat in &self.strategies {
-            let sig = strat.generate_signal(candles, params, None, None).unwrap_or(Signal::Hold);
-            let score = self.simulate_score(strat.as_ref(), candles, params);
+        for (i, strat) in self.strategies.iter().enumerate() {
+            let p = resolve(&self.names[i]); // registry adı → PS tutarlı
+            let sig = strat.generate_signal(candles, &p, None, None).unwrap_or(Signal::Hold);
+            let score = self.simulate_score(strat.as_ref(), candles, &p);
             if score > best_score {
                 best_score = score;
-                best_strat = strat.as_ref();
+                best_idx = i;
                 best_signal = sig;
             }
         }
-        (best_strat, best_signal)
+        (best_idx, best_signal)
     }
 
     /// Walk-forward mini-backtest: son `lookback` bar boyunca her i bar'ı için
@@ -94,5 +139,52 @@ impl StrategySelector {
         }
 
         if trades < self.min_trades { 0.0 } else { total_return / trades as f64 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::robot::strategies::default_registry;
+    use chrono::{TimeZone, Utc};
+    use std::cell::RefCell;
+
+    fn wave(n: usize) -> Vec<Candle> {
+        (0..n).map(|i| {
+            let close = 100.0 + (i as f64 * 0.4).sin() * 10.0;
+            Candle {
+                timestamp: Utc.timestamp_opt(1_700_000_000 + i as i64 * 3600, 0).unwrap(),
+                open: close, high: close + 1.0, low: close - 1.0, close,
+                volume: 1_000.0, symbol: "T".into(), interval: "1h".into(),
+            }
+        }).collect()
+    }
+
+    #[test]
+    fn select_best_resolved_her_adayi_kendi_paramiyla_cozer() {
+        let sel = StrategySelector::from_registry(&default_registry(), &["RSI", "MACD", "BB"]);
+        let candles = wave(120);
+        let istenen = RefCell::new(Vec::<String>::new());
+        let (best, _sig) = sel.select_best_resolved(&candles, |name| {
+            istenen.borrow_mut().push(name.to_string());
+            StrategyParams::default()
+        });
+        // Resolver HER aday için bir kez çağrıldı (per-candidate param çözümü).
+        let mut got = istenen.into_inner();
+        got.sort();
+        assert_eq!(got, vec!["BB", "MACD", "RSI"],
+            "her aday kendi adıyla resolve edilmeli: {got:?}");
+        assert!(["RSI", "MACD", "BB"].contains(&best.name()));
+    }
+
+    #[test]
+    fn select_best_default_resolver_ile_uyumlu() {
+        // select_best (tek-param) == select_best_resolved (sabit resolver) — geriye uyum.
+        let sel = StrategySelector::from_registry(&default_registry(), &["RSI", "MACD"]);
+        let candles = wave(120);
+        let p = StrategyParams::default();
+        let (a, _) = sel.select_best(&candles, &p);
+        let (b, _) = sel.select_best_resolved(&candles, |_| p);
+        assert_eq!(a.name(), b.name());
     }
 }
