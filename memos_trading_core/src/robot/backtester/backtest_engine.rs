@@ -1,6 +1,7 @@
 // backtest_engine.rs - Yüksek Performanslı Otonom Simülasyon Motoru
 
-use crate::core::types::{Candle, StrategyParams};
+use crate::core::types::{Candle, StrategyParams, Signal};
+use crate::robot::strategies::base::Strategy;
 use crate::Result;
 use crate::MemosTradingError;
 use chrono::{DateTime, Utc};
@@ -103,6 +104,14 @@ impl Backtester {
         let mut sorted = candles.to_vec();
         sorted.sort_by_key(|c| c.timestamp);
 
+        // Sinyal kaynağı: canlı motorla AYNI Strategy trait'i (tek-kaynak). Eskiden
+        // should_open hardcoded basit bir reimplementasyondu ve cfg.strategy_params'ı
+        // YOK SAYIYORDU → param_spec araması düz zeminde etkisizdi. Strateji bir kez
+        // kurulur (per-bar alloc yok); generate_signal cfg.strategy_params ile çağrılır.
+        let entry_strat = crate::robot::strategies::default_registry()
+            .make(&self.config.strategy_name);
+        let entry_params = self.config.strategy_params.unwrap_or_default();
+
         for (idx, candle) in sorted.iter().enumerate() {
             let mut close_signal = false;
             let mut trade_net = 0.0;
@@ -159,7 +168,7 @@ impl Backtester {
             }
 
             // Stratejik Giriş Kontrolü
-            if pos.is_none() && Self::should_open(&sorted, idx, &self.config) {
+            if pos.is_none() && Self::entry_long_signal(entry_strat.as_ref(), &entry_params, &sorted, idx) {
                 let entry = candle.close;
                 let sl = entry * (1.0 - self.config.stop_loss_pct / 100.0);
                 let trail_pct = self.config.atr_trail_mult.map(|m| Self::calc_atr_pct(&sorted[..=idx]) * m);
@@ -243,52 +252,26 @@ impl Backtester {
 
     // --- 3. TEKNİK ANALİZ VE STRATEJİ MATRİSİ ---
 
-    fn should_open(candles: &[Candle], idx: usize, cfg: &BacktestConfig) -> bool {
+    /// Gerçek strateji sinyali (canlı motorla tek-kaynak): `Signal::Buy` → long aç.
+    /// Backtester long-only olduğundan Sell/Hold → giriş yok. `params` =
+    /// cfg.strategy_params (param_spec araması bunu doldurur) → indikatör periyot/
+    /// eşikleri artık backtest'i GERÇEKTEN etkiler.
+    ///
+    /// Pencere son `W` bara sınırlanır: stratejilerin azami lookback'i (ICT_COMPOSITE
+    /// ~66 bar) çok altında kalır, böylece per-bar maliyet O(W) sabit → derin seride
+    /// (BACKTEST_CANDLE_LIMIT yüksek) bile backtest O(n·W), O(n²) değil.
+    fn entry_long_signal(
+        strat: &dyn Strategy,
+        params: &StrategyParams,
+        candles: &[Candle],
+        idx: usize,
+    ) -> bool {
+        const W: usize = 200;
         if idx < 20 { return false; }
-        let current = &candles[idx];
-        
-        match cfg.strategy_name.as_str() {
-            "RSI" => {
-                let rsi = Self::calc_rsi(candles, idx, 14);
-                rsi < 30.0
-            },
-            "EMA_CROSS" => {
-                let e_fast = Self::calc_ema(candles, idx, 9);
-                let e_slow = Self::calc_ema(candles, idx, 21);
-                e_fast > e_slow
-            },
-            "PRICE_ACTION" => {
-                let prev = &candles[idx-1];
-                current.close > prev.high && current.close > current.open // Simple Breakout
-            },
-            _ => current.close > Self::calc_sma(candles, idx, 20),
-        }
-    }
-
-    fn calc_sma(candles: &[Candle], idx: usize, p: usize) -> f64 {
-        let start = idx.saturating_sub(p - 1);
-        candles[start..=idx].iter().map(|c| c.close).sum::<f64>() / p as f64
-    }
-
-    fn calc_ema(candles: &[Candle], idx: usize, p: usize) -> f64 {
-        let alpha = 2.0 / (p as f64 + 1.0);
-        let mut ema = candles[0].close;
-        for i in 1..=idx {
-            ema = (candles[i].close - ema) * alpha + ema;
-        }
-        ema
-    }
-
-    fn calc_rsi(candles: &[Candle], idx: usize, p: usize) -> f64 {
-        if idx < p { return 50.0; }
-        let mut gains = 0.0;
-        let mut losses = 0.0;
-        for i in (idx - p + 1)..=idx {
-            let diff = candles[i].close - candles[i-1].close;
-            if diff > 0.0 { gains += diff; } else { losses += diff.abs(); }
-        }
-        if losses == 0.0 { return 100.0; }
-        100.0 - (100.0 / (1.0 + (gains / losses)))
+        let start = (idx + 1).saturating_sub(W);
+        let window = &candles[start..=idx];
+        // htf=None: HTF hizalama (canlı multi-TF) ayrı bir adım — bu sürümde tek-TF.
+        matches!(strat.generate_signal(window, params, None, None), Ok(Signal::Buy))
     }
 
     fn calc_atr_pct(candles: &[Candle]) -> f64 {
