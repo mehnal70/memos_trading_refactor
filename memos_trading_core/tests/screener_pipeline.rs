@@ -25,7 +25,7 @@ fn synthetic_wave(n: usize, vol: f64) -> Vec<Candle> {
 #[test]
 fn score_symbol_runs_end_to_end_on_synthetic_wave() {
     let c = synthetic_wave(300, 1_000.0);
-    let s = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0);
+    let s = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0);
     assert_eq!(s.avg_volume, 1_000.0);
     assert!(s.atr_pct >= 0.0);
     // Sentetik veri trade üretebilir veya üretmeyebilir; ama hepsi sayısal
@@ -43,8 +43,9 @@ fn score_changes_with_volume_proxy_only() {
     // Aynı fiyat patikası ama volume farklı.
     for c in a.iter_mut() { c.volume = 100.0; }
     for c in b.iter_mut() { c.volume = 5_000.0; }
-    let sa = score_symbol(&a, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0);
-    let sb = score_symbol(&b, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0);
+    // htf=None, htf_bias_delta=0.0 → saf tek-TF skor (HTF-bias kapalı, 04af2e9).
+    let sa = score_symbol(&a, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0);
+    let sb = score_symbol(&b, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0);
     assert!(sb.avg_volume > sa.avg_volume);
     // Composite skor fiyat patikası aynı olduğu için aynı olmalı (volume
     // skora doğrudan girmiyor, sadece likitite proxy).

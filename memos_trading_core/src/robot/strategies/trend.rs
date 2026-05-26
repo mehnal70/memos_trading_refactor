@@ -5,6 +5,7 @@
 use crate::core::indicators::calculate_ema;
 use crate::core::types::{Candle, Signal, StrategyParams, FundingRatePoint};
 use crate::robot::strategies::base::Strategy;
+use crate::robot::strategies::param_spec::ParamSpec;
 use crate::robot::strategies::utils::htf_trend_filter;
 use crate::Result;
 
@@ -12,6 +13,13 @@ pub struct EmaCrossoverStrategy;
 
 impl Strategy for EmaCrossoverStrategy {
     fn name(&self) -> &str { "EMA_CROSSOVER" }
+    fn param_spec(&self) -> Vec<ParamSpec> {
+        // fast < slow garantisi: aralıklar örtüşmez (max fast 15 < min slow 18).
+        vec![
+            ParamSpec::int("fast", 5.0, 15.0, 1.0),
+            ParamSpec::int("slow", 18.0, 40.0, 2.0),
+        ]
+    }
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
         let fast_p = params.fast.unwrap_or(9);
         let slow_p = params.slow.unwrap_or(21);

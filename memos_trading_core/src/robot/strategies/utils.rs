@@ -58,16 +58,11 @@ where F: Fn(&[Candle], &StrategyParams) -> f64 {
 
     value_lists.into_iter().multi_cartesian_product()
         .map(|combo| {
+            // Tek-kaynak alan haritası: param_spec::apply_param (signal_period,
+            // std_dev, bb_period gibi alanları da kapsar — eskiden eksikti).
             let mut p = StrategyParams::default();
             for (i, val) in combo.iter().enumerate() {
-                match keys[i] {
-                    "fast"        => p.fast = Some(*val as usize),
-                    "slow"        => p.slow = Some(*val as usize),
-                    "period"      => p.period = Some(*val as usize),
-                    "overbought"  => p.overbought = Some(*val),
-                    "oversold"    => p.oversold = Some(*val),
-                    _ => {}
-                }
+                crate::robot::strategies::param_spec::apply_param(&mut p, keys[i], *val);
             }
             let score = evaluate_fn(candles, &p);
             (p, score)

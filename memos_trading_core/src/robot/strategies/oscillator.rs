@@ -6,6 +6,7 @@
 use crate::core::indicators::{calculate_stochastic_rsi, calculate_cci};
 use crate::core::types::{Candle, Signal, StrategyParams, FundingRatePoint};
 use crate::robot::strategies::base::Strategy;
+use crate::robot::strategies::param_spec::ParamSpec;
 use crate::robot::strategies::utils::htf_trend_filter;
 use crate::Result;
 
@@ -13,6 +14,15 @@ pub struct StochasticRsiStrategy;
 
 impl Strategy for StochasticRsiStrategy {
     fn name(&self) -> &str { "STOCHASTIC_RSI" }
+    fn param_spec(&self) -> Vec<ParamSpec> {
+        // period = RSI periyodu, fast = stochastic penceresi (smooth_k/d sabit 3).
+        vec![
+            ParamSpec::int("period", 9.0, 21.0, 1.0),
+            ParamSpec::int("fast", 9.0, 21.0, 1.0),
+            ParamSpec::pct("overbought", 75.0, 90.0, 5.0),
+            ParamSpec::pct("oversold", 10.0, 25.0, 5.0),
+        ]
+    }
     /// **K-line ile D-line crossing** (snapshot değil) + OS/OB bölge filtresi.
     ///   dipte (k < os) yukarı kesişim (prev k ≤ prev d, curr k > curr d) → Buy
     ///   tepede (k > ob) aşağı kesişim (prev k ≥ prev d, curr k < curr d) → Sell
@@ -44,6 +54,13 @@ pub struct CciStrategy;
 
 impl Strategy for CciStrategy {
     fn name(&self) -> &str { "CCI" }
+    fn param_spec(&self) -> Vec<ParamSpec> {
+        vec![
+            ParamSpec::int("period", 14.0, 30.0, 2.0),
+            ParamSpec::pct("overbought", 80.0, 150.0, 10.0),
+            ParamSpec::pct("oversold", -150.0, -80.0, 10.0),
+        ]
+    }
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
         let period = params.period.unwrap_or(20);
         let ob = params.overbought.unwrap_or(100.0);

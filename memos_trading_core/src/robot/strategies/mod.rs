@@ -4,6 +4,7 @@
 // Indicator hesaplamaları core::indicators'a delege edilir.
 
 pub mod base;
+pub mod param_spec;
 pub mod utils;
 pub mod standard;
 pub mod volatility;
@@ -16,6 +17,9 @@ pub mod strategy_selector;
 
 // Ortak sözleşme
 pub use base::Strategy;
+
+// Parametre uzayı (modüler optimizasyon temeli)
+pub use param_spec::{ParamSpec, ParamKind, apply_param, build_params};
 
 // Plug-in registry (Faz 4 c2)
 pub use registry::{default_registry, StrategyFactory, StrategyRegistry};

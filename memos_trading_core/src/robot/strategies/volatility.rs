@@ -11,6 +11,7 @@
 use crate::core::indicators::calculate_bollinger;
 use crate::core::types::{Candle, Signal, StrategyParams, FundingRatePoint};
 use crate::robot::strategies::base::Strategy;
+use crate::robot::strategies::param_spec::ParamSpec;
 use crate::robot::strategies::utils::htf_trend_filter;
 use crate::Result;
 
@@ -18,6 +19,12 @@ pub struct BollingerBandsStrategy;
 
 impl Strategy for BollingerBandsStrategy {
     fn name(&self) -> &str { "BOLLINGER_BANDS" }
+    fn param_spec(&self) -> Vec<ParamSpec> {
+        vec![
+            ParamSpec::int("period", 12.0, 30.0, 2.0),
+            ParamSpec::float("std_dev", 1.5, 3.0, 0.5),
+        ]
+    }
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
         let period = params.period.unwrap_or(20);
         let mult = params.std_dev.unwrap_or(2.0);
@@ -39,6 +46,9 @@ pub struct DonchianChannelStrategy;
 
 impl Strategy for DonchianChannelStrategy {
     fn name(&self) -> &str { "DONCHIAN" }
+    fn param_spec(&self) -> Vec<ParamSpec> {
+        vec![ParamSpec::int("period", 10.0, 40.0, 2.0)] // breakout penceresi
+    }
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
         let period = params.period.unwrap_or(20);
         let n = candles.len();

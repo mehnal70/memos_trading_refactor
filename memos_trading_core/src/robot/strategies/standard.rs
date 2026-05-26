@@ -7,6 +7,7 @@
 // 4. Panic-free hata yönetimi (Option/Result)
 
 use crate::robot::strategies::base::Strategy;
+use crate::robot::strategies::param_spec::ParamSpec;
 use crate::robot::strategies::utils::htf_trend_filter;
 use crate::core::types::{Candle, Signal, StrategyParams, FundingRatePoint};
 use crate::Result;
@@ -33,6 +34,13 @@ fn get_swing_levels(slice: &[Candle]) -> (f64, f64) {
 pub struct RsiStrategy;
 impl Strategy for RsiStrategy {
     fn name(&self) -> &str { "RSI" }
+    fn param_spec(&self) -> Vec<ParamSpec> {
+        vec![
+            ParamSpec::int("period", 7.0, 21.0, 1.0),
+            ParamSpec::pct("overbought", 65.0, 85.0, 5.0),
+            ParamSpec::pct("oversold", 15.0, 35.0, 5.0),
+        ]
+    }
     /// RSI **crossing** sinyali: aşırı alım/satıma yeni *giriş* anı.
     ///   prev ≤ ob && curr > ob → Sell (yeni overbought)
     ///   prev ≥ os && curr < os → Buy  (yeni oversold)
@@ -54,6 +62,14 @@ impl Strategy for RsiStrategy {
 pub struct MacdStrategy;
 impl Strategy for MacdStrategy {
     fn name(&self) -> &str { "MACD" }
+    fn param_spec(&self) -> Vec<ParamSpec> {
+        // fast < slow garantisi: aralıklar örtüşmez (max fast 15 < min slow 20).
+        vec![
+            ParamSpec::int("fast", 5.0, 15.0, 1.0),
+            ParamSpec::int("slow", 20.0, 40.0, 2.0),
+            ParamSpec::int("signal_period", 5.0, 12.0, 1.0),
+        ]
+    }
     /// MACD **crossing** sinyali: macd çizgisinin signal çizgisini kestiği bar.
     ///   prev m ≤ prev s && curr m > curr s → Buy (yukarı kesişim)
     ///   prev m ≥ prev s && curr m < curr s → Sell (aşağı kesişim)
@@ -77,6 +93,13 @@ impl Strategy for MacdStrategy {
 pub struct SupertrendStrategy;
 impl Strategy for SupertrendStrategy {
     fn name(&self) -> &str { "SUPERTREND" }
+    fn param_spec(&self) -> Vec<ParamSpec> {
+        // period = ATR periyodu, std_dev = bant çarpanı.
+        vec![
+            ParamSpec::int("period", 7.0, 21.0, 1.0),
+            ParamSpec::float("std_dev", 1.5, 4.0, 0.5),
+        ]
+    }
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
         let st = calculate_supertrend(candles, params.period.unwrap_or(10), params.std_dev.unwrap_or(3.0));
         let raw = match st.last() {
@@ -126,6 +149,9 @@ impl Strategy for PriceActionStrategy {
 pub struct IctFvgStrategy;
 impl Strategy for IctFvgStrategy {
     fn name(&self) -> &str { "ICT_FVG" }
+    fn param_spec(&self) -> Vec<ParamSpec> {
+        vec![ParamSpec::int("period", 3.0, 12.0, 1.0)] // FVG lookback
+    }
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
         let lb = params.period.unwrap_or(5).max(3);
         let n = candles.len();
@@ -149,6 +175,9 @@ pub struct SmcStrategy;
 
 impl Strategy for SmcStrategy {
     fn name(&self) -> &str { "SMC" }
+    fn param_spec(&self) -> Vec<ParamSpec> {
+        vec![ParamSpec::int("period", 5.0, 20.0, 1.0)] // swing lookback
+    }
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
         let lb = params.period.unwrap_or(10).max(3);
         let n = candles.len();
@@ -172,6 +201,9 @@ impl Strategy for SmcStrategy {
 pub struct IctOrderBlockStrategy;
 impl Strategy for IctOrderBlockStrategy {
     fn name(&self) -> &str { "ICT_OB" }
+    fn param_spec(&self) -> Vec<ParamSpec> {
+        vec![ParamSpec::int("period", 5.0, 20.0, 1.0)] // structure lookback (min 5)
+    }
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
         let lb = params.period.unwrap_or(10).max(5);
         let n = candles.len();
@@ -199,6 +231,9 @@ impl Strategy for IctOrderBlockStrategy {
 pub struct IctCompositeStrategy;
 impl Strategy for IctCompositeStrategy {
     fn name(&self) -> &str { "ICT_COMPOSITE" }
+    fn param_spec(&self) -> Vec<ParamSpec> {
+        vec![ParamSpec::int("period", 10.0, 30.0, 2.0)] // structure lookback (min 8)
+    }
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
         let lb = params.period.unwrap_or(20).max(8);
         let n = candles.len();
@@ -229,6 +264,13 @@ impl Strategy for IctCompositeStrategy {
 pub struct MaCrossoverStrategy;
 impl Strategy for MaCrossoverStrategy {
     fn name(&self) -> &str { "MA_CROSSOVER" }
+    fn param_spec(&self) -> Vec<ParamSpec> {
+        // fast < slow garantisi: aralıklar örtüşmez (max fast 12 < min slow 15).
+        vec![
+            ParamSpec::int("fast", 3.0, 12.0, 1.0),
+            ParamSpec::int("slow", 15.0, 40.0, 2.0),
+        ]
+    }
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
         let n = candles.len();
         let (f, s) = (params.fast.unwrap_or(5), params.slow.unwrap_or(20));

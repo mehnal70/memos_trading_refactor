@@ -1,6 +1,7 @@
 // robot/strategies/base.rs - Tek Strategy trait'i (tüm stratejilerin sözleşmesi)
 
 use crate::core::types::{Candle, Signal, StrategyParams, FundingRatePoint};
+use crate::robot::strategies::param_spec::ParamSpec;
 use crate::Result;
 
 /// Tüm stratejilerin uyguladığı sözleşme. Çok çekirdekli sistemlerde
@@ -23,9 +24,13 @@ pub trait Strategy: Send + Sync {
         StrategyParams::default()
     }
 
-    /// Optimizasyon için parametre aralıkları (grid search yardımcısı için).
-    fn param_ranges(&self) -> Option<Vec<(String, Vec<f64>)>> {
-        None
+    /// Stratejinin ayarlanabilir parametre uzayı — her parametrenin adı
+    /// (`StrategyParams` alanı), arama aralığı ve adımı. Optimizer (HyperOpt /
+    /// backtest job) bu listeyi tüketerek ızgara/rastgele örnek üretir; canlı
+    /// motor en iyi seti `ParameterStore`'dan okur. Boş (default) → optimize
+    /// edilecek yapısal parametre yok, varsayılanlar sabit kalır.
+    fn param_spec(&self) -> Vec<ParamSpec> {
+        Vec::new()
     }
 
     /// İsteğe bağlı: stratejinin o anki güven skoru (0.0–1.0).
