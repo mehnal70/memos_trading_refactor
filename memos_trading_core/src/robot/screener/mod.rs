@@ -11,4 +11,4 @@
 
 pub mod score;
 
-pub use score::{score_symbol, select_top_n_diff, ScreenerScore, SelectionDiff};
+pub use score::{score_symbol, select_top_n_diff, HtfBias, ScreenerScore, SelectionDiff};

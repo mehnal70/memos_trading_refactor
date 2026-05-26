@@ -303,13 +303,17 @@ impl Engine {
     ///   - `SCREENER_CANDLE_LIMIT`    (default 500)
     ///   - `SCREENER_MIN_VOLUME`      (default 0.0)
     ///   - `SCREENER_EXTRA_SYMBOLS`   (örn. "BNBUSDT,ADAUSDT")
+    ///   - `SCREENER_HTF_BIAS`        (default 0.2) — sembol SEÇİMİNE üst-TF trend
+    ///     hizasını additif katar (boğa +, ayı −). multi_tf.enabled=false veya
+    ///     0.0 → kapalı (saf tek-TF backtest sıralaması, legacy davranış).
     pub(crate) fn run_screener_job(state: &Arc<Mutex<AppState>>) -> std::result::Result<(), String> {
-        use crate::robot::screener::{score_symbol, select_top_n_diff, ScreenerScore};
+        use crate::robot::screener::{score_symbol, select_top_n_diff, HtfBias, ScreenerScore};
 
         log::info!("🔭 E2: Screener çalışıyor...");
 
-        // 1) State'ten yapı yapısı + kapasite + pinned + strateji + blocked.
-        let (db_path, market, interval, pinned, blocked, active_strategy, capital, max_workers, current_workers) = {
+        // 1) State'ten yapı yapısı + kapasite + pinned + strateji + blocked + multi-TF.
+        let (db_path, market, interval, pinned, blocked, active_strategy, capital,
+             max_workers, current_workers, multi_tf_enabled, multi_tf_min) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             let strat = st.brain.live_strategy.read()
                 .map(|s| s.clone()).unwrap_or_else(|_| "MA_CROSSOVER".to_string());
@@ -320,6 +324,10 @@ impl Engine {
                 let cur: Vec<String> = o.workers.keys().cloned().collect();
                 (o.max_workers, cur)
             }).unwrap_or((16, vec![]));
+            // Multi-TF gate: sinyal yolundakiyle aynı param kaynağı (ParameterStore).
+            let (mtf_on, mtf_min) = st.brain.parameters.read().ok()
+                .map(|p| (p.multi_tf.enabled, p.multi_tf.min_required))
+                .unwrap_or((true, crate::robot::data_pipeline::HTF_MIN_REQUIRED));
             (
                 st.config.db_path.clone(),
                 st.config.market.clone(),
@@ -330,6 +338,8 @@ impl Engine {
                 st.finance.equity.max(1.0),
                 max_w,
                 current,
+                mtf_on,
+                mtf_min,
             )
         };
 
@@ -343,6 +353,10 @@ impl Engine {
         let extras: Vec<String> = std::env::var("SCREENER_EXTRA_SYMBOLS").ok()
             .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
             .unwrap_or_default();
+        // HTF bias delta — 0 veya multi_tf kapalıysa HTF yüklemeden saf tek-TF sıralama.
+        let htf_bias_delta: f64 = std::env::var("SCREENER_HTF_BIAS").ok()
+            .and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.2);
+        let htf_aware = multi_tf_enabled && htf_bias_delta > 0.0;
 
         // 3) Aday havuzu — config.market + config.interval'a uyan SQLite sembolleri
         //    + env extras (dedupe). Market segmentasyonu sayesinde örn. futures
@@ -373,16 +387,25 @@ impl Engine {
         }
 
         push_state_log(state, format!(
-            "🔭 Screener: havuz={} aday (market={} interval={}), top_n={} max_workers={} strateji={}",
+            "🔭 Screener: havuz={} aday (market={} interval={}), top_n={} max_workers={} strateji={} htf_bias={}",
             pool.len(), market, interval, top_n, max_workers, active_strategy,
+            if htf_aware { format!("±{:.2}", htf_bias_delta) } else { "kapalı".to_string() },
         ));
 
         // 4) Her aday için skor (paralel — rayon).
+        //    htf_aware ise her aday için HTF mumları yüklenip composite'e trend
+        //    hizası katılır (sinyal yoluyla aynı load_htf_candles + SMA(10/30)).
         use rayon::prelude::*;
         let mut scored: Vec<(String, ScreenerScore)> = pool.par_iter().filter_map(|sym| {
             let candles = crate::persistence::reader::read_candles(&db_path, sym, &interval, limit).ok()?;
             if candles.len() < 50 { return None; }
-            let s = score_symbol(&candles, &active_strategy, 4.0, 2.0, 0.3, capital);
+            let htf_vec = if htf_aware {
+                crate::robot::data_pipeline::load_htf_candles(&db_path, sym, &interval, multi_tf_min)
+            } else {
+                Vec::new()
+            };
+            let htf_slice = if htf_vec.is_empty() { None } else { Some(htf_vec.as_slice()) };
+            let s = score_symbol(&candles, &active_strategy, 4.0, 2.0, 0.3, capital, htf_slice, htf_bias_delta);
             if s.avg_volume < min_volume { return None; }
             Some((sym.clone(), s))
         }).collect();
@@ -417,10 +440,17 @@ impl Engine {
                 scored.len(), diff.selected.len(), added_ok, removed_ok,
             ));
             let top_brief: Vec<String> = scored.iter().take(5)
-                .map(|(name, s)| format!(
-                    "{name}(c={:.2} sh={:.2} wr={:.0}% n={})",
-                    s.composite, s.sharpe, s.win_rate, s.trades,
-                ))
+                .map(|(name, s)| {
+                    let b = match s.htf_bias {
+                        HtfBias::Bullish => "↑",
+                        HtfBias::Bearish => "↓",
+                        HtfBias::Neutral => "·",
+                    };
+                    format!(
+                        "{name}(c={:.2}{b} sh={:.2} wr={:.0}% n={})",
+                        s.composite, s.sharpe, s.win_rate, s.trades,
+                    )
+                })
                 .collect();
             if !top_brief.is_empty() {
                 st.push_log(format!("🔭 Top: {}", top_brief.join(" | ")));

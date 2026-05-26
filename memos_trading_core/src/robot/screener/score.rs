@@ -11,8 +11,60 @@
 // koşulda düşürülmez. Max worker kapasitesi kullanıcı tarafına bırakılmaz
 // (orchestrator.max_workers caller'da uygulanır).
 
+use crate::core::indicators::CoreIndicatorEngine;
 use crate::core::types::Candle;
 use crate::robot::backtester::{Backtester, BacktestConfig};
+
+/// Screener HTF trend tanımı — sinyal yolundaki `htf_trend_filter` ile aynı
+/// SMA(10)/SMA(30). Tek kaynak: değişirse seçim ve sinyal yolları birlikte
+/// gözden geçirilmeli (strategies/utils.rs htf_trend_filter çağrıları 10/30).
+pub const HTF_BIAS_FAST: usize = 10;
+pub const HTF_BIAS_SLOW: usize = 30;
+
+/// Üst zaman dilimi (HTF) trend hizası — screener sıralamasında sembol/strateji
+/// seçimine üst-TF yönünü katar. Sistem long-bias olduğundan boğa hizası lehte,
+/// ayı hizası aleyhte sayılır.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HtfBias {
+    Bullish, // HTF fast MA > slow MA
+    Bearish, // HTF fast MA < slow MA
+    Neutral, // veri yetersiz / MA eşit → seçimi etkilemez
+}
+
+/// HTF mumlarından SMA(fast)/SMA(slow) ile trend yönü.
+/// `htf_trend_filter` ile birebir aynı kaynak (`CoreIndicatorEngine::sma`)
+/// → sembol SEÇİMİ ile sinyal ÜRETİMİ aynı HTF görüşünü paylaşır.
+/// `htf` None veya `slow`'dan az mum → `Neutral` (etkisiz).
+pub fn htf_bias(htf: Option<&[Candle]>, fast: usize, slow: usize) -> HtfBias {
+    let h = match htf {
+        Some(h) if h.len() >= slow => h,
+        _ => return HtfBias::Neutral,
+    };
+    let fast_ma = CoreIndicatorEngine::sma(h, fast);
+    let slow_ma = CoreIndicatorEngine::sma(h, slow);
+    if fast_ma == 0.0 || slow_ma == 0.0 {
+        return HtfBias::Neutral;
+    }
+    if fast_ma > slow_ma {
+        HtfBias::Bullish
+    } else if fast_ma < slow_ma {
+        HtfBias::Bearish
+    } else {
+        HtfBias::Neutral
+    }
+}
+
+/// HTF hizasının composite skora **additif** katkısı (boğa → +delta,
+/// ayı → −delta, nötr → 0). Additif çünkü composite negatif olabilir
+/// (negatif sharpe); çarpım işareti ters çevirir, sıralamayı bozardı.
+/// `delta == 0.0` → HTF tamamen devre dışı (legacy davranış).
+pub fn htf_bias_adjustment(bias: HtfBias, delta: f64) -> f64 {
+    match bias {
+        HtfBias::Bullish => delta,
+        HtfBias::Bearish => -delta,
+        HtfBias::Neutral => 0.0,
+    }
+}
 
 /// Tek bir sembolün screener çıktısı. Composite skora göre sıralanır;
 /// likitite/volatilite alanları diagnostik amaçlı tutulur.
@@ -24,17 +76,20 @@ pub struct ScreenerScore {
     pub win_rate:    f64, // backtest win rate (%)
     pub max_dd_pct:  f64, // backtest max drawdown (%)
     pub trades:      usize,
-    pub composite:   f64, // sıralama anahtarı; yüksek = iyi
+    pub htf_bias:    HtfBias, // seçim anındaki üst-TF hizası (telemetri + sıralama izi)
+    pub composite:   f64, // sıralama anahtarı (HTF-ayarlı); yüksek = iyi
 }
 
 impl ScreenerScore {
     /// Hiç işlem üretemediyse veya backtest başarısızsa skor sıfır
     /// (sıralamada hep alta düşer ama negatif değer üretmez).
+    /// HTF hizası yalnız gerçek skorlu sembollere uygulanır → empty Neutral kalır
+    /// (0 işlemli bir sembol HTF boğa diye seçime itilmemeli).
     pub fn empty(avg_volume: f64, atr_pct: f64) -> Self {
         Self {
             avg_volume, atr_pct,
             sharpe: 0.0, win_rate: 0.0, max_dd_pct: 0.0,
-            trades: 0, composite: 0.0,
+            trades: 0, htf_bias: HtfBias::Neutral, composite: 0.0,
         }
     }
 }
@@ -43,6 +98,10 @@ impl ScreenerScore {
 /// `tp_pct`/`sl_pct`/`ps` skor karşılaştırması için sabit varsayılanlar
 /// kullanır (her aday aynı parametrelerle test edilir → adil sıralama).
 /// Yetersiz veri (< 50 mum) veya yetersiz işlem (< 3) → `ScreenerScore::empty`.
+///
+/// `htf` verilirse (üst zaman dilimi mumları) ve `htf_bias_delta > 0` ise
+/// composite skoruna HTF trend hizası additif katılır → seçim üst-TF'yi görür.
+/// `htf=None` veya `delta=0.0` → legacy tek-TF davranış (etkisiz).
 pub fn score_symbol(
     candles: &[Candle],
     strategy_name: &str,
@@ -50,6 +109,8 @@ pub fn score_symbol(
     sl_pct: f64,
     ps: f64,
     initial_balance: f64,
+    htf: Option<&[Candle]>,
+    htf_bias_delta: f64,
 ) -> ScreenerScore {
     let avg_volume = if candles.is_empty() {
         0.0
@@ -81,13 +142,17 @@ pub fn score_symbol(
         return ScreenerScore::empty(avg_volume, atr_pct);
     }
 
-    let composite = composite_score(res.sharpe_ratio, res.win_rate, res.max_drawdown_pct);
+    let base = composite_score(res.sharpe_ratio, res.win_rate, res.max_drawdown_pct);
+    // HTF hizası yalnız gerçek skorlu (≥3 işlem) sembollere uygulanır.
+    let bias = htf_bias(htf, HTF_BIAS_FAST, HTF_BIAS_SLOW);
+    let composite = base + htf_bias_adjustment(bias, htf_bias_delta);
     ScreenerScore {
         avg_volume, atr_pct,
         sharpe: res.sharpe_ratio,
         win_rate: res.win_rate,
         max_dd_pct: res.max_drawdown_pct,
         trades: res.total_trades,
+        htf_bias: bias,
         composite,
     }
 }
@@ -193,16 +258,17 @@ mod tests {
     #[test]
     fn score_empty_when_candles_too_few() {
         let c = cs(&[100.0; 10], 50.0);
-        let s = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0);
+        let s = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0);
         assert_eq!(s.trades, 0);
         assert_eq!(s.composite, 0.0);
         assert_eq!(s.avg_volume, 50.0);
+        assert_eq!(s.htf_bias, HtfBias::Neutral);
     }
 
     #[test]
     fn score_records_volume_and_atr_even_with_no_trades() {
         let c = cs(&[100.0; 100], 200.0);
-        let s = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0);
+        let s = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0);
         assert_eq!(s.avg_volume, 200.0);
         assert!(s.atr_pct >= 0.0);
     }
@@ -217,9 +283,64 @@ mod tests {
             volume: 100.0,
             ..Default::default()
         }).collect();
-        let a = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0);
-        let b = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0);
+        let a = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0);
+        let b = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0);
         assert_eq!(a, b);
+    }
+
+    // ── HTF bias ────────────────────────────────────────────────────────
+
+    /// Yükselen seri → SMA(10) > SMA(30) → Bullish; düşen seri → Bearish.
+    #[test]
+    fn htf_bias_detects_trend_direction() {
+        let up: Vec<Candle> = cs(&(0..60).map(|i| 100.0 + i as f64).collect::<Vec<_>>(), 1.0);
+        let down: Vec<Candle> = cs(&(0..60).map(|i| 160.0 - i as f64).collect::<Vec<_>>(), 1.0);
+        assert_eq!(htf_bias(Some(&up), HTF_BIAS_FAST, HTF_BIAS_SLOW), HtfBias::Bullish);
+        assert_eq!(htf_bias(Some(&down), HTF_BIAS_FAST, HTF_BIAS_SLOW), HtfBias::Bearish);
+    }
+
+    #[test]
+    fn htf_bias_neutral_when_insufficient_or_none() {
+        let few = cs(&[100.0; 10], 1.0); // slow=30'dan az
+        assert_eq!(htf_bias(Some(&few), HTF_BIAS_FAST, HTF_BIAS_SLOW), HtfBias::Neutral);
+        assert_eq!(htf_bias(None, HTF_BIAS_FAST, HTF_BIAS_SLOW), HtfBias::Neutral);
+    }
+
+    #[test]
+    fn htf_bias_adjustment_signs() {
+        assert_eq!(htf_bias_adjustment(HtfBias::Bullish, 0.3), 0.3);
+        assert_eq!(htf_bias_adjustment(HtfBias::Bearish, 0.3), -0.3);
+        assert_eq!(htf_bias_adjustment(HtfBias::Neutral, 0.3), 0.0);
+        // delta=0 → her hizada etkisiz.
+        assert_eq!(htf_bias_adjustment(HtfBias::Bullish, 0.0), 0.0);
+    }
+
+    /// Skorlu (≥3 işlem) bir sembolde boğa HTF composite'i tam +delta kaydırır,
+    /// ayı −delta; delta=0 → değişmez. Zig-zag seri MA_CROSSOVER'da işlem üretir.
+    #[test]
+    fn score_applies_htf_bias_to_real_trades() {
+        // 200 mumluk testere dişi (period ~20) → MA kesişimleri → işlemler.
+        let closes: Vec<f64> = (0..200)
+            .map(|i| 100.0 + 8.0 * ((i as f64) * std::f64::consts::PI / 10.0).sin())
+            .collect();
+        let c = cs(&closes, 100.0);
+        let up: Vec<Candle> = cs(&(0..60).map(|i| 100.0 + i as f64).collect::<Vec<_>>(), 1.0);
+        let down: Vec<Candle> = cs(&(0..60).map(|i| 160.0 - i as f64).collect::<Vec<_>>(), 1.0);
+
+        let base = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0);
+        assert!(base.trades >= 3, "zig-zag yeterli işlem üretmeli (n={})", base.trades);
+
+        let bull = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, Some(&up), 0.3);
+        let bear = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, Some(&down), 0.3);
+        assert_eq!(bull.htf_bias, HtfBias::Bullish);
+        assert_eq!(bear.htf_bias, HtfBias::Bearish);
+        assert!((bull.composite - (base.composite + 0.3)).abs() < 1e-9);
+        assert!((bear.composite - (base.composite - 0.3)).abs() < 1e-9);
+        assert!(bull.composite > bear.composite);
+
+        // delta=0 → HTF verilse bile composite değişmez.
+        let zero = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, Some(&up), 0.0);
+        assert!((zero.composite - base.composite).abs() < 1e-9);
     }
 
     // ── composite_score ────────────────────────────────────────────────
