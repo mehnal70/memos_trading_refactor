@@ -17,6 +17,9 @@ pub struct WalkForwardConfig {
     pub symbol: String,
     pub interval: String,
     pub commission_pct: f64,
+    /// Multi-TF hizalama: BacktestConfig.use_htf'e propagate edilir → WF strateji
+    /// seçimi de canlıyla aynı HTF filtresini görür. Default false.
+    pub use_htf: bool,
 }
 
 impl Default for WalkForwardConfig {
@@ -30,6 +33,7 @@ impl Default for WalkForwardConfig {
             symbol: "BTCUSDT".to_owned(),
             interval: "1h".to_owned(),
             commission_pct: 0.001,
+            use_htf: false,
         }
     }
 }
@@ -152,6 +156,7 @@ impl WalkForwardTester {
             stop_loss_pct: sl,
             strategy_name: self.config.strategy_name.clone(),
             commission_pct: self.config.commission_pct,
+            use_htf: self.config.use_htf,
             ..Default::default()
         };
 

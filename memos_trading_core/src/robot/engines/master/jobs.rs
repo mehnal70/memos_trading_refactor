@@ -472,10 +472,13 @@ impl Engine {
     pub(crate) fn run_backtest_job(state: &Arc<Mutex<AppState>>) -> std::result::Result<(), String> {
         log::info!("🔬 E2: Walk-Forward Backtest başlatıldı (grid: 6×4×3)...");
 
-        let (symbol, interval, db_path, capital) = {
+        let (symbol, interval, db_path, capital, use_htf) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
+            // Backtest, canlının multi-TF'ini aynalasın: multi_tf.enabled açıksa WF
+            // seçimi + param araması da HTF filtresini görür (canlı ile tek-davranış).
+            let use_htf = st.brain.parameters.read().map(|p| p.multi_tf.enabled).unwrap_or(false);
             (st.config.symbol.clone(), st.config.interval.clone(),
-             st.config.db_path.clone(), st.finance.equity)
+             st.config.db_path.clone(), st.finance.equity, use_htf)
         };
 
         push_state_log(state, format!(
@@ -541,6 +544,7 @@ impl Engine {
                 symbol: symbol.clone(),
                 interval: interval.clone(),
                 commission_pct: 0.001,
+                use_htf,
             };
             let Some(wf_res) = WalkForwardTester::new(wf_cfg).run(&candles) else {
                 push_state_log(state, format!("🔬   aday {} → WF sonuç alınamadı", name));
@@ -607,6 +611,7 @@ impl Engine {
                     partial_tp_ratio: None,
                     position_profile: None,
                     security_profile: None,
+                    use_htf,
                 };
                 crate::robot::ml_engine::hyperopt::HyperOpt::spec_search(
                     &candles, &specs, n_iters, &bt_cfg, Some(12345),

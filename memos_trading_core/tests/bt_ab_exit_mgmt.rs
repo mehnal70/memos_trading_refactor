@@ -50,6 +50,7 @@ fn cfg(symbol: &str, interval: &str, tp: f64) -> BacktestConfig {
         partial_tp_ratio: None,
         position_profile: None,
         security_profile: None,
+        use_htf: false,
     }
 }
 

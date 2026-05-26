@@ -27,9 +27,25 @@ pub struct BacktestConfig {
     pub partial_tp_ratio: Option<f64>,
     pub position_profile: Option<String>,
     pub security_profile: Option<String>,
+    /// Multi-TF hizalama: true ise backtest, base mumları HTF'e (get_htf_interval)
+    /// toplayıp generate_signal'a YALNIZ tamamlanmış (look-ahead'siz) HTF dilimini
+    /// verir → canlı motorun htf_trend_filter davranışıyla aynı. Default false
+    /// (backward-compat: screener/A-B tek-TF kalır). Backtest job multi_tf.enabled
+    /// ile açar. [[project_param_modularity]]
+    #[serde(default)]
+    pub use_htf: bool,
 }
 
 fn default_commission() -> f64 { 0.001 }
+
+/// HTF interval → bucket saniyesi (look-ahead'siz HTF dilimleme için). Bilinmeyen → 0.
+fn htf_bucket_secs(interval: &str) -> i64 {
+    match interval {
+        "1m" => 60, "5m" => 300, "15m" => 900, "30m" => 1800,
+        "1h" => 3600, "4h" => 14_400, "1d" => 86_400,
+        _ => 0,
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimulatedTrade {
@@ -112,6 +128,19 @@ impl Backtester {
             .make(&self.config.strategy_name);
         let entry_params = self.config.strategy_params.unwrap_or_default();
 
+        // Multi-TF hizalama (use_htf): base seriyi HTF'e bir kez topla. Her bara
+        // YALNIZ tamamlanmış HTF mumları verilir (forming bucket dışlanır) → canlı
+        // load_htf_candles davranışıyla look-ahead'siz hizalı. bucket_secs slicing için.
+        let (htf_full, htf_bucket_secs) = if self.config.use_htf {
+            let htf_int = crate::robot::data_pipeline::orchestrator::DataPipeline
+                ::get_htf_interval(&self.config.interval);
+            let agg = crate::robot::data_pipeline::aggregate_to(&sorted, htf_int, &self.config.symbol);
+            let bs = htf_bucket_secs(htf_int);
+            (agg, bs)
+        } else {
+            (Vec::new(), 0)
+        };
+
         for (idx, candle) in sorted.iter().enumerate() {
             let mut close_signal = false;
             let mut trade_net = 0.0;
@@ -168,7 +197,9 @@ impl Backtester {
             }
 
             // Stratejik Giriş Kontrolü
-            if pos.is_none() && Self::entry_long_signal(entry_strat.as_ref(), &entry_params, &sorted, idx) {
+            if pos.is_none() && Self::entry_long_signal(
+                entry_strat.as_ref(), &entry_params, &sorted, idx, &htf_full, htf_bucket_secs,
+            ) {
                 let entry = candle.close;
                 let sl = entry * (1.0 - self.config.stop_loss_pct / 100.0);
                 let trail_pct = self.config.atr_trail_mult.map(|m| Self::calc_atr_pct(&sorted[..=idx]) * m);
@@ -265,13 +296,24 @@ impl Backtester {
         params: &StrategyParams,
         candles: &[Candle],
         idx: usize,
+        htf_full: &[Candle],
+        htf_bucket_secs: i64,
     ) -> bool {
         const W: usize = 200;
         if idx < 20 { return false; }
         let start = (idx + 1).saturating_sub(W);
         let window = &candles[start..=idx];
-        // htf=None: HTF hizalama (canlı multi-TF) ayrı bir adım — bu sürümde tek-TF.
-        matches!(strat.generate_signal(window, params, None, None), Ok(Signal::Buy))
+        // HTF dilimi: yalnız o anki bara göre TAMAMLANMIŞ bucket'lar (forming hariç →
+        // look-ahead yok). htf_full sıralı; forming bucket başlangıcından öncekiler alınır.
+        let htf: Option<&[Candle]> = if htf_bucket_secs > 0 && !htf_full.is_empty() {
+            let cur_bucket_start = candles[idx].timestamp.timestamp()
+                .div_euclid(htf_bucket_secs) * htf_bucket_secs;
+            let n = htf_full.partition_point(|c| c.timestamp.timestamp() < cur_bucket_start);
+            if n > 0 { Some(&htf_full[..n]) } else { None }
+        } else {
+            None
+        };
+        matches!(strat.generate_signal(window, params, None, htf), Ok(Signal::Buy))
     }
 
     fn calc_atr_pct(candles: &[Candle]) -> f64 {

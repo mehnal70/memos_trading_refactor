@@ -40,6 +40,7 @@ fn cfg(strategy: &str, is: usize, oos: usize, step: usize) -> WalkForwardConfig 
         symbol: "TEST".into(),
         interval: "1h".into(),
         commission_pct: 0.001,
+        use_htf: false,
     }
 }
 

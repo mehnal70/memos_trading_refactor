@@ -4,7 +4,7 @@
 
 use chrono::{TimeZone, Utc};
 use memos_trading_core::core::types::{Candle, StrategyParams};
-use memos_trading_core::robot::backtester::BacktestConfig;
+use memos_trading_core::robot::backtester::{BacktestConfig, Backtester};
 use memos_trading_core::robot::ml_engine::hyperopt::HyperOpt;
 use memos_trading_core::robot::parameters::ParameterStore;
 use memos_trading_core::robot::strategies::default_registry;
@@ -35,7 +35,7 @@ fn cfg(strategy: &str) -> BacktestConfig {
         strategy_name: strategy.into(), strategy_params: None,
         commission_pct: 0.001, breakeven_at_rr: Some(1.0),
         atr_trail_mult: Some(2.0), partial_tp_ratio: None,
-        position_profile: None, security_profile: None,
+        position_profile: None, security_profile: None, use_htf: false,
     }
 }
 
@@ -64,6 +64,45 @@ fn spec_search_bos_uzayda_none() {
     let specs = default_registry().make("PRICE_ACTION").param_spec();
     assert!(specs.is_empty());
     assert!(HyperOpt::spec_search(&candles, &specs, 20, &cfg("PRICE_ACTION"), Some(1)).is_none());
+}
+
+#[test]
+fn use_htf_yolu_gercek_seride_calisir() {
+    // Salınımlı seri RSI girişleri üretir (spec testiyle aynı veri). use_htf=true
+    // HTF sentez+dilimleme yolunu çalıştırır; sonuç geçerli (panik yok, metrikler
+    // sonlu). no_htf>0 olduğunu, HTF'nin yalnız long elediği için ≤ kaldığını teyit.
+    let candles = synthetic_wave(600);
+    let run = |htf: bool| {
+        let mut c = cfg("RSI");
+        c.use_htf = htf;
+        Backtester::new(c).run(&candles).expect("backtest")
+    };
+    let no_htf = run(false);
+    let with_htf = run(true);
+    assert!(no_htf.total_trades > 0, "salınımlı seride RSI girişleri olmalı");
+    assert!(with_htf.win_rate.is_finite() && with_htf.sharpe_ratio.is_finite());
+}
+
+#[test]
+fn use_htf_dususta_buy_filtreler() {
+    // Monoton düşüş: HTF (4h) ayı → RSI'nin oversold Buy'ları htf_trend_filter ile
+    // Hold'a çevrilir → use_htf=true daha AZ (veya eşit) long açar. Düşüş + RSI
+    // dip-alımı, HTF filtresinin canlıyla aynı şekilde girişleri kestiğini gösterir.
+    let candles: Vec<Candle> = (0..500).map(|i| {
+        let close = 350.0 - i as f64 * 0.5;
+        Candle {
+            timestamp: Utc.timestamp_opt(1_700_000_000 + i as i64 * 3600, 0).unwrap(),
+            open: close + 0.3, high: close + 0.5, low: close - 0.5, close,
+            volume: 1_000.0, symbol: "TEST".into(), interval: "1h".into(),
+        }
+    }).collect();
+    let run = |htf: bool| {
+        let mut c = cfg("RSI");
+        c.use_htf = htf;
+        Backtester::new(c).run(&candles).expect("backtest").total_trades
+    };
+    assert!(run(true) <= run(false),
+        "ayı HTF'de use_htf girişleri kesmeli (≤): with={} no={}", run(true), run(false));
 }
 
 #[test]

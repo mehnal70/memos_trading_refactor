@@ -21,4 +21,4 @@ pub use orchestrator::DataPipeline;
 pub use status::{PipelineStatus, PipelineStepRuntime, PipelineAnomalyRuntime,
                  StepStatus, AnomalySeverity, AnomalyKind};
 pub use canon::PipelineStage;
-pub use htf_loader::{load_htf_candles, aggregate_1m_to, HTF_MIN_REQUIRED};
+pub use htf_loader::{load_htf_candles, aggregate_1m_to, aggregate_to, HTF_MIN_REQUIRED};

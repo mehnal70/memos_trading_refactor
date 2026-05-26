@@ -96,6 +96,45 @@ fn interval_minutes(intv: &str) -> usize {
     }
 }
 
+/// GENEL zaman-dilimi toplama: herhangi bir base interval'deki (sıralı, artan ts)
+/// mumları daha büyük `target_interval`'e bucketler. `aggregate_1m_to`'dan farkı:
+/// CandleSynth'in 1m-özel yoluna bağlı değil → backtester base 1h/4h olduğunda da
+/// çalışır. Bucket = epoch / (target_dakika×60); OHLCV bucket içinde birleştirilir
+/// (open=ilk, close=son, high=max, low=min, volume=Σ). Bucket başlangıç ts'i mühürlenir.
+///
+/// NOT: Look-ahead'i çağıran yönetir — bu fonksiyon TÜM serinin bucket'larını üretir;
+/// "forming" (henüz tamamlanmamış) bucket'ı dışlamak çağıranın sorumluluğudur.
+pub fn aggregate_to(base: &[Candle], target_interval: &str, symbol: &str) -> Vec<Candle> {
+    let tgt_min = interval_minutes(target_interval);
+    if base.is_empty() || tgt_min == 0 { return Vec::new(); }
+    let bucket_secs = (tgt_min * 60) as i64;
+    let mut out: Vec<Candle> = Vec::new();
+    let mut cur_bucket: Option<i64> = None;
+    for c in base {
+        let b = c.timestamp.timestamp().div_euclid(bucket_secs);
+        if cur_bucket == Some(b) {
+            if let Some(last) = out.last_mut() {
+                last.high = last.high.max(c.high);
+                last.low = last.low.min(c.low);
+                last.close = c.close;
+                last.volume += c.volume;
+            }
+        } else {
+            cur_bucket = Some(b);
+            let ts = chrono::DateTime::from_timestamp(b * bucket_secs, 0)
+                .unwrap_or(c.timestamp);
+            out.push(Candle {
+                timestamp: ts,
+                open: c.open, high: c.high, low: c.low, close: c.close,
+                volume: c.volume,
+                symbol: symbol.to_string(),
+                interval: target_interval.to_string(),
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +195,43 @@ mod tests {
     fn aggregate_empty_input_returns_empty() {
         let agg = aggregate_1m_to(&[], "5m", "TEST");
         assert!(agg.is_empty());
+    }
+
+    /// Saatlik mum dizisi (genel aggregate_to testi için, 1m-özel değil).
+    fn mk_hourly(count: usize, base_close: f64) -> Vec<Candle> {
+        let start = Utc.timestamp_opt(0, 0).single().unwrap();
+        (0..count).map(|i| {
+            let ts = start + Duration::hours(i as i64);
+            let close = base_close + (i as f64);
+            Candle {
+                timestamp: ts, open: close - 0.5, high: close + 1.0, low: close - 1.0,
+                close, volume: 10.0, symbol: "TEST".to_string(), interval: "1h".to_string(),
+            }
+        }).collect()
+    }
+
+    #[test]
+    fn aggregate_to_1h_to_4h_bucketler_ohlcv() {
+        let base = mk_hourly(8, 100.0); // 8 saat → 2 adet 4h bucket
+        let agg = aggregate_to(&base, "4h", "TEST");
+        assert_eq!(agg.len(), 2);
+        assert_eq!(agg[0].interval, "4h");
+        // İlk bucket: 0-3. saat → open=base[0].open, close=base[3].close, vol=Σ4
+        assert_eq!(agg[0].open, base[0].open);
+        assert_eq!(agg[0].close, base[3].close);
+        assert!((agg[0].volume - 40.0).abs() < 1e-9);
+        assert_eq!(agg[0].high, base[3].high); // artan seri → son en yüksek
+        assert_eq!(agg[1].close, base[7].close);
+    }
+
+    #[test]
+    fn aggregate_to_genel_base_1m_degil() {
+        // 1h base ile aggregate_1m_to YANLIŞ olurdu (push_1m); aggregate_to doğru.
+        let base = mk_hourly(24, 50.0);
+        let agg = aggregate_to(&base, "1d", "TEST"); // 24 saat → 1 günlük
+        assert_eq!(agg.len(), 1);
+        assert_eq!(agg[0].interval, "1d");
+        assert_eq!(agg[0].close, base[23].close);
     }
 
     #[test]
