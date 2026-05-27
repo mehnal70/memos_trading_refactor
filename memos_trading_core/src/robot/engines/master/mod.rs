@@ -160,6 +160,10 @@ pub struct RuntimeTuning {
     pub log_dataingest_cooldown_secs: u64,
     /// Position-aligned RISK_BLOCK log throttle penceresi (sn, sembol başına).
     pub risk_block_log_cooldown_secs: u64,
+    /// 🌐 Rejim bağlamı (Adım 1) cache TTL'i (sn). Cycle hot-path bu süre içinde
+    /// rejimi yeniden hesaplamaz, RegimeContext cache'inden okur (seyrek tespit).
+    /// 0 → her cycle yeniden hesapla (legacy per-cycle davranış). Default 900 (15 dk).
+    pub regime_context_ttl_secs: u64,
 }
 
 impl Default for RuntimeTuning {
@@ -174,6 +178,7 @@ impl Default for RuntimeTuning {
             candle_freshness_secs: 300,
             log_dataingest_cooldown_secs: 300,
             risk_block_log_cooldown_secs: 60,
+            regime_context_ttl_secs: 900,
         }
     }
 }
@@ -197,6 +202,7 @@ impl RuntimeTuning {
             candle_freshness_secs: env_parse("CANDLE_FRESHNESS_SECS", d.candle_freshness_secs),
             log_dataingest_cooldown_secs: env_parse("LOG_DATAINGEST_COOLDOWN_SECS", d.log_dataingest_cooldown_secs),
             risk_block_log_cooldown_secs: env_parse("RISK_BLOCK_LOG_COOLDOWN_SECS", d.risk_block_log_cooldown_secs),
+            regime_context_ttl_secs: env_parse("REGIME_CONTEXT_TTL_SECS", d.regime_context_ttl_secs),
         }
     }
 

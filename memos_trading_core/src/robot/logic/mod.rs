@@ -5,6 +5,7 @@ pub mod anomaly_detector;
 pub mod autonomous_trader;
 pub mod autonomous_control;
 pub mod market_regime;
+pub mod regime_context;
 pub mod optimizer;
 pub mod pattern_matcher;
 pub mod pipeline_supervisor;

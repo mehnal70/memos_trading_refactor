@@ -378,7 +378,11 @@ impl Engine {
             // Faz 2 c4: edge_threshold rejim-bazlı override'a açık.
             // Faz 3 c1: rejim ilk kez görülüyorsa adaptive heuristic patch otomatik.
             // Faz 3 c3: rejim drift değişimi → ekstra savunmacı tighten + bildirim.
-            let regime = Self::classify_regime(&candles);
+            // Adım 1: rejim bağlamı — cache'li, HTF-tercihli, seyrek (TTL). Cold-start
+            // veya TTL=0'da eski classify_regime ile birebir (aynı tek-kaynak fn).
+            let regime = Self::regime_for_cycle(
+                state, symbol, &candles, interval, htf_slice, tuning.regime_context_ttl_secs,
+            );
             Self::ensure_regime_patch(state, regime.as_str());
             Self::observe_regime_drift(state, regime.as_str());
             let edge_threshold = state.lock().ok()
@@ -735,27 +739,65 @@ impl Engine {
     }
 
     /// 🌐 Mum dizisinden evolution::MarketRegime çıkar (IntelligenceHub'a yöne duyarlı sinyal).
-    /// AdxRegime'i momentumla zenginleştirir.
+    /// Tek-kaynak: mantık `logic::market_regime::classify_market_regime`'de (RegimeContext
+    /// detektörü ve backtest agregasyonu da aynı fn'i kullanır). Bu metot ince delege.
     pub(crate) fn classify_regime(candles: &[Candle]) -> crate::evolution::MarketRegime {
-        use crate::evolution::MarketRegime;
-        use crate::robot::logic::market_regime::{detect_adx_regime, AdxRegime};
-        if candles.len() < 20 { return MarketRegime::Unknown; }
-        let adx = detect_adx_regime(candles);
-        let recent = &candles[candles.len() - 20..];
-        let first = recent.first().map(|c| c.close).unwrap_or(0.0);
-        let last  = recent.last().map(|c| c.close).unwrap_or(0.0);
-        if first <= 0.0 { return MarketRegime::Unknown; }
-        let mom_pct = (last - first) / first * 100.0;
-        match adx {
-            AdxRegime::Volatile => MarketRegime::HighVolatility,
-            AdxRegime::Ranging  => MarketRegime::Ranging,
-            AdxRegime::Trending if mom_pct >  2.0 => MarketRegime::StrongUptrend,
-            AdxRegime::Trending if mom_pct >  0.0 => MarketRegime::WeakUptrend,
-            AdxRegime::Trending if mom_pct < -2.0 => MarketRegime::StrongDowntrend,
-            AdxRegime::Trending                   => MarketRegime::WeakDowntrend,
-            AdxRegime::Neutral if mom_pct.abs() < 0.5 => MarketRegime::LowVolatility,
-            AdxRegime::Neutral                        => MarketRegime::Unknown,
+        crate::robot::logic::market_regime::classify_market_regime(candles)
+    }
+
+    /// 🌐 ADIM 1 — Rejim bağlamı (cache'li, HTF-tercihli, seyrek). Cycle hot-path bunu
+    /// `classify_regime` yerine çağırır: TTL içinde cache'ten OKUR (her 500ms yeniden
+    /// hesaplamaz); bayat/yok ise pluggable dedektörle (`default_regime_detector()`:
+    /// math→onnx) yeniden üretir ve cache'e yazar. HTF dilimi yeterliyse (≥20 mum)
+    /// rejim ONDAN üretilir (hedef: AI/regime geniş TF'de seyrek çalışsın); yoksa base
+    /// mumlardan (cold-start = eski `classify_regime` ile birebir, aynı tek-kaynak fn).
+    /// `ttl_secs == 0` → cache bypass, her çağrı yeniden hesaplar (legacy davranış).
+    pub(crate) fn regime_for_cycle(
+        state: &Arc<Mutex<AppState>>,
+        symbol: &str,
+        base_candles: &[Candle],
+        base_interval: &str,
+        htf_slice: Option<&[Candle]>,
+        ttl_secs: u64,
+    ) -> crate::evolution::MarketRegime {
+        use crate::robot::logic::regime_context::{build_context, default_regime_detector};
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64).unwrap_or(0);
+        let ttl_ms = ttl_secs.saturating_mul(1000);
+
+        // 1) Taze cache var mı? (kısa read-lock)
+        if ttl_ms > 0 {
+            if let Ok(st) = state.lock() {
+                if let Ok(cache) = st.brain.regime_context.read() {
+                    if let Some(ctx) = cache.get(symbol) {
+                        if ctx.is_fresh(now_ms, ttl_ms) {
+                            return ctx.regime;
+                        }
+                    }
+                }
+            }
         }
+
+        // 2) Bayat/yok/bypass → yeniden üret. HTF yeterliyse ondan (geniş TF, seyrek),
+        //    değilse base (cold-start/legacy). source_interval gözlemlenebilirlik için.
+        let (det_candles, src) = match htf_slice {
+            Some(h) if h.len() >= 20 => (
+                h,
+                crate::robot::data_pipeline::orchestrator::DataPipeline::get_htf_interval(base_interval),
+            ),
+            _ => (base_candles, base_interval),
+        };
+        let detector = default_regime_detector();
+        let ctx = build_context(detector.as_ref(), det_candles, src, now_ms);
+        let regime = ctx.regime;
+        if ttl_ms > 0 {
+            if let Ok(st) = state.lock() {
+                if let Ok(mut cache) = st.brain.regime_context.write() {
+                    cache.insert(symbol.to_string(), ctx);
+                }
+            }
+        }
+        regime
     }
 
     /// 📏 ATR (Average True Range) — son N mum üzerinde Wilder-style.

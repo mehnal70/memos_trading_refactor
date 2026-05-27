@@ -133,6 +133,33 @@ pub fn detect_adx_regime(candles: &[Candle]) -> AdxRegime {
     }
 }
 
+/// 🌐 Mum dizisinden `evolution::MarketRegime` üretir — AdxRegime'i momentumla
+/// zenginleştiren tek-kaynak sınıflandırıcı. Hem canlı cycle (`Engine::classify_regime`
+/// → buna delege) hem RegimeContext detektörü (`MathRegimeDetector`) hem backtest
+/// rejim-agregasyonu bunu çağırır → rejim tanımı tek yerde. Eskiden bu mantık
+/// `loop_core.rs`'te Engine metoduydu; logic katmanına taşındı ki AI/ONNX detektörü
+/// de Engine'e bağlı olmadan aynı kaynağı kullanabilsin.
+pub fn classify_market_regime(candles: &[Candle]) -> crate::evolution::MarketRegime {
+    use crate::evolution::MarketRegime;
+    if candles.len() < 20 { return MarketRegime::Unknown; }
+    let adx = detect_adx_regime(candles);
+    let recent = &candles[candles.len() - 20..];
+    let first = recent.first().map(|c| c.close).unwrap_or(0.0);
+    let last  = recent.last().map(|c| c.close).unwrap_or(0.0);
+    if first <= 0.0 { return MarketRegime::Unknown; }
+    let mom_pct = (last - first) / first * 100.0;
+    match adx {
+        AdxRegime::Volatile => MarketRegime::HighVolatility,
+        AdxRegime::Ranging  => MarketRegime::Ranging,
+        AdxRegime::Trending if mom_pct >  2.0 => MarketRegime::StrongUptrend,
+        AdxRegime::Trending if mom_pct >  0.0 => MarketRegime::WeakUptrend,
+        AdxRegime::Trending if mom_pct < -2.0 => MarketRegime::StrongDowntrend,
+        AdxRegime::Trending                   => MarketRegime::WeakDowntrend,
+        AdxRegime::Neutral if mom_pct.abs() < 0.5 => MarketRegime::LowVolatility,
+        AdxRegime::Neutral                        => MarketRegime::Unknown,
+    }
+}
+
 /// Rejim başına etkin strateji setlerini döndürür.
 pub fn strategies_for_adx_regime(regime: AdxRegime) -> &'static [&'static str] {
     match regime {

@@ -92,6 +92,13 @@ pub struct BrainBox {
     /// pos.kind'e göre güncelliyor; spawn_scalp_swing_tuner okuyup auto_tune
     /// çağırıyor. HashMap kullanmıyoruz — sabit 2 kanal (Scalp/Swing).
     pub scalp_swing_stats: Arc<RwLock<crate::robot::scalp_swing::ScalpSwingStatsTable>>,
+
+    /// 🌐 Piyasa Rejim Bağlamı önbelleği (Adım 1 izolasyonu). Per-sembol son
+    /// `RegimeContext`; cycle hot-path her tur yeniden hesaplamak yerine TTL
+    /// içinde buradan okur (regime üretimi seyrek + HTF-tercihli). Pluggable
+    /// dedektör (math→onnx) `default_regime_detector()`'dan gelir. Boş başlar;
+    /// cold-start'ta cycle inline hesaplayıp doldurur. [[regime_context]]
+    pub regime_context: Arc<RwLock<crate::robot::logic::regime_context::RegimeCache>>,
 }
 
 /// 🧠 OTONOM DEĞERLENDİRME: `ml_engine::IntelligenceHub`'dan gelen ham 
@@ -286,6 +293,9 @@ impl AppState {
             scalp_swing_config: Arc::new(RwLock::new(scalp_swing_cfg)),
             scalp_swing_stats:  Arc::new(RwLock::new(
                 crate::robot::scalp_swing::ScalpSwingStatsTable::default(),
+            )),
+            regime_context: Arc::new(RwLock::new(
+                crate::robot::logic::regime_context::RegimeCache::new(),
             )),
         };
 
