@@ -1,8 +1,9 @@
 // src/robot/advanced_risk/kelly.rs - Optimal Pozisyon Büyüklüğü ve Dinamik Risk Ölçekleme
-use crate::prelude::*;
-#[derive(Default)] pub struct KellyCalculator;
-impl KellyCalculator { pub fn validate_allocation(&self, _sig: &Signal, _equity: f64) -> bool { true } }
-
+//
+// NOT: Gerçek boyutlama `KellyCriterion` ile yapılır (open_paper_position son 50 kapalı
+// işlemden win_prob/avg_win/avg_loss → calculate + calculate_dynamic_scale, half-Kelly +
+// loss-streak + ml_conf). Eski `KellyCalculator` stub'ı (validate_allocation→true) hiçbir
+// yerde kullanılmıyordu → kaldırıldı.
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

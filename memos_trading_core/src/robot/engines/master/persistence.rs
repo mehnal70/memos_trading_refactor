@@ -2,6 +2,26 @@
 // Faz 1 modülerleştirme: master.rs'ten taşındı (davranış birebir korunur).
 use super::*;
 
+/// Adım 5.5 — DB persist'lerini serileştiren süreç-global kilit. `spawn_blocking` ile
+/// arka plana atılan yazımların aynı anda birden çok SQLite bağlantısı açıp
+/// "database is locked" hatasıyla SESSİZCE kaybolmasını önler (yazımlar `let _ =`).
+/// Yazımlar kısa → contention düşük.
+static DB_PERSIST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Bloklayan DB yazımını async hot-path'i bloklamadan çalıştırır (Adım 5.5: "emir
+/// anında arka planda DB'ye yazılır"). Tokio runtime içindeysek `spawn_blocking`
+/// (detached, fire-and-forget) → execute_trade_cycle worker'ı SQLite I/O'da bloklanmaz;
+/// runtime yoksa (senkron testler / runtime-dışı çağrı) inline çalışır (backward-compat).
+/// Sıralama: yazımlar DB_PERSIST_LOCK ile serileşir; ardışık hızlı yazımlarda kesin
+/// "son kazanır" garantisi yok ama yazımlar sık (her open/close) → bayat snapshot
+/// hemen ezilir. Veri çağrı anında klonlandığı için kilit içeriği taşımaz.
+fn spawn_db_write<F: FnOnce() + Send + 'static>(f: F) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => { handle.spawn_blocking(f); }
+        Err(_) => f(),
+    }
+}
+
 impl Engine {
 
     /// Boot'ta SQLite şemasını defensive yaratır. Cold-start'ta candle tablosu
@@ -165,13 +185,13 @@ impl Engine {
             }
             Err(_) => return,
         };
-        let conn = match rusqlite::Connection::open(&db_path) {
-            Ok(c) => c,
-            Err(_) => return, // sessiz fail; bir sonraki snapshot dener
-        };
-        let _ = crate::persistence::writer::save_open_positions_snapshot(
-            &conn, &positions,
-        );
+        // Adım 5.5: yazım arka planda (detached) + serileştirilmiş → cycle bloklanmaz.
+        spawn_db_write(move || {
+            let _guard = DB_PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                let _ = crate::persistence::writer::save_open_positions_snapshot(&conn, &positions);
+            }
+        });
     }
 
     /// Boot'ta `account_state` tablosundan equity/peak/closed_count'ı okur ve
@@ -325,12 +345,41 @@ impl Engine {
             ),
             Err(_) => return,
         };
-        let conn = match rusqlite::Connection::open(&db_path) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let _ = crate::persistence::writer::save_account_state(
-            &conn, equity, peak, starting, closed_count,
-        );
+        // Adım 5.5: yazım arka planda (detached) + serileştirilmiş → cycle bloklanmaz.
+        spawn_db_write(move || {
+            let _guard = DB_PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                let _ = crate::persistence::writer::save_account_state(
+                    &conn, equity, peak, starting, closed_count,
+                );
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod persist_offload_tests {
+    use super::spawn_db_write;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn runs_inline_without_runtime() {
+        // Tokio runtime yokken (senkron bağlam) yazım inline çalışır (backward-compat).
+        let flag = Arc::new(AtomicBool::new(false));
+        let f = flag.clone();
+        spawn_db_write(move || f.store(true, Ordering::SeqCst));
+        assert!(flag.load(Ordering::SeqCst), "runtime yokken inline yazım hemen koşmalı");
+    }
+
+    #[tokio::test]
+    async fn offloads_under_runtime() {
+        // Runtime içindeyken spawn_blocking'e atılır (cycle bloklanmaz) ve nihayetinde koşar.
+        let flag = Arc::new(AtomicBool::new(false));
+        let f = flag.clone();
+        spawn_db_write(move || f.store(true, Ordering::SeqCst));
+        // Detached spawn_blocking → tamamlanması için kısa bekleme.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(flag.load(Ordering::SeqCst), "spawn_blocking arka planda koşmalı");
     }
 }
