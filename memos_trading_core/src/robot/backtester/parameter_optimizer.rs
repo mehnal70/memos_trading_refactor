@@ -49,17 +49,25 @@ pub struct ParameterOptimizer {
     /// Giriş kalitesi filtresi (#4): create_config → BacktestConfig.edge_min_score.
     /// Default None (filtre yok); `with_edge_min_score` ile set edilir.
     edge_min_score: Option<f64>,
+    /// Orderbook icrası (#c): create_config → BacktestConfig.orderbook_sim. Default None.
+    orderbook_sim: Option<String>,
 }
 
 impl ParameterOptimizer {
     pub fn new(symbol: String, interval: String, initial_balance: f64, strategy_name: String) -> Self {
-        Self { symbol, interval, initial_balance, strategy_name, edge_min_score: None }
+        Self { symbol, interval, initial_balance, strategy_name, edge_min_score: None, orderbook_sim: None }
     }
 
     /// Giriş kalitesi edge eşiğini ayarlar (TP/SL/PS aramasının tüm alt-backtest'leri
     /// canlının edge hunisini görür). `None` → filtre yok.
     pub fn with_edge_min_score(mut self, edge_min_score: Option<f64>) -> Self {
         self.edge_min_score = edge_min_score;
+        self
+    }
+
+    /// Orderbook icra profilini ayarlar (slippage). `None` → fill=close.
+    pub fn with_orderbook_sim(mut self, orderbook_sim: Option<String>) -> Self {
+        self.orderbook_sim = orderbook_sim;
         self
     }
 
@@ -165,6 +173,7 @@ impl ParameterOptimizer {
             strategy_params: None,
             commission_pct: 0.001,
             edge_min_score: self.edge_min_score,
+            orderbook_sim: self.orderbook_sim.clone(),
             ..Default::default()
         }
     }

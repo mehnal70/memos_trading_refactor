@@ -36,7 +36,7 @@ fn cfg(strategy: &str) -> BacktestConfig {
         commission_pct: 0.001, breakeven_at_rr: Some(1.0),
         atr_trail_mult: Some(2.0), partial_tp_ratio: None,
         position_profile: None, security_profile: None, use_htf: false,
-        edge_min_score: None,
+        edge_min_score: None, orderbook_sim: None,
     }
 }
 

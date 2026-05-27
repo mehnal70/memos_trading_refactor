@@ -24,6 +24,9 @@ pub struct WalkForwardConfig {
     /// → WF strateji seçimi de canlının edge hunisini görür. Default None (filtre yok).
     #[serde(default)]
     pub edge_min_score: Option<f64>,
+    /// Orderbook icrası (#c): BacktestConfig.orderbook_sim'e propagate. Default None.
+    #[serde(default)]
+    pub orderbook_sim: Option<String>,
 }
 
 impl Default for WalkForwardConfig {
@@ -39,6 +42,7 @@ impl Default for WalkForwardConfig {
             commission_pct: 0.001,
             use_htf: false,
             edge_min_score: None,
+            orderbook_sim: None,
         }
     }
 }
@@ -163,6 +167,7 @@ impl WalkForwardTester {
             commission_pct: self.config.commission_pct,
             use_htf: self.config.use_htf,
             edge_min_score: self.config.edge_min_score,
+            orderbook_sim: self.config.orderbook_sim.clone(),
             ..Default::default()
         };
 

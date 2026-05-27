@@ -50,6 +50,7 @@ fn cfg(symbol: &str, interval: &str, edge_min: Option<f64>) -> BacktestConfig {
         security_profile: None,
         use_htf: false,
         edge_min_score: edge_min,      // ← TEK değişken
+        orderbook_sim: None,
     }
 }
 

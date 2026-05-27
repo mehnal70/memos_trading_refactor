@@ -1,6 +1,7 @@
 // backtest_engine.rs - Yüksek Performanslı Otonom Simülasyon Motoru
 
 use crate::core::types::{Candle, StrategyParams, Signal};
+use crate::robot::order_management::{OrderBookSimulator, SyntheticBookConfig};
 use crate::robot::strategies::base::Strategy;
 use crate::Result;
 use crate::MemosTradingError;
@@ -45,6 +46,14 @@ pub struct BacktestConfig {
     /// = 0.20`. Backtest job env `BACKTEST_EDGE_FILTER` ile doldurur.
     #[serde(default)]
     pub edge_min_score: Option<f64>,
+    /// Opt-in orderbook icrası (#c): `Some(profil)` ise giriş/çıkış emirleri
+    /// `candle.close` etrafında üretilen sentetik L2 deftere karşı doldurulur →
+    /// slippage gerçekçiliği (canlı paper yolu `OrderBookSimulator`'la aynı motor).
+    /// Profil: `"illiquid"` (geniş spread/sığ derinlik) · diğer (`"liquid"`) likit.
+    /// `None` → fill = close (legacy, slippage'sız). Backtest job env
+    /// `BACKTEST_ORDERBOOK` ile doldurur. [[regime_context]]
+    #[serde(default)]
+    pub orderbook_sim: Option<String>,
 }
 
 fn default_commission() -> f64 { 0.001 }
@@ -182,10 +191,12 @@ impl Backtester {
                         let partial_threshold = p.entry_price + (p.tp_price - p.entry_price) * 0.5;
                         if candle.close >= partial_threshold {
                             let p_qty = p.qty * ratio;
-                            let fee = p_qty * (p.entry_price + candle.close) * self.config.commission_pct;
-                            let net = (candle.close - p.entry_price) * p_qty - fee;
-                            
-                            self.trades.push(self.create_sim_trade(p, candle, p_qty, net));
+                            // Çıkış = market SELL → orderbook açıksa slippage'li avg fill.
+                            let exit_fill = self.sim_fill_price(false, candle.close, p_qty);
+                            let fee = p_qty * (p.entry_price + exit_fill) * self.config.commission_pct;
+                            let net = (exit_fill - p.entry_price) * p_qty - fee;
+
+                            self.trades.push(self.create_sim_trade(p, candle, exit_fill, p_qty, net));
                             balance += net;
                             p.qty -= p_qty;
                             p.partial_tp_triggered = true;
@@ -195,9 +206,11 @@ impl Backtester {
 
                 // Tam Çıkış Kontrolü (SL veya TP)
                 if candle.close >= p.tp_price || candle.close <= eff_sl {
-                    let fee = p.qty * (p.entry_price + candle.close) * self.config.commission_pct;
-                    trade_net = (candle.close - p.entry_price) * p.qty - fee;
-                    self.trades.push(self.create_sim_trade(p, candle, p.qty, trade_net));
+                    // Tetik candle.close'da; gerçekleşen çıkış market SELL fill'i (slippage).
+                    let exit_fill = self.sim_fill_price(false, candle.close, p.qty);
+                    let fee = p.qty * (p.entry_price + exit_fill) * self.config.commission_pct;
+                    trade_net = (exit_fill - p.entry_price) * p.qty - fee;
+                    self.trades.push(self.create_sim_trade(p, candle, exit_fill, p.qty, trade_net));
                     close_signal = true;
                 }
             }
@@ -212,7 +225,8 @@ impl Backtester {
                 entry_strat.as_ref(), &entry_params, &sorted, idx, &htf_full, htf_bucket_secs,
                 self.config.edge_min_score,
             ) {
-                let entry = candle.close;
+                // Giriş = market BUY → orderbook açıksa slippage'li avg fill (yoksa close).
+                let entry = self.sim_fill_price(true, candle.close, self.config.max_position_size);
                 let sl = entry * (1.0 - self.config.stop_loss_pct / 100.0);
                 let trail_pct = self.config.atr_trail_mult.map(|m| Self::calc_atr_pct(&sorted[..=idx]) * m);
                 
@@ -242,17 +256,41 @@ impl Backtester {
         self.finalize_result(balance, max_drawdown)
     }
 
-    fn create_sim_trade(&self, p: &BacktestPos, c: &Candle, qty: f64, net: f64) -> SimulatedTrade {
+    /// `exit_price`: gerçekleşen çıkış fiyatı (orderbook açıkken slippage'li avg fill,
+    /// kapalıyken candle.close). PnL ve raporlama bu fiyattan hesaplanır.
+    fn create_sim_trade(&self, p: &BacktestPos, c: &Candle, exit_price: f64, qty: f64, net: f64) -> SimulatedTrade {
         SimulatedTrade {
             symbol: c.symbol.clone(),
             entry_price: p.entry_price,
-            exit_price: c.close,
+            exit_price,
             entry_time: p.entry_ts.to_rfc3339(),
             exit_time: c.timestamp.to_rfc3339(),
             amount: qty,
             pnl: net,
             pnl_pct: (net / (p.entry_price * qty + f64::EPSILON)) * 100.0,
             duration_minutes: (c.timestamp - p.entry_ts).num_minutes(),
+        }
+    }
+
+    /// Opt-in orderbook icra fiyatı (#c). `orderbook_sim` `Some(profil)` ise emir,
+    /// `mid` (=candle.close) etrafında üretilen sentetik L2 deftere karşı doldurulur;
+    /// dönen `avg_fill_price` slippage içerir (BUY ≥ mid, SELL ≤ mid). `None` → `mid`
+    /// (legacy, slippage'sız). Kısmi-doldurma olsa bile avg fill kullanılır (backtester
+    /// sabit-qty varsayar — basitleştirme). Geçersiz mid/qty → `mid`.
+    fn sim_fill_price(&self, is_buy: bool, mid: f64, qty: f64) -> f64 {
+        match self.config.orderbook_sim.as_deref() {
+            None => mid,
+            Some(profile) => {
+                if mid <= 0.0 || qty <= 0.0 { return mid; }
+                let cfg = if profile.eq_ignore_ascii_case("illiquid") {
+                    SyntheticBookConfig::illiquid(mid)
+                } else {
+                    SyntheticBookConfig::liquid(mid)
+                };
+                let sim = OrderBookSimulator::new(cfg);
+                let fr = if is_buy { sim.simulate_buy(qty) } else { sim.simulate_sell(qty) };
+                if fr.filled_qty > 0.0 && fr.avg_fill_price > 0.0 { fr.avg_fill_price } else { mid }
+            }
         }
     }
 
@@ -399,11 +437,36 @@ mod edge_filter_tests {
             security_profile: None,
             use_htf: false,
             edge_min_score: edge_min,
+            orderbook_sim: None,
         }
     }
 
     fn n_trades(edge_min: Option<f64>, candles: &[Candle]) -> usize {
         Backtester::new(cfg(edge_min)).run(candles).unwrap().total_trades
+    }
+
+    #[test]
+    fn sim_fill_price_none_is_mid_some_adds_slippage() {
+        // orderbook_sim=None → fill=mid (legacy). Some → BUY≥mid, SELL≤mid; illiquid
+        // likitten daha kötü (geniş spread). sim_fill_price private → bu modülden erişilir.
+        let mid = 100.0;
+        let bt_off = Backtester::new(cfg(None));
+        assert_eq!(bt_off.sim_fill_price(true, mid, 1.0), mid, "None → mid (slippage yok)");
+
+        let mut c_liq = cfg(None); c_liq.orderbook_sim = Some("liquid".into());
+        let bt_liq = Backtester::new(c_liq);
+        let buy_liq  = bt_liq.sim_fill_price(true,  mid, 1.0);
+        let sell_liq = bt_liq.sim_fill_price(false, mid, 1.0);
+        assert!(buy_liq  >= mid, "BUY fill ≥ mid (slippage yukarı): {buy_liq}");
+        assert!(sell_liq <= mid, "SELL fill ≤ mid (slippage aşağı): {sell_liq}");
+
+        let mut c_illq = cfg(None); c_illq.orderbook_sim = Some("illiquid".into());
+        let bt_illq = Backtester::new(c_illq);
+        let buy_illq = bt_illq.sim_fill_price(true, mid, 1.0);
+        assert!(buy_illq >= buy_liq, "illiquid BUY slippage'i ≥ liquid: {buy_illq} vs {buy_liq}");
+
+        // Geçersiz mid → mid (guard).
+        assert_eq!(bt_illq.sim_fill_price(true, 0.0, 1.0), 0.0);
     }
 
     #[test]

@@ -52,6 +52,7 @@ fn cfg(symbol: &str, interval: &str, tp: f64) -> BacktestConfig {
         security_profile: None,
         use_htf: false,
         edge_min_score: None,
+        orderbook_sim: None,
     }
 }
 

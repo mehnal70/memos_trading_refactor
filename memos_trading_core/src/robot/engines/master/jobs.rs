@@ -538,10 +538,18 @@ impl Engine {
             on_value,
         );
 
+        // Orderbook icrası (#c) — opt-in (default kapalı). BACKTEST_ORDERBOOK=liquid|illiquid
+        // ile açılır → WF seçimi + param araması slippage'i de görür (canlı paper ile aynı motor).
+        let orderbook_sim: Option<String> = std::env::var("BACKTEST_ORDERBOOK").ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("off")
+                && !s.eq_ignore_ascii_case("0") && !s.eq_ignore_ascii_case("none"));
+
         push_state_log(state, format!(
-            "🔬 Backtest başladı: sembol={} aralık={} kapital=${:.0} edge_filtre={}",
+            "🔬 Backtest başladı: sembol={} aralık={} kapital=${:.0} edge_filtre={} orderbook={}",
             symbol, interval, capital,
             edge_min.map(|t| format!("≥{:.2}", t)).unwrap_or_else(|| "kapalı".into()),
+            orderbook_sim.as_deref().unwrap_or("kapalı"),
         ));
 
         // Veri derinliği — env BACKTEST_CANDLE_LIMIT (default 5000). Sağlıklı
@@ -604,6 +612,7 @@ impl Engine {
                 commission_pct: 0.001,
                 use_htf,
                 edge_min_score: edge_min,
+                orderbook_sim: orderbook_sim.clone(),
             };
             let Some(wf_res) = WalkForwardTester::new(wf_cfg).run(&candles) else {
                 push_state_log(state, format!("🔬   aday {} → WF sonuç alınamadı", name));
@@ -633,7 +642,7 @@ impl Engine {
         // (PS) burada belirlenir ki best_params üç ekseni de kapsasın.
         let final_opt = crate::robot::backtester::parameter_optimizer::ParameterOptimizer::new(
             symbol.clone(), interval.clone(), capital, best_name.clone(),
-        ).with_edge_min_score(edge_min);
+        ).with_edge_min_score(edge_min).with_orderbook_sim(orderbook_sim.clone());
         let final_res = final_opt.optimize_parallel(
             &candles,
             (2.0, 8.0, 1.0),       // TP %2 → %8, step 1
@@ -672,6 +681,7 @@ impl Engine {
                     security_profile: None,
                     use_htf,
                     edge_min_score: edge_min,
+                    orderbook_sim: orderbook_sim.clone(),
                 };
                 crate::robot::ml_engine::hyperopt::HyperOpt::spec_search(
                     &candles, &specs, n_iters, &bt_cfg, Some(12345),

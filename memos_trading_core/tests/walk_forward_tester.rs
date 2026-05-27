@@ -42,6 +42,7 @@ fn cfg(strategy: &str, is: usize, oos: usize, step: usize) -> WalkForwardConfig 
         commission_pct: 0.001,
         use_htf: false,
         edge_min_score: None,
+        orderbook_sim: None,
     }
 }
 
