@@ -10,7 +10,8 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 use crate::evolution::AutonomousController;
 use crate::robot::ml_engine::{
-    DriftDetector, FeatureVector, GradientBoostedTrees, StrategyScorer, TradePatternClassifier,
+    DriftDetector, FeatureExtractor, FeatureVector, GradientBoostedTrees, StrategyScorer,
+    TradePatternClassifier,
 };
 use crate::core::types::{PositionId, Signal};
 
@@ -84,6 +85,21 @@ impl IntelligenceHub {
             Signal::Hold => 0.5,
         };
         Some(raw.clamp(0.0, 1.0))
+    }
+
+    /// 🌐 ADIM 1 — GBT'nin REJİM yön skoru ([-1,1]; poz=boğa, neg=ayı). `predict_confidence`'tan
+    /// farkı: bir ticaret sinyaline bağlı DEĞİL — modelin ham yön kanaati, rejim
+    /// sınıflandırmasını (`classify_market_regime_with_score`) beslemek için. Eğitilmemiş
+    /// veya veri yetersizse `None` → rejim saf matematiğe (momentum) düşer.
+    ///
+    /// NOT: GBT base-TF'de eğitiliyor (`build_training_set`); çağıran skoru modelin
+    /// eğitildiği TF'deki mumlardan üretmeli (train/infer tutarlılığı). Son ~200 mumdan
+    /// FeatureVector çıkarılır (predict cycle'la aynı pencere).
+    pub fn regime_direction_score(&self, candles: &[crate::core::types::Candle]) -> Option<f64> {
+        if !self.gbt.is_ready() || candles.len() < 30 { return None; }
+        let tail = &candles[candles.len().saturating_sub(200)..];
+        let fv = FeatureExtractor::extract(tail);
+        Some(self.gbt.predict(&fv).clamp(-1.0, 1.0))
     }
 
     // ── Drift-tetikli retrain cooldown yardımcıları ──────────────────────
@@ -199,6 +215,17 @@ mod tests {
         let hub = fresh_hub();
         assert!(hub.drift_retrain_armed(600),
             "ilk çağrıda (timestamp yok) armed olmalı");
+    }
+
+    #[test]
+    fn regime_direction_score_none_when_gbt_untrained() {
+        // Eğitilmemiş GBT (with_defaults) → is_ready false → None (rejim momentuma düşer).
+        let hub = fresh_hub();
+        let cs: Vec<crate::core::types::Candle> = (0..60).map(|i| crate::core::types::Candle {
+            timestamp: chrono::Utc::now(), open: 100.0, high: 101.0, low: 99.0,
+            close: 100.0 + i as f64, volume: 1.0, symbol: "T".into(), interval: "1m".into(),
+        }).collect();
+        assert_eq!(hub.regime_direction_score(&cs), None);
     }
 
     #[test]

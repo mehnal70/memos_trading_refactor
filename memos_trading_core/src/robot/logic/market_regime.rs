@@ -133,13 +133,17 @@ pub fn detect_adx_regime(candles: &[Candle]) -> AdxRegime {
     }
 }
 
-/// 🌐 Mum dizisinden `evolution::MarketRegime` üretir — AdxRegime'i momentumla
-/// zenginleştiren tek-kaynak sınıflandırıcı. Hem canlı cycle (`Engine::classify_regime`
-/// → buna delege) hem RegimeContext detektörü (`MathRegimeDetector`) hem backtest
-/// rejim-agregasyonu bunu çağırır → rejim tanımı tek yerde. Eskiden bu mantık
-/// `loop_core.rs`'te Engine metoduydu; logic katmanına taşındı ki AI/ONNX detektörü
-/// de Engine'e bağlı olmadan aynı kaynağı kullanabilsin.
-pub fn classify_market_regime(candles: &[Candle]) -> crate::evolution::MarketRegime {
+/// 🌐 Mum dizisinden `evolution::MarketRegime` üretir — AdxRegime (yapı/volatilite)
+/// + yön sınıflandırması. Tek-kaynak: canlı cycle (`Engine::classify_regime` → delege),
+/// RegimeContext detektörü, backtest agregasyonu hep buradan geçer.
+///
+/// `dir_score` (Adım 1 / AI): `Some(s)` ise Trending rejimin YÖNÜ bu skordan ([-1,1],
+/// poz=boğa/neg=ayı) belirlenir — GBT/ONNX gibi bir model rejim yönünü besler. `None`
+/// ise yön fiyat momentumundan (eski/saf-matematik davranış). Yapı (Ranging/Volatile/
+/// Neutral) her durumda matematik (ADX/ATR) — AI yalnız Trending yönünü zenginleştirir.
+pub fn classify_market_regime_with_score(
+    candles: &[Candle], dir_score: Option<f64>,
+) -> crate::evolution::MarketRegime {
     use crate::evolution::MarketRegime;
     if candles.len() < 20 { return MarketRegime::Unknown; }
     let adx = detect_adx_regime(candles);
@@ -151,13 +155,26 @@ pub fn classify_market_regime(candles: &[Candle]) -> crate::evolution::MarketReg
     match adx {
         AdxRegime::Volatile => MarketRegime::HighVolatility,
         AdxRegime::Ranging  => MarketRegime::Ranging,
-        AdxRegime::Trending if mom_pct >  2.0 => MarketRegime::StrongUptrend,
-        AdxRegime::Trending if mom_pct >  0.0 => MarketRegime::WeakUptrend,
-        AdxRegime::Trending if mom_pct < -2.0 => MarketRegime::StrongDowntrend,
-        AdxRegime::Trending                   => MarketRegime::WeakDowntrend,
+        AdxRegime::Trending => match dir_score {
+            // AI yön skoru [-1,1]: |s|>0.5 güçlü, işaret yön.
+            Some(s) if s >  0.5 => MarketRegime::StrongUptrend,
+            Some(s) if s >  0.0 => MarketRegime::WeakUptrend,
+            Some(s) if s < -0.5 => MarketRegime::StrongDowntrend,
+            Some(_)             => MarketRegime::WeakDowntrend,
+            // Skor yok → fiyat momentumu (eski davranış birebir).
+            None if mom_pct >  2.0 => MarketRegime::StrongUptrend,
+            None if mom_pct >  0.0 => MarketRegime::WeakUptrend,
+            None if mom_pct < -2.0 => MarketRegime::StrongDowntrend,
+            None                   => MarketRegime::WeakDowntrend,
+        },
         AdxRegime::Neutral if mom_pct.abs() < 0.5 => MarketRegime::LowVolatility,
         AdxRegime::Neutral                        => MarketRegime::Unknown,
     }
+}
+
+/// `classify_market_regime_with_score(candles, None)` — saf matematik (momentum yönü).
+pub fn classify_market_regime(candles: &[Candle]) -> crate::evolution::MarketRegime {
+    classify_market_regime_with_score(candles, None)
 }
 
 /// Rejim başına etkin strateji setlerini döndürür.
@@ -166,5 +183,50 @@ pub fn strategies_for_adx_regime(regime: AdxRegime) -> &'static [&'static str] {
         AdxRegime::Ranging  => &["RSI", "BB", "CCI", "WILLIAMS", "STOCHASTIC", "STOCH_RSI", "PRICE_ACTION", "SMC"],
         AdxRegime::Trending => &["SUPERTREND", "EMA", "MACD", "ICT_SWEEP", "ICT_OTE", "ICT_COMPOSITE", "ICT_OB", "ADX"],
         _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod regime_classify_tests {
+    use super::*;
+    use crate::evolution::MarketRegime;
+    use chrono::{TimeZone, Utc};
+
+    /// Sıkı bantlı, kararlı yükseliş → ADX yüksek (Trending), ATR% düşük → yön branch'i.
+    fn trending_up(n: usize) -> Vec<Candle> {
+        (0..n).map(|i| {
+            let c = 100.0 + i as f64;
+            Candle {
+                timestamp: Utc.timestamp_opt(1_700_000_000 + i as i64 * 60, 0).unwrap(),
+                open: c, high: c + 0.5, low: c - 0.5, close: c,
+                volume: 1.0, symbol: "T".into(), interval: "1m".into(),
+            }
+        }).collect()
+    }
+
+    #[test]
+    fn none_score_equals_classify_market_regime() {
+        // Tek-kaynak: with_score(None) ≡ classify_market_regime (parity/regresyon).
+        let cs = trending_up(60);
+        assert_eq!(
+            classify_market_regime_with_score(&cs, None),
+            classify_market_regime(&cs),
+        );
+    }
+
+    #[test]
+    fn trending_series_is_detected_as_trending() {
+        // Test serisi gerçekten Trending olmalı (yön branch'i çalışsın).
+        assert_eq!(detect_adx_regime(&trending_up(60)), AdxRegime::Trending);
+    }
+
+    #[test]
+    fn gbt_score_drives_trend_direction() {
+        // AYNI yükseliş serisi; yön YALNIZ dir_score'dan gelir (momentum boğa olsa bile).
+        let cs = trending_up(60);
+        assert_eq!(classify_market_regime_with_score(&cs, Some(0.8)),  MarketRegime::StrongUptrend);
+        assert_eq!(classify_market_regime_with_score(&cs, Some(0.3)),  MarketRegime::WeakUptrend);
+        assert_eq!(classify_market_regime_with_score(&cs, Some(-0.3)), MarketRegime::WeakDowntrend);
+        assert_eq!(classify_market_regime_with_score(&cs, Some(-0.8)), MarketRegime::StrongDowntrend);
     }
 }

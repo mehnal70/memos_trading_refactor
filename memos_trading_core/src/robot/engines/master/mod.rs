@@ -164,6 +164,13 @@ pub struct RuntimeTuning {
     /// rejimi yeniden hesaplamaz, RegimeContext cache'inden okur (seyrek tespit).
     /// 0 → her cycle yeniden hesapla (legacy per-cycle davranış). Default 900 (15 dk).
     pub regime_context_ttl_secs: u64,
+    /// 🌐 GBT rejim yönünü beslesin mi (Adım 1). true → RegimeContext refresh'inde GBT
+    /// skoru Trending yönünü belirler (seyrek, base-TF'de). Default true (hedef mimari).
+    pub regime_gbt: bool,
+    /// GBT'yi ESKİ gibi per-tick EDGE yolunda kullan (geri-dönüş anahtarı). true → her
+    /// cycle predict_confidence çağrılır (eski davranış). Default false → GBT yalnız
+    /// regime'de; edge saf matematik (momentum + yavaş brain.ml_confidence). [[regime_context]]
+    pub gbt_edge_legacy: bool,
 }
 
 impl Default for RuntimeTuning {
@@ -179,6 +186,8 @@ impl Default for RuntimeTuning {
             log_dataingest_cooldown_secs: 300,
             risk_block_log_cooldown_secs: 60,
             regime_context_ttl_secs: 900,
+            regime_gbt: true,
+            gbt_edge_legacy: false,
         }
     }
 }
@@ -203,6 +212,9 @@ impl RuntimeTuning {
             log_dataingest_cooldown_secs: env_parse("LOG_DATAINGEST_COOLDOWN_SECS", d.log_dataingest_cooldown_secs),
             risk_block_log_cooldown_secs: env_parse("RISK_BLOCK_LOG_COOLDOWN_SECS", d.risk_block_log_cooldown_secs),
             regime_context_ttl_secs: env_parse("REGIME_CONTEXT_TTL_SECS", d.regime_context_ttl_secs),
+            // REGIME_GBT default açık (0/false → kapat). GBT_EDGE_LEGACY default kapalı.
+            regime_gbt: !matches!(std::env::var("REGIME_GBT").ok().as_deref(), Some("0") | Some("false") | Some("off")),
+            gbt_edge_legacy: env_truthy("GBT_EDGE_LEGACY"),
         }
     }
 

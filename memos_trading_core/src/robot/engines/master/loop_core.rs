@@ -342,17 +342,16 @@ impl Engine {
                 }
             };
 
-            // ─── Faz 2 (FeatureExtract): edge skoru + ATR + (gerek olursa) ML feature.
-            // compute_edge_score momentum'u ATR ile normalize edip ML confidence ile harmanlar;
-            // başka indikatör/feature hesapları (S/R, regime classify) cycle dışında periyodik
-            // task'larda yapılır. Bu nokta tek atımlık feature extraction'ı temsil eder.
+            // ─── Faz 2 (FeatureExtract): edge skoru (HIZLI MATEMATİK MATRİSİ) ───────
+            // Hedef mimari: edge/sizing/trigger saf matematik; AI (GBT/ONNX) YALNIZ
+            // Adım 1 (regime) yolunda, geniş TF'de SEYREK çalışır. Bu yüzden GBT artık
+            // burada (per-tick) ÇAĞRILMAZ — yön kanaati regime'e taşındı (regime_for_cycle).
+            // ml_conf: retrain'in yavaş sharpe-bazlı brain.ml_confidence değeri (per-tick
+            // model inference değil). compute_edge_score momentum'u ATR ile normalize eder;
+            // ml_conf eşik kademesine (cold/warm/hot) girer.
             //
-            // GBT inference (cycle başına dinamik ml_confidence): IntelligenceHub.gbt
-            // hazırsa son ~50 mumdan FeatureVector → predict_confidence(fv, signal)
-            // hibrit conf üretir; yoksa eski statik brain.ml_confidence yolu.
-            // Sinyal yönü + GBT skoru uyumu cycle bazında değişir → her sembolde
-            // farklı conf üretebilir.
-            let ml_conf_used: f64 = {
+            // GBT_EDGE_LEGACY=1 → eski per-tick predict_confidence yolu (geri-dönüş).
+            let ml_conf_used: f64 = if tuning.gbt_edge_legacy {
                 let gbt_conf = if candles.len() >= 30 {
                     let tail = &candles[candles.len().saturating_sub(200)..];
                     let fv = crate::robot::ml_engine::FeatureExtractor::extract(tail);
@@ -361,15 +360,12 @@ impl Engine {
                             .and_then(|hub| hub.predict_confidence(&fv, &signal))
                     })
                 } else { None };
-                // GBT canlı çalıştığında brain.ml_confidence'ı last-cycle örneği
-                // ile güncelle → heartbeat ve operatör dinamik değeri görür.
-                // Yoksa retrain sonrası set edilen sharpe-bazlı statik değer kalır.
                 if let Some(c) = gbt_conf {
-                    if let Ok(mut st) = state.lock() {
-                        st.brain.ml_confidence = c;
-                    }
+                    if let Ok(mut st) = state.lock() { st.brain.ml_confidence = c; }
                 }
                 gbt_conf.unwrap_or(ml_confidence)
+            } else {
+                ml_confidence
             };
 
             let edge = Self::compute_edge_score(&candles, &signal, ml_conf_used);
@@ -381,7 +377,8 @@ impl Engine {
             // Adım 1: rejim bağlamı — cache'li, HTF-tercihli, seyrek (TTL). Cold-start
             // veya TTL=0'da eski classify_regime ile birebir (aynı tek-kaynak fn).
             let regime = Self::regime_for_cycle(
-                state, symbol, &candles, interval, htf_slice, tuning.regime_context_ttl_secs,
+                state, symbol, &candles, interval, htf_slice,
+                tuning.regime_context_ttl_secs, tuning.regime_gbt,
             );
             Self::ensure_regime_patch(state, regime.as_str());
             Self::observe_regime_drift(state, regime.as_str());
@@ -759,8 +756,12 @@ impl Engine {
         base_interval: &str,
         htf_slice: Option<&[Candle]>,
         ttl_secs: u64,
+        gbt_enabled: bool,
     ) -> crate::evolution::MarketRegime {
-        use crate::robot::logic::regime_context::{build_context, default_regime_detector};
+        use crate::robot::logic::regime_context::{build_context, default_regime_detector, RegimeContext};
+        use crate::robot::logic::market_regime::{
+            classify_market_regime_with_score, compute_adx_from_candles, compute_atr_pct,
+        };
         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64).unwrap_or(0);
         let ttl_ms = ttl_secs.saturating_mul(1000);
@@ -778,8 +779,8 @@ impl Engine {
             }
         }
 
-        // 2) Bayat/yok/bypass → yeniden üret. HTF yeterliyse ondan (geniş TF, seyrek),
-        //    değilse base (cold-start/legacy). source_interval gözlemlenebilirlik için.
+        // 2) Bayat/yok/bypass → yeniden üret (SEYREK: TTL'de bir / cold-start). Yapı
+        //    (Ranging/Volatile/Trending) HTF yeterliyse ondan (geniş TF), değilse base.
         let (det_candles, src) = match htf_slice {
             Some(h) if h.len() >= 20 => (
                 h,
@@ -787,8 +788,35 @@ impl Engine {
             ),
             _ => (base_candles, base_interval),
         };
-        let detector = default_regime_detector();
-        let ctx = build_context(detector.as_ref(), det_candles, src, now_ms);
+
+        // Adım 1 — GBT YÖN skoru: yalnız burada (refresh, seyrek), edge hot-path'inde
+        // DEĞİL. Skor GBT'nin eğitildiği base-TF mumlarından (train/infer tutarlılığı);
+        // Trending rejimin yönünü besler. Eğitilmemiş/kapalı → None → momentum yönü.
+        let dir_score: Option<f64> = if gbt_enabled {
+            state.lock().ok().and_then(|st| {
+                st.brain.intelligence_hub.read().ok()
+                    .and_then(|hub| hub.regime_direction_score(base_candles))
+            })
+        } else {
+            None
+        };
+
+        // dir_score varsa GBT-zenginleştirilmiş; yoksa pluggable detector (math; ileride
+        // onnx) — ikisi de tek-kaynak classify_market_regime_with_score'a iner.
+        let ctx = match dir_score {
+            Some(s) => RegimeContext {
+                regime: classify_market_regime_with_score(det_candles, Some(s)),
+                adx: compute_adx_from_candles(det_candles),
+                atr_pct: compute_atr_pct(det_candles),
+                source_interval: src.to_string(),
+                computed_at_ms: now_ms,
+                detector: "gbt",
+            },
+            None => {
+                let detector = default_regime_detector();
+                build_context(detector.as_ref(), det_candles, src, now_ms)
+            }
+        };
         let regime = ctx.regime;
         if ttl_ms > 0 {
             if let Ok(st) = state.lock() {
