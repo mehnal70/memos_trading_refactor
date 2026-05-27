@@ -199,9 +199,17 @@ impl Engine {
             candles.len(), strategy_name,
         ));
 
+        // Giriş kalitesi edge filtresi (#4): ML retrain'in TP/SL/PS aramasının da
+        // canlı edge hunisini görmesi için (best_params canlıya gider). run_backtest_job
+        // ile aynı env + default. bkz parse_edge_filter.
+        let edge_min = parse_edge_filter(
+            std::env::var("BACKTEST_EDGE_FILTER").ok(),
+            Some(Self::dynamic_edge_threshold(0.0)),
+            Self::dynamic_edge_threshold(0.0),
+        );
         let opt = crate::robot::backtester::parameter_optimizer::ParameterOptimizer::new(
             symbol.clone(), interval.clone(), capital, strategy_name.clone(),
-        );
+        ).with_edge_min_score(edge_min);
         let result = opt.random_search(&candles, 60)
             .map_err(|e| format!("random_search: {:?}", e))?;
 
@@ -481,9 +489,27 @@ impl Engine {
              st.config.db_path.clone(), st.finance.equity, use_htf)
         };
 
+        // Giriş kalitesi edge filtresi (#4): backtest, canlı process_symbol_cycle'ın
+        // `edge < edge_threshold ⇒ REDDEDİLDİ` hunisini aynalasın → param araması
+        // zayıf/ters-momentum girişlerini canlıyla aynı eler (özellikle 1m'de aşırı-işlem
+        // + komisyon erozyonunu keser). Env BACKTEST_EDGE_FILTER (bkz parse_edge_filter).
+        // Default (unset): canlıyı aynala → Some(dynamic_edge_threshold(0)) = 0.20
+        // (use_htf'in "canlıyı aynala" deseniyle aynı). 0/false → kapat (legacy).
+        // A/B (bt_ab_entry_quality, gerçek DB): 1m'de net kazanç (n %13-28↓, PF
+        // 1.65→1.91), 1h'de backtest dürüstleşir (canlının reddettiği zayıf-edge
+        // girişleri elenir). Daha katı için BACKTEST_EDGE_FILTER=0.35.
+        const EDGE_FILTER_DEFAULT_ON: bool = true;
+        let on_value = Self::dynamic_edge_threshold(0.0);
+        let edge_min = parse_edge_filter(
+            std::env::var("BACKTEST_EDGE_FILTER").ok(),
+            if EDGE_FILTER_DEFAULT_ON { Some(on_value) } else { None },
+            on_value,
+        );
+
         push_state_log(state, format!(
-            "🔬 Backtest başladı: sembol={} aralık={} kapital=${:.0}",
+            "🔬 Backtest başladı: sembol={} aralık={} kapital=${:.0} edge_filtre={}",
             symbol, interval, capital,
+            edge_min.map(|t| format!("≥{:.2}", t)).unwrap_or_else(|| "kapalı".into()),
         ));
 
         // Veri derinliği — env BACKTEST_CANDLE_LIMIT (default 5000). Sağlıklı
@@ -545,6 +571,7 @@ impl Engine {
                 interval: interval.clone(),
                 commission_pct: 0.001,
                 use_htf,
+                edge_min_score: edge_min,
             };
             let Some(wf_res) = WalkForwardTester::new(wf_cfg).run(&candles) else {
                 push_state_log(state, format!("🔬   aday {} → WF sonuç alınamadı", name));
@@ -574,7 +601,7 @@ impl Engine {
         // (PS) burada belirlenir ki best_params üç ekseni de kapsasın.
         let final_opt = crate::robot::backtester::parameter_optimizer::ParameterOptimizer::new(
             symbol.clone(), interval.clone(), capital, best_name.clone(),
-        );
+        ).with_edge_min_score(edge_min);
         let final_res = final_opt.optimize_parallel(
             &candles,
             (2.0, 8.0, 1.0),       // TP %2 → %8, step 1
@@ -612,6 +639,7 @@ impl Engine {
                     position_profile: None,
                     security_profile: None,
                     use_htf,
+                    edge_min_score: edge_min,
                 };
                 crate::robot::ml_engine::hyperopt::HyperOpt::spec_search(
                     &candles, &specs, n_iters, &bt_cfg, Some(12345),
@@ -932,5 +960,69 @@ impl Engine {
         } else {
             Ok(())
         }
+    }
+}
+
+/// `BACKTEST_EDGE_FILTER` env'ini giriş-kalitesi edge eşiğine çözer (#4). Backtest'in
+/// canlı `process_symbol_cycle` edge hunisini aynalamasını ayarlar:
+///   - unset → `default` (job'ın kararı; canlıyı aynalamak için Some(on_value))
+///   - "0"/"false"/"off"/"none" → `None` (filtre yok, legacy: her Buy'da açılış)
+///   - "1"/"true"/"on" → `Some(on_value)` (canlı cold-start eşiği = dynamic_edge_threshold(0))
+///   - geçerli pozitif float → `Some(f)` (daha katı/gevşek elle eşik)
+///   - geçersiz metin → `default` (sessiz fallback)
+/// Serbest fonksiyon → env'siz unit-test edilebilir.
+pub(crate) fn parse_edge_filter(
+    raw: Option<String>, default: Option<f64>, on_value: f64,
+) -> Option<f64> {
+    match raw {
+        None => default,
+        Some(v) => {
+            let v = v.trim();
+            if v.eq_ignore_ascii_case("0") || v.eq_ignore_ascii_case("false")
+                || v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("none") {
+                None
+            } else if v.eq_ignore_ascii_case("1") || v.eq_ignore_ascii_case("true")
+                || v.eq_ignore_ascii_case("on") {
+                Some(on_value)
+            } else {
+                match v.parse::<f64>() {
+                    Ok(f) if f > 0.0 => Some(f),
+                    Ok(_) => None,        // ≤0 → kapalı
+                    Err(_) => default,    // çöp girdi → default
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod edge_filter_tests {
+    use super::parse_edge_filter;
+
+    #[test]
+    fn unset_uses_default() {
+        assert_eq!(parse_edge_filter(None, Some(0.20), 0.20), Some(0.20));
+        assert_eq!(parse_edge_filter(None, None, 0.20), None);
+    }
+
+    #[test]
+    fn off_tokens_disable() {
+        for t in ["0", "false", "FALSE", "off", "none", "  off  "] {
+            assert_eq!(parse_edge_filter(Some(t.into()), Some(0.20), 0.20), None, "token={t}");
+        }
+    }
+
+    #[test]
+    fn on_tokens_use_on_value() {
+        for t in ["1", "true", "TRUE", "on"] {
+            assert_eq!(parse_edge_filter(Some(t.into()), None, 0.20), Some(0.20), "token={t}");
+        }
+    }
+
+    #[test]
+    fn float_override() {
+        assert_eq!(parse_edge_filter(Some("0.35".into()), None, 0.20), Some(0.35));
+        assert_eq!(parse_edge_filter(Some("-1".into()), Some(0.20), 0.20), None); // ≤0 → kapalı
+        assert_eq!(parse_edge_filter(Some("çöp".into()), Some(0.20), 0.20), Some(0.20)); // fallback
     }
 }

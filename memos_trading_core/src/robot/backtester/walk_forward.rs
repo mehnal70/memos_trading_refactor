@@ -20,6 +20,10 @@ pub struct WalkForwardConfig {
     /// Multi-TF hizalama: BacktestConfig.use_htf'e propagate edilir → WF strateji
     /// seçimi de canlıyla aynı HTF filtresini görür. Default false.
     pub use_htf: bool,
+    /// Giriş kalitesi filtresi (#4): BacktestConfig.edge_min_score'a propagate edilir
+    /// → WF strateji seçimi de canlının edge hunisini görür. Default None (filtre yok).
+    #[serde(default)]
+    pub edge_min_score: Option<f64>,
 }
 
 impl Default for WalkForwardConfig {
@@ -34,6 +38,7 @@ impl Default for WalkForwardConfig {
             interval: "1h".to_owned(),
             commission_pct: 0.001,
             use_htf: false,
+            edge_min_score: None,
         }
     }
 }
@@ -157,6 +162,7 @@ impl WalkForwardTester {
             strategy_name: self.config.strategy_name.clone(),
             commission_pct: self.config.commission_pct,
             use_htf: self.config.use_htf,
+            edge_min_score: self.config.edge_min_score,
             ..Default::default()
         };
 

@@ -32,7 +32,7 @@ fn base_cfg(strategy: &str) -> BacktestConfig {
         position_profile: None, security_profile: None,
         commission_pct: 0.001, strategy_params: None,
         breakeven_at_rr: None, atr_trail_mult: None, partial_tp_ratio: None,
-        use_htf: false,
+        use_htf: false, edge_min_score: None,
     }
 }
 

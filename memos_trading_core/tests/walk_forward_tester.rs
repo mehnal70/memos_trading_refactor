@@ -41,6 +41,7 @@ fn cfg(strategy: &str, is: usize, oos: usize, step: usize) -> WalkForwardConfig 
         interval: "1h".into(),
         commission_pct: 0.001,
         use_htf: false,
+        edge_min_score: None,
     }
 }
 

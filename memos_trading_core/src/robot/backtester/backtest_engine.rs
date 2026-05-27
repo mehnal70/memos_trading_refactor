@@ -34,6 +34,17 @@ pub struct BacktestConfig {
     /// ile açar. [[project_param_modularity]]
     #[serde(default)]
     pub use_htf: bool,
+    /// Giriş kalitesi filtresi (#4): `Signal::Buy` üretilse bile pozisyon yalnız
+    /// edge skoru bu eşiği aşarsa açılır → canlı `process_symbol_cycle`'ın
+    /// `compute_edge_score >= edge_threshold` hunisini AYNALAR (tek-kaynak). Eskiden
+    /// backtester her Buy'da açıyordu; canlı ise zayıf/ters-momentum girişleri
+    /// reddediyordu → 1m'de backtest aşırı-işlem + komisyon erozyonu gösterip param
+    /// aramasını yanıltıyordu. `None` → filtre yok (legacy, backward-compat: screener/
+    /// A-B/eski testler). `Some(t)` → `Engine::compute_edge_score_with(window, Buy,
+    /// ml=0, penalty=0.4) >= t` şartı. Canlı cold-start eşiği `dynamic_edge_threshold(0)
+    /// = 0.20`. Backtest job env `BACKTEST_EDGE_FILTER` ile doldurur.
+    #[serde(default)]
+    pub edge_min_score: Option<f64>,
 }
 
 fn default_commission() -> f64 { 0.001 }
@@ -199,6 +210,7 @@ impl Backtester {
             // Stratejik Giriş Kontrolü
             if pos.is_none() && Self::entry_long_signal(
                 entry_strat.as_ref(), &entry_params, &sorted, idx, &htf_full, htf_bucket_secs,
+                self.config.edge_min_score,
             ) {
                 let entry = candle.close;
                 let sl = entry * (1.0 - self.config.stop_loss_pct / 100.0);
@@ -291,6 +303,13 @@ impl Backtester {
     /// Pencere son `W` bara sınırlanır: stratejilerin azami lookback'i (ICT_COMPOSITE
     /// ~66 bar) çok altında kalır, böylece per-bar maliyet O(W) sabit → derin seride
     /// (BACKTEST_CANDLE_LIMIT yüksek) bile backtest O(n·W), O(n²) değil.
+    ///
+    /// `edge_min` (#4 giriş kalitesi): `Some(t)` ise Buy sinyali ek olarak edge skoru
+    /// eşiğini geçmeli — canlı `process_symbol_cycle`'daki `edge < edge_threshold ⇒
+    /// REDDEDİLDİ` kapısının BİREBİR aynısı (`compute_edge_score_with`, ml_confidence=0
+    /// çünkü harness'te GBT yok, ters-momentum cezası 0.4 = canlı default). Böylece
+    /// param araması zayıf/ters-momentum girişlerini canlıyla aynı şekilde eler.
+    /// `None` → filtre yok (legacy).
     fn entry_long_signal(
         strat: &dyn Strategy,
         params: &StrategyParams,
@@ -298,6 +317,7 @@ impl Backtester {
         idx: usize,
         htf_full: &[Candle],
         htf_bucket_secs: i64,
+        edge_min: Option<f64>,
     ) -> bool {
         const W: usize = 200;
         if idx < 20 { return false; }
@@ -313,7 +333,19 @@ impl Backtester {
         } else {
             None
         };
-        matches!(strat.generate_signal(window, params, None, htf), Ok(Signal::Buy))
+        if !matches!(strat.generate_signal(window, params, None, htf), Ok(Signal::Buy)) {
+            return false;
+        }
+        // Giriş kalitesi kapısı: canlı motorla tek-kaynak edge hunisi.
+        match edge_min {
+            Some(t) => {
+                let edge = crate::robot::engines::Engine::compute_edge_score_with(
+                    window, &Signal::Buy, 0.0, 0.4,
+                );
+                edge >= t
+            }
+            None => true,
+        }
     }
 
     fn calc_atr_pct(candles: &[Candle]) -> f64 {
@@ -322,5 +354,82 @@ impl Backtester {
         let tr = (candles[n-1].high - candles[n-1].low)
             .max((candles[n-1].high - candles[n-2].close).abs());
         (tr / candles[n-1].close) * 100.0
+    }
+}
+
+#[cfg(test)]
+mod edge_filter_tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    /// Sürüklenme + salınımlı sentetik seri → MA_CROSSOVER (DEFAULT) tekrar tekrar
+    /// Buy üretir, fiyat yükseldiğinden TP devreye girip pozisyonlar döner.
+    fn synthetic_uptrend(n: usize) -> Vec<Candle> {
+        (0..n).map(|i| {
+            let f = i as f64;
+            let close = 100.0 + 0.05 * f + 6.0 * (f * 0.3).sin();
+            Candle {
+                timestamp: Utc.timestamp_opt(1_700_000_000 + (i as i64) * 3600, 0).unwrap(),
+                open: close,
+                high: close * 1.004,
+                low: close * 0.996,
+                close,
+                volume: 1_000.0,
+                symbol: "TEST".into(),
+                interval: "1h".into(),
+            }
+        }).collect()
+    }
+
+    fn cfg(edge_min: Option<f64>) -> BacktestConfig {
+        BacktestConfig {
+            symbol: "TEST".into(),
+            interval: "1h".into(),
+            initial_balance: 10_000.0,
+            max_position_size: 1.0,
+            take_profit_pct: 3.0,
+            stop_loss_pct: 1.5,
+            strategy_name: "DEFAULT".into(),
+            strategy_params: None,
+            commission_pct: 0.0004,
+            breakeven_at_rr: Some(1.0),
+            atr_trail_mult: Some(2.0),
+            partial_tp_ratio: None,
+            position_profile: None,
+            security_profile: None,
+            use_htf: false,
+            edge_min_score: edge_min,
+        }
+    }
+
+    fn n_trades(edge_min: Option<f64>, candles: &[Candle]) -> usize {
+        Backtester::new(cfg(edge_min)).run(candles).unwrap().total_trades
+    }
+
+    #[test]
+    fn none_means_legacy_with_trades() {
+        // edge_min_score=None → eski davranış: filtre yok, trend serisinde işlem üretir.
+        let candles = synthetic_uptrend(400);
+        assert!(n_trades(None, &candles) > 0, "filtre kapalı baz işlem üretmeli");
+    }
+
+    #[test]
+    fn threshold_above_max_blocks_all_entries() {
+        // Edge skoru [0,1]'e clamp'li → eşik 2.0 hiçbir zaman aşılmaz → 0 işlem.
+        // Kapının gerçekten Buy'ı kestiğini kanıtlar (yalnız wiring değil semantik).
+        let candles = synthetic_uptrend(400);
+        assert_eq!(n_trades(Some(2.0), &candles), 0, "eşik>1.0 tüm girişleri engellemeli");
+    }
+
+    #[test]
+    fn filter_changes_behavior_and_is_deterministic() {
+        // Canlı cold-start eşiği (0.20) işlem sayısını filtresizden FARKLI kılmalı
+        // (filtre fiilen devrede) ve iki koşu birebir aynı olmalı (determinizm).
+        let candles = synthetic_uptrend(400);
+        let none = n_trades(None, &candles);
+        let f1 = n_trades(Some(0.20), &candles);
+        let f2 = n_trades(Some(0.20), &candles);
+        assert_eq!(f1, f2, "backtest deterministik olmalı");
+        assert_ne!(f1, none, "0.20 eşiği filtresizden farklı bir giriş seti vermeli");
     }
 }

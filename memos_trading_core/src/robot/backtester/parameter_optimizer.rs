@@ -46,11 +46,21 @@ pub struct ParameterOptimizer {
     interval: String,
     initial_balance: f64,
     strategy_name: String,
+    /// Giriş kalitesi filtresi (#4): create_config → BacktestConfig.edge_min_score.
+    /// Default None (filtre yok); `with_edge_min_score` ile set edilir.
+    edge_min_score: Option<f64>,
 }
 
 impl ParameterOptimizer {
     pub fn new(symbol: String, interval: String, initial_balance: f64, strategy_name: String) -> Self {
-        Self { symbol, interval, initial_balance, strategy_name }
+        Self { symbol, interval, initial_balance, strategy_name, edge_min_score: None }
+    }
+
+    /// Giriş kalitesi edge eşiğini ayarlar (TP/SL/PS aramasının tüm alt-backtest'leri
+    /// canlının edge hunisini görür). `None` → filtre yok.
+    pub fn with_edge_min_score(mut self, edge_min_score: Option<f64>) -> Self {
+        self.edge_min_score = edge_min_score;
+        self
     }
 
     /// Grid Search: Tüm kombinasyonları paralel olarak test eder.
@@ -154,6 +164,7 @@ impl ParameterOptimizer {
             strategy_name: self.strategy_name.clone(),
             strategy_params: None,
             commission_pct: 0.001,
+            edge_min_score: self.edge_min_score,
             ..Default::default()
         }
     }
