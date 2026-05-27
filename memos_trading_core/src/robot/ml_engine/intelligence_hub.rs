@@ -47,6 +47,12 @@ pub struct IntelligenceHub {
     /// ve burayı doldurur. `is_ready()` false ise cycle eski statik
     /// `brain.ml_confidence`'a düşer (Optional inference yolu).
     pub gbt: GradientBoostedTrees,
+
+    /// GBT'nin EĞİTİLDİĞİ zaman dilimi (örn. "4h" HTF, "1m" base). Rejim yön skoru
+    /// (`regime_direction_score`) bu TF'deki mumlarla beslenmeli (train/infer
+    /// tutarlılığı) → `regime_for_cycle` buna bakıp doğru mum dizisini seçer.
+    /// `None` → henüz eğitilmedi. [[regime_context]]
+    pub gbt_trained_interval: Option<String>,
 }
 
 impl IntelligenceHub {
@@ -64,6 +70,7 @@ impl IntelligenceHub {
             drift_history: VecDeque::with_capacity(100), // Maksimum 100 döngü kapasiteli temiz kuyruk
             last_drift_retrain_at: None,
             gbt: GradientBoostedTrees::with_defaults(),
+            gbt_trained_interval: None,
         }
     }
 
@@ -220,7 +227,9 @@ mod tests {
     #[test]
     fn regime_direction_score_none_when_gbt_untrained() {
         // Eğitilmemiş GBT (with_defaults) → is_ready false → None (rejim momentuma düşer).
+        // gbt_trained_interval de None → regime_for_cycle GBT'yi hiç çağırmaz.
         let hub = fresh_hub();
+        assert_eq!(hub.gbt_trained_interval, None, "fresh hub eğitilmemiş");
         let cs: Vec<crate::core::types::Candle> = (0..60).map(|i| crate::core::types::Candle {
             timestamp: chrono::Utc::now(), open: 100.0, high: 101.0, low: 99.0,
             close: 100.0 + i as f64, volume: 1.0, symbol: "T".into(), interval: "1m".into(),

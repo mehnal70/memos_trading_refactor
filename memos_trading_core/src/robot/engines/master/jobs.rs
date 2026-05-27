@@ -252,8 +252,38 @@ impl Engine {
             .and_then(|s| s.parse::<usize>().ok()).unwrap_or(50);
         let gbt_forward_bars: usize = std::env::var("GBT_FORWARD_BARS").ok()
             .and_then(|s| s.parse::<usize>().ok()).unwrap_or(5);
+
+        // 🌐 HEDEF MİMARİ: GBT regime AI'ı GENİŞ TF'de (4h/1d) çalışmalı → modeli de
+        // HTF mumlarıyla eğit (regime_for_cycle skoru aynı TF'den besler, train/infer
+        // tutarlı). multi_tf açık + GBT_TRAIN_HTF (default true) + HTF DB'de yeterli ise
+        // HTF; değilse base TF'ye düş (eski davranış). HTF mumları candles tablosunda
+        // gerçek interval string'iyle ("4h") durur → doğrudan read_candles.
+        let multi_tf_enabled = state.lock().ok()
+            .and_then(|st| st.brain.parameters.read().ok().map(|p| p.multi_tf.enabled))
+            .unwrap_or(true);
+        let gbt_train_htf = !matches!(
+            std::env::var("GBT_TRAIN_HTF").ok().as_deref(),
+            Some("0") | Some("false") | Some("off"),
+        );
+        let htf_interval = crate::robot::data_pipeline::orchestrator::DataPipeline
+            ::get_htf_interval(&interval);
+        // build_training_set(window+forward) için ≥ ~20 örnek → en az ~window+forward+20 mum.
+        const GBT_HTF_MIN_BARS: usize = 80;
+        let htf_candles: Vec<crate::core::types::Candle> =
+            if gbt_train_htf && multi_tf_enabled && htf_interval != interval {
+                crate::persistence::reader::read_candles(&db_path, &symbol, htf_interval, 2000)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+        let (train_slice, train_interval): (&[crate::core::types::Candle], &str) =
+            if htf_candles.len() >= GBT_HTF_MIN_BARS {
+                (&htf_candles, htf_interval)
+            } else {
+                (&candles, interval.as_str())
+            };
         let gbt_ds = crate::robot::ml_engine::build_training_set(
-            &candles, gbt_window_bars, gbt_forward_bars,
+            train_slice, gbt_window_bars, gbt_forward_bars,
         );
         if gbt_ds.len() < 20 {
             push_state_log(state, format!(
@@ -273,11 +303,13 @@ impl Engine {
                 if let Ok(mut st) = state.lock() {
                     if let Ok(mut hub) = st.brain.intelligence_hub.write() {
                         hub.gbt = gbt;
+                        // Hangi TF'de eğitildi → regime_for_cycle skoru aynı TF'den besler.
+                        hub.gbt_trained_interval = Some(train_interval.to_string());
                     }
                     let acc_str = if oos_acc.is_nan() { "-".into() }
                                   else { format!("{:.1}%", oos_acc) };
                     st.push_log(format!(
-                        "🌲 GBT ✓ n_est={n_est} lr={lr:.2} depth={depth} | OOS acc={acc_str} | {} örnek",
+                        "🌲 GBT ✓ TF={train_interval} n_est={n_est} lr={lr:.2} depth={depth} | OOS acc={acc_str} | {} örnek",
                         gbt_ds.len(),
                     ));
                 }

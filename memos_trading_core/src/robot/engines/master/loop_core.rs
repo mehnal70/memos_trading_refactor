@@ -790,12 +790,20 @@ impl Engine {
         };
 
         // Adım 1 — GBT YÖN skoru: yalnız burada (refresh, seyrek), edge hot-path'inde
-        // DEĞİL. Skor GBT'nin eğitildiği base-TF mumlarından (train/infer tutarlılığı);
-        // Trending rejimin yönünü besler. Eğitilmemiş/kapalı → None → momentum yönü.
+        // DEĞİL. GBT EĞİTİLDİĞİ TF'deki mumlarla beslenir (train/infer tutarlılığı):
+        // HTF'de eğitildiyse (hedef mimari) ve det HTF ise det_candles; base eğitimliyse
+        // base_candles; eşleşme yoksa (HTF eğitimli ama HTF mum yok vb.) None → momentum
+        // yönü. Trending rejimin yönünü besler; eğitilmemiş/kapalı → None.
         let dir_score: Option<f64> = if gbt_enabled {
             state.lock().ok().and_then(|st| {
-                st.brain.intelligence_hub.read().ok()
-                    .and_then(|hub| hub.regime_direction_score(base_candles))
+                st.brain.intelligence_hub.read().ok().and_then(|hub| {
+                    let input: Option<&[Candle]> = match hub.gbt_trained_interval.as_deref() {
+                        Some(ti) if ti == src           => Some(det_candles),
+                        Some(ti) if ti == base_interval => Some(base_candles),
+                        _ => None,
+                    };
+                    input.and_then(|c| hub.regime_direction_score(c))
+                })
             })
         } else {
             None
