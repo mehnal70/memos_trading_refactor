@@ -45,7 +45,6 @@ pub mod backtester;
 //pub mod automl;
 //pub mod logger;
 //pub mod file_logger;
-//pub mod persistence;
 //pub mod backtest_scheduler; //dosya
 //pub mod config_helpers;     //dosya
 //pub mod optimizer;          //dosya
