@@ -33,6 +33,7 @@ impl Engine {
         //     her restart equity'i 10000'e döndürüyordu → 44 saatte ~3500 USDT
         //     PnL kaybolmuş gibi görünüyordu (trades.jsonl ile tutarsızlık).
         Self::hydrate_account_state_from_db(&state);
+        Self::hydrate_symbol_status_from_db(&state);
 
         // 1. INFRASTRUCTURE FLEET (WS, Diagnostic, Pipeline)
         Self::spawn_infrastructure_fleet(Arc::clone(&state)).await;

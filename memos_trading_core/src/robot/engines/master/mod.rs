@@ -91,6 +91,43 @@ pub fn is_delisted_skipped(symbol: &str) -> bool {
     delisted_skip_set().lock().ok().map(|s| s.contains(symbol)).unwrap_or(false)
 }
 
+/// 🗂️ Binance exchangeInfo sembol-statü registry'si (symbol → status, örn "TRADING"/
+/// "BREAK"/"HALT"). Periyodik `run_symbol_status_refresh` doldurup DB'ye persist eder;
+/// boot'ta `hydrate_symbol_status_from_db` DB'den yükler. `symbol_eligible_for_live`
+/// okur → status != TRADING olan sembol (ALPACAUSDT BREAK gibi halted/delisted)
+/// otoritatif dışlanır (heuristic'e gerek yok; de/re-list otomatik yansır).
+static SYMBOL_STATUS: std::sync::OnceLock<
+    std::sync::RwLock<std::collections::HashMap<String, String>>
+> = std::sync::OnceLock::new();
+
+fn symbol_status_map() -> &'static std::sync::RwLock<std::collections::HashMap<String, String>> {
+    SYMBOL_STATUS.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Registry'yi tam snapshot ile değiştir (exchangeInfo'dan ya da DB'den).
+pub fn set_symbol_statuses(entries: &[(String, String)]) {
+    if let Ok(mut m) = symbol_status_map().write() {
+        m.clear();
+        for (sym, status) in entries {
+            m.insert(sym.clone(), status.clone());
+        }
+    }
+}
+
+/// Sembol işlem görebilir mi: status == "TRADING" YA DA registry'de yok (bilinmiyor →
+/// izin ver; registry dolmadan startup kırılmasın). Yalnız açıkça TRADING-dışı → false.
+pub fn is_symbol_tradeable(symbol: &str) -> bool {
+    match symbol_status_map().read() {
+        Ok(m) => m.get(symbol).map(|s| s == "TRADING").unwrap_or(true),
+        Err(_) => true,
+    }
+}
+
+/// Registry'deki sembol sayısı (teşhis/log).
+pub fn symbol_status_registry_len() -> usize {
+    symbol_status_map().read().map(|m| m.len()).unwrap_or(0)
+}
+
 fn trail_obs_queue() -> &'static std::sync::Mutex<
     std::collections::VecDeque<crate::robot::parameters::PendingTrailObservation>
 > {
@@ -352,6 +389,9 @@ impl RuntimeTuning {
         // Delisted tespit edilmiş sembol → her zaman uygun değil (tüm seçim noktaları
         // bu gate'i kullandığı için tek noktada dışlanır).
         if is_delisted_skipped(symbol) { return false; }
+        // exchangeInfo statü registry'si: açıkça TRADING-dışı (BREAK/HALT/delisted) → uygun değil.
+        // (Bilinmeyen sembol registry dolmadan izinli; refresh job + boot hydrate doldurur.)
+        if !is_symbol_tradeable(symbol) { return false; }
         let ex = crate::core::types::Exchange::classify(symbol);
         ex.has_live_feed() || self.force_live_exchanges.contains(&ex)
     }

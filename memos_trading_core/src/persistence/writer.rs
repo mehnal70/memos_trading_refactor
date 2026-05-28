@@ -158,6 +158,33 @@ pub fn save_account_state(
     Ok(())
 }
 
+/// 🗂️ Binance exchangeInfo sembol-statü registry'sini DB'ye persist eder (bulk upsert).
+/// `symbol_status(symbol PK, status, updated_at)`. Restart'ta `load_symbol_statuses`
+/// okuyup cache'i hidrate eder → ilk exchangeInfo fetch'ini beklemeden BREAK/delisted
+/// semboller dışlanır. Tek tx ile ~2000 satır hızlı yazılır.
+pub fn save_symbol_statuses(conn: &Connection, entries: &[(String, String)]) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS symbol_status (
+            symbol TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );"
+    ).map_err(|e| crate::MemosTradingError::Database(format!("symbol_status tablo: {}", e)))?;
+
+    let now = Utc::now().to_rfc3339();
+    let tx = conn.unchecked_transaction()
+        .map_err(|e| crate::MemosTradingError::Database(format!("symbol_status tx: {}", e)))?;
+    for (sym, status) in entries {
+        tx.execute(
+            "INSERT INTO symbol_status (symbol, status, updated_at) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(symbol) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at",
+            params![sym, status, now],
+        ).map_err(|e| crate::MemosTradingError::Database(format!("symbol_status upsert: {}", e)))?;
+    }
+    tx.commit().map_err(|e| crate::MemosTradingError::Database(format!("symbol_status commit: {}", e)))?;
+    Ok(())
+}
+
 /// 📥 ADLİ MUM KAYDI: Ana `candles` tablosuna timestamp=INTEGER (ms) formatında yazar.
 /// Eski per-symbol `candles_{symbol}_{interval}` şeması terkedildi; tüm okuyucu/yazıcılar
 /// ana tabloda hizalı. Repository init_schema şemasıyla birebir aynı kolonlar kullanılır;

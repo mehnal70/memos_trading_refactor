@@ -160,6 +160,68 @@ impl Engine {
         }
     }
 
+    /// 🗂️ Sembol-statü registry refresh: Binance exchangeInfo'dan tüm sembollerin
+    /// `status`'ünü (TRADING/BREAK/HALT…) çeker, cache'i günceller + DB'ye persist eder.
+    /// `symbol_eligible_for_live` bunu okur → halted/delisted (ALPACAUSDT BREAK gibi)
+    /// otoritatif dışlanır; de/re-list otomatik yansır. Public endpoint (key gerekmez,
+    /// paper modda da çalışır). Scheduler periyodik çağırır + boot warmup'ta bir kez.
+    pub(crate) async fn run_symbol_status_refresh(state: &Arc<Mutex<AppState>>) -> std::result::Result<(), String> {
+        let (market, db_path) = {
+            let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
+            (st.config.market.clone(), st.config.db_path.clone())
+        };
+        let url = if market.eq_ignore_ascii_case("futures") {
+            "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        } else {
+            "https://api.binance.com/api/v3/exchangeInfo"
+        };
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|e| format!("client: {}", e))?;
+        let v: serde_json::Value = client.get(url).send().await
+            .map_err(|e| format!("exchangeInfo fetch: {}", e))?
+            .json().await
+            .map_err(|e| format!("exchangeInfo parse: {}", e))?;
+        let arr = v.get("symbols").and_then(|s| s.as_array())
+            .ok_or_else(|| "exchangeInfo: symbols dizisi yok".to_string())?;
+        let mut entries: Vec<(String, String)> = Vec::with_capacity(arr.len());
+        for s in arr {
+            if let (Some(sym), Some(status)) = (
+                s.get("symbol").and_then(|x| x.as_str()),
+                s.get("status").and_then(|x| x.as_str()),
+            ) {
+                entries.push((sym.to_string(), status.to_string()));
+            }
+        }
+        if entries.is_empty() {
+            return Err("exchangeInfo: 0 sembol döndü".to_string());
+        }
+        let n = entries.len();
+        let n_break = entries.iter().filter(|(_, s)| s != "TRADING").count();
+
+        // Hot-path eligibility'nin okuduğu cache'i güncelle.
+        set_symbol_statuses(&entries);
+
+        // DB'ye persist (restart hydrate için) — senkron, spawn_blocking.
+        let db_clone = db_path.clone();
+        let entries_clone = entries.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(conn) = rusqlite::Connection::open(&db_clone) {
+                let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+                if let Err(e) = crate::persistence::writer::save_symbol_statuses(&conn, &entries_clone) {
+                    log::warn!("symbol_status persist: {:?}", e);
+                }
+            }
+        }).await;
+
+        push_state_log(state, format!(
+            "🗂️ Sembol statü registry ✓ {} sembol ({} TRADING-dışı dışlandı)",
+            n, n_break,
+        ));
+        Ok(())
+    }
+
     /// 🧠 ML Retrain (Faz 4 - "ml" trigger):
     /// Aktif sembolde ParameterOptimizer.random_search çalıştırır, en iyi TP/SL/PS setini
     /// brain.best_params'a yazar ve config/best_params.json'a atomik mühürler.

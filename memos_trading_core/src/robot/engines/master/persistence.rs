@@ -251,6 +251,25 @@ impl Engine {
         }
     }
 
+    /// 🗂️ Boot'ta sembol-statü registry'sini DB'den cache'e yükler. Restart sonrası
+    /// ilk exchangeInfo fetch'ini (scheduler warmup) beklemeden BREAK/delisted semboller
+    /// dışlanmış olur. Tablo yoksa / boşsa sessiz geçer (refresh job dolduracak).
+    pub(crate) fn hydrate_symbol_status_from_db(state: &Arc<Mutex<AppState>>) {
+        let db_path = match state.lock() { Ok(st) => st.config.db_path.clone(), Err(_) => return };
+        if let Ok(entries) = crate::persistence::reader::load_symbol_statuses(&db_path) {
+            if !entries.is_empty() {
+                let n_break = entries.iter().filter(|(_, s)| s != "TRADING").count();
+                super::set_symbol_statuses(&entries);
+                if let Ok(mut st) = state.lock() {
+                    st.push_log_mirror(format!(
+                        "🗂️ [RECOVERY] sembol statü registry: {} sembol ({} TRADING-dışı)",
+                        entries.len(), n_break,
+                    ));
+                }
+            }
+        }
+    }
+
     /// Delisted sembolü orchestrator + live_positions'tan temizler. Açık pozisyon
     /// varsa ClosedTradeModel'a PnL=0/reason=DELISTED ile push edilir (gerçek
     /// kapanış mümkün değil — Binance Invalid symbol döndürüyor).

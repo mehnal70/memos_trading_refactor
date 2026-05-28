@@ -292,3 +292,18 @@ pub fn read_candles(
     candles.reverse();
     Ok(candles)
 }
+
+/// 🗂️ Sembol-statü registry'sini DB'den okur (boot hydrate). Tablo henüz yoksa boş
+/// döner (ilk çalıştırmada refresh job doldurana kadar). Dönen (symbol, status) listesi
+/// `set_symbol_statuses` ile cache'e yüklenir.
+pub fn load_symbol_statuses(db_path: &str) -> crate::Result<Vec<(String, String)>> {
+    let conn = Connection::open(db_path)
+        .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
+    let mut stmt = match conn.prepare("SELECT symbol, status FROM symbol_status") {
+        Ok(s) => s,
+        Err(_) => return Ok(Vec::new()), // tablo yok → boş
+    };
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|e| crate::MemosTradingError::Database(format!("symbol_status sorgu: {}", e)))?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}

@@ -514,7 +514,12 @@ impl Engine {
             let mut last_backtest_at: Option<std::time::Instant> = None;
             let mut last_screener_at: Option<std::time::Instant> = None;
             let mut last_ml_at: Option<std::time::Instant> = None;
+            let mut last_symstatus_at: Option<std::time::Instant> = None;
             let mut warmup_done = false;
+
+            // 🗂️ Sembol-statü registry refresh aralığı (exchangeInfo TRADING/BREAK).
+            // exchangeInfo yavaş değişir → default 360dk (6s). 0 → kapalı.
+            let symstatus_period: u64 = env_parse("SCHEDULER_SYMSTATUS_EVERY_MINS", 360);
 
             // Screener tetik aralığı env'le ayarlanır; config struct'a alan eklemeden
             // davranış aktivleştirilir. Default 30 dk; 0 → screener fire kapalı.
@@ -695,6 +700,25 @@ impl Engine {
                         last_ml_at = Some(now);
                     } else if last_ml_at.is_none() {
                         last_ml_at = Some(now);
+                    }
+                }
+
+                // 🗂️ Sembol-statü registry refresh — exchangeInfo'dan TRADING/BREAK.
+                // İlk tur due (last None) → boot warmup'ta bir kez çek, sonra periyot.
+                // Trigger yerine doğrudan spawn (self-contained public fetch).
+                if symstatus_period > 0 {
+                    let due = match last_symstatus_at {
+                        Some(t) => now.duration_since(t) >= Duration::from_secs(symstatus_period * 60),
+                        None    => true,
+                    };
+                    if due {
+                        last_symstatus_at = Some(now);
+                        let st_job = Arc::clone(&st_sched);
+                        tokio::spawn(async move {
+                            if let Err(e) = Self::run_symbol_status_refresh(&st_job).await {
+                                log::warn!("symbol_status refresh: {}", e);
+                            }
+                        });
                     }
                 }
 
