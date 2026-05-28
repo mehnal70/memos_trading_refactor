@@ -902,6 +902,10 @@ impl Engine {
                     let write_result = tokio::task::spawn_blocking(move || -> std::result::Result<(usize, Option<String>), String> {
                         let conn = rusqlite::Connection::open(&db_path_clone)
                             .map_err(|e| format!("db open: {}", e))?;
+                        // WAL olsa da yazıcı-yazıcı çakışmasında anlık SQLITE_BUSY olabiliyor
+                        // (snapshot/engine eşzamanlı yazımı) → busy_timeout ile bekle, "database
+                        // is locked" ile mum düşürme.
+                        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
                         let mut written = 0usize;
                         let mut first_err: Option<String> = None;
                         for c in &candles_clone {
@@ -960,6 +964,7 @@ impl Engine {
                                         let htf_clone = htf_candles.clone();
                                         let _ = tokio::task::spawn_blocking(move || {
                                             if let Ok(conn) = rusqlite::Connection::open(&db2) {
+                                                let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
                                                 for c in &htf_clone {
                                                     let _ = crate::persistence::writer::save_candle(&conn, "binance", "spot", c);
                                                 }
