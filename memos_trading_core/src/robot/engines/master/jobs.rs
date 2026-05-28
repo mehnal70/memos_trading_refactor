@@ -897,17 +897,37 @@ impl Engine {
                     // 3) SQLite yazımı senkron → spawn_blocking
                     let db_path_clone = db_path.clone();
                     let candles_clone = candles.clone();
-                    let write_result = tokio::task::spawn_blocking(move || -> std::result::Result<(), String> {
+                    // Yazımı gerçekten say + ilk hatayı yüzeye çıkar (eskiden `let _ =` ile
+                    // yutuluyordu → şema uyumsuzluğunda sahte "✓ N mum yazıldı" basılıyordu).
+                    let write_result = tokio::task::spawn_blocking(move || -> std::result::Result<(usize, Option<String>), String> {
                         let conn = rusqlite::Connection::open(&db_path_clone)
                             .map_err(|e| format!("db open: {}", e))?;
+                        let mut written = 0usize;
+                        let mut first_err: Option<String> = None;
                         for c in &candles_clone {
-                            let _ = crate::persistence::writer::save_candle(&conn, "binance", "spot", c);
+                            match crate::persistence::writer::save_candle(&conn, "binance", "spot", c) {
+                                Ok(()) => written += 1,
+                                Err(e) => if first_err.is_none() { first_err = Some(e.to_string()); },
+                            }
                         }
-                        Ok(())
+                        Ok((written, first_err))
                     }).await;
                     match write_result {
-                        Ok(Ok(())) => {
-                            per_symbol_summary.push(format!("{}={}", sym, n));
+                        // Fetch başarılı ama DB'ye HİÇ yazılamadıysa: bunu başarısızlık say,
+                        // gerçek hatayı logla (sessiz veri donması yerine görünür sinyal).
+                        Ok(Ok((0, err))) if n > 0 => {
+                            total_failed += 1;
+                            push_state_log(state, format!(
+                                "    └─ {} ❌ fetch {} mum ama DB yazımı 0 (hata: {})",
+                                sym, n, err.as_deref().unwrap_or("?"),
+                            ));
+                        }
+                        Ok(Ok((written, err))) => {
+                            let warn = match &err {
+                                Some(e) => format!(" ⚠️ {} atlandı: {}", n.saturating_sub(written), e),
+                                None => String::new(),
+                            };
+                            per_symbol_summary.push(format!("{}={}", sym, written));
                             // Otonom katman: sembol+interval bazlı noise floor hesabı.
                             // compute_symbol_stats min 64 candle istiyor (14 ATR + 50 sample);
                             // limit ≥50 garantili ama yetersizse None döner ve store
@@ -919,7 +939,7 @@ impl Engine {
                                     }
                                 }
                             }
-                            push_state_log(state, format!("    └─ {} ✓ {} mum yazıldı", sym, n));
+                            push_state_log(state, format!("    └─ {} ✓ {} mum yazıldı{}", sym, written, warn));
 
                             // Multi-TF Faz B c2/c3: HTF (üst zaman dilimi) mumlarını da indir.
                             // get_htf_interval base ile aynıysa atla (1d → 1d). HTF fetch

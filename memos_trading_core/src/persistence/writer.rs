@@ -164,12 +164,18 @@ pub fn save_account_state(
 /// `exchange`/`market` parametreleri şu an yalnız çağrı kaynağını izlemeye yarar ve tabloya
 /// yazılmaz (legacy şemada bu kolonlar yok, repository ile uyumlu kalmak için).
 ///
-/// Şema: candles(id, symbol, interval, timestamp, open, high, low, close, volume, created_at).
 /// Aynı (symbol, interval, timestamp) varsa UPDATE; yoksa INSERT.
+///
+/// ⚠️ ŞEMA-UYARLI: Üretim DB'si dış migrasyonla `exchange`/`market` NOT NULL + `created_at`
+/// YOK şemasına geçmiş olabilir; kod-üretimi (fresh) tablo ise tersine `created_at` içerir,
+/// `exchange`/`market` içermez. Eskiden INSERT koşulsuz `created_at`'e yazıyordu → üretim
+/// tablosunda her yazım "no such column: created_at" ile sessizce patlıyordu (download
+/// `let _ = save_candle` ile yutuyordu → veri donuyordu). Artık mevcut kolonlara göre uyumlu
+/// yazım yapılır (4M satırlık tabloyu migrate etmeden iki şemada da çalışır).
 pub fn save_candle(
     conn: &Connection,
-    _exchange: &str,
-    _market: &str,
+    exchange: &str,
+    market: &str,
     candle: &Candle,
 ) -> Result<()> {
     // CandleRepository::new yoluyla gelmemiş bir bağlantı olabilir (örn. download job
@@ -178,7 +184,24 @@ pub fn save_candle(
 
     let raw_ms = candle.timestamp.timestamp_millis();
 
-    // Önce UPDATE — varsa OHLCV revize edilir (kapanmamış mumun düzeltilmesi).
+    // Üretim şeması (exchange/market NOT NULL, created_at yok): tek-atımlık upsert.
+    // exchange/market parametreleri burada gerçekten kullanılır (eskiden yok sayılıyordu).
+    if column_exists(conn, "candles", "exchange")? {
+        conn.execute(
+            "INSERT INTO candles (exchange, market, symbol, interval, timestamp, open, high, low, close, volume) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+             ON CONFLICT(symbol, interval, timestamp) DO UPDATE SET \
+               open=excluded.open, high=excluded.high, low=excluded.low, \
+               close=excluded.close, volume=excluded.volume",
+            params![
+                exchange, market, &candle.symbol, &candle.interval, raw_ms,
+                candle.open, candle.high, candle.low, candle.close, candle.volume,
+            ],
+        ).map_err(|e| crate::MemosTradingError::Database(format!("Mum upsert hatası: {}", e)))?;
+        return Ok(());
+    }
+
+    // Fresh/kod-üretimi şema (created_at var, exchange/market yok): UPDATE→INSERT.
     let updated = conn.execute(
         "UPDATE candles SET open=?1, high=?2, low=?3, close=?4, volume=?5 \
          WHERE symbol=?6 AND interval=?7 AND timestamp=?8",
@@ -201,6 +224,17 @@ pub fn save_candle(
     }
 
     Ok(())
+}
+
+/// Tabloda belirtilen kolon var mı — şema-uyarlı yazım için (PRAGMA table_info).
+fn column_exists(conn: &Connection, table: &str, col: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))
+        .map_err(|e| crate::MemosTradingError::Database(format!("table_info hazırlık: {}", e)))?;
+    let found = stmt.query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| crate::MemosTradingError::Database(format!("table_info sorgu: {}", e)))?
+        .filter_map(|r| r.ok())
+        .any(|name| name == col);
+    Ok(found)
 }
 
 /// Ana `candles` tablosunu ve gerekli indeksleri defensive olarak yaratır.
