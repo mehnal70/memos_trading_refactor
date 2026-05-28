@@ -43,11 +43,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = std::fs::create_dir_all(parent);
     }
 
+    // Başlangıç sermayesi: env STARTING_CAPITAL (rtc_headless ile aynı sözleşme).
+    // Geçersiz/eksik → RoboticLoopConfig default'u = $10.000.
+    let capital = std::env::var("STARTING_CAPITAL").ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or_else(|| RoboticLoopConfig::default().capital);
+
     let config = RoboticLoopConfig {
         symbol: symbol.clone(),
         market: market.clone(),
         db_path: db_path.clone(),
         trading_mode,
+        capital,
         api_key,
         secret_key,
         ..Default::default()

@@ -92,12 +92,21 @@ async fn main() -> Result<()> {
 
     // 3. Profil yüklemesi (best_params'a yansıtılır)
     let profile = load_profiles();
+    // Başlangıç sermayesi: env STARTING_CAPITAL (geçersiz/eksik → RoboticLoopConfig
+    // default'u = $10.000). Değiştirmek aynı zamanda recovery guard'ı uyuşmazlığa
+    // düşürür → DB'ye dokunmadan cold-start (bkz hydrate_account_state_from_db).
+    let capital = std::env::var("STARTING_CAPITAL").ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or_else(|| RoboticLoopConfig::default().capital);
+
     let config = RoboticLoopConfig {
         symbol: symbol.clone(),
         market: market.clone(),
         interval: interval.clone(),
         db_path: db_path.clone(),
         trading_mode,
+        capital,
         api_key,
         secret_key,
         ..Default::default()

@@ -189,6 +189,12 @@ pub struct RuntimeTuning {
     /// Maker dolumda uygulanan komisyon oranı (taker `commission_rate`'ten düşük).
     /// Default = commission_rate (ayrı set edilmezse fark yok). Env MAKER_COMMISSION_RATE.
     pub maker_commission_rate: f64,
+    /// Pozisyon başına temel tahsisat = equity × bu oran × risk_appetite. Default 0.10
+    /// (%10). Env BASE_ALLOC_FRACTION.
+    pub base_alloc_fraction: f64,
+    /// Tahsisat tabanı: dinamik Kelly ölçeği base_alloc × bu oranın altına inemez.
+    /// Default 0.25. Env ALLOC_FLOOR_FRACTION.
+    pub alloc_floor_fraction: f64,
 }
 
 impl Default for RuntimeTuning {
@@ -212,6 +218,8 @@ impl Default for RuntimeTuning {
             limit_entry_max_spread_bps: 50.0,
             limit_entry_fallback_market: true,
             maker_commission_rate: 0.001,
+            base_alloc_fraction: 0.10,
+            alloc_floor_fraction: 0.25,
         }
     }
 }
@@ -248,6 +256,14 @@ impl RuntimeTuning {
             maker_commission_rate: {
                 let v = env_parse("MAKER_COMMISSION_RATE", commission_rate);
                 if v.is_finite() && v >= 0.0 { v } else { commission_rate }
+            },
+            base_alloc_fraction: {
+                let v = env_parse("BASE_ALLOC_FRACTION", d.base_alloc_fraction);
+                if v.is_finite() && v > 0.0 { v } else { d.base_alloc_fraction }
+            },
+            alloc_floor_fraction: {
+                let v = env_parse("ALLOC_FLOOR_FRACTION", d.alloc_floor_fraction);
+                if v.is_finite() && v >= 0.0 { v } else { d.alloc_floor_fraction }
             },
         }
     }

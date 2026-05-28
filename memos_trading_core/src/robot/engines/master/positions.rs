@@ -240,9 +240,9 @@ impl Engine {
             let avg_loss = if losses > 0 { sum_loss / losses as f64 } else { 1.0 };
             let kelly = KellyCriterion::calculate(win_prob, avg_win, avg_loss);
 
-            let base_alloc = st.finance.equity * 0.10 * risk_appetite;
+            let base_alloc = st.finance.equity * st.tuning.base_alloc_fraction * risk_appetite;
             let alloc_capital = kelly.calculate_dynamic_scale(base_alloc, loss_streak, ml_conf)
-                .max(base_alloc * 0.25);
+                .max(base_alloc * st.tuning.alloc_floor_fraction);
             let qty_val = (alloc_capital / entry).max(0.0);
             if qty_val <= 0.0 { return; }
 
