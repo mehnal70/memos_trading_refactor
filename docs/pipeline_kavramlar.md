@@ -188,6 +188,10 @@ Periyodik; öğrenilenleri parametrelere yazar (scheduler ile seyrek).
 
 ## İlgili env bayrakları (hızlı referans)
 
+> 📋 **Tüm env'lerin default'lu, gruplu tam listesi:** [`.env.example`](../.env.example)
+> (repo kökünde). Kullanım: `cp .env.example .env`. Aşağıdaki tablo yalnızca
+> pipeline aşamalarıyla eşleşen seçili bayrakları gösterir.
+
 | Env | Aşama | İşlev |
 |---|---|---|
 | `MULTI_TF`, `REGIME_CONTEXT_TTL_SECS` | 1–2 | HTF veri + rejim cache |
@@ -197,6 +201,9 @@ Periyodik; öğrenilenleri parametrelere yazar (scheduler ile seyrek).
 | `BACKTEST_EDGE_FILTER` | 3, 7 | Edge hunisi (canlı + backtest tek kaynak) |
 | `SCALP_SWING_ENABLE` | 3 | ScalpSwing kanalı |
 | `LEVERAGE_ENABLED` | 4 | Otonom kaldıraç |
+| `STARTING_CAPITAL`, `BASE_ALLOC_FRACTION`, `ALLOC_FLOOR_FRACTION` | 4 | Sermaye + pozisyon boyutlama |
+| `KELLY_LOSS_STREAK_WINDOW`, `KELLY_STATS_WINDOW` | 4 | Kelly istatistik pencereleri |
+| `FALLBACK_TP_PCT`, `FALLBACK_SL_PCT` | 4 | ParameterStore okunamazsa son-çare TP/SL |
 | `MAX_ENTRY_PRICE_DEVIATION_PCT` | 4 | Price sanity guard |
 | `LIVE_MAX_NOTIONAL_USD` | 4 | Notional tavanı |
 | `USE_LIMIT_ENTRY`, `LIMIT_ENTRY_*`, `MAKER_COMMISSION_RATE` | 5 | Maker LIMIT girişi |
