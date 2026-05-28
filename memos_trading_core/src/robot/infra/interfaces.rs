@@ -70,13 +70,4 @@ pub trait TradeExecutor: Send + Sync {
     /// Exchange'deki gerçek açık pozisyon sembollerini döndürür.
     /// Paper mod veya desteklenmeyen executor'larda boş vec döner.
     fn fetch_open_symbols(&self) -> Vec<String> { vec![] }
-    /// POST_ONLY (Maker) limit emir: `price` fiyatından giriş dene, `timeout_ms` içinde
-    /// dolmazsa emri iptal et ve Err döndür. Default = market fallback (dummy/paper için).
-    fn execute_limit(&self, signal: Signal, symbol: &str, amount: f64, _price: f64, _timeout_ms: u64) -> Result<Trade> {
-        self.execute(signal, symbol, amount)
-    }
-    /// Anlık best bid/ask (bookTicker). Desteklenmeyen executor'larda (0.0, 0.0) döner.
-    fn fetch_book_ticker(&self, _symbol: &str) -> Result<(f64, f64)> {
-        Ok((0.0, 0.0))
-    }
 }

@@ -89,23 +89,6 @@ impl<'a> RoboticTradeExecutor<'a> {
             .collect()
     }
 
-    /// Giriş emirleri için POST_ONLY Limit Maker basket.
-    /// `price`: VWAP giriş fiyatı. `timeout_ms`: fill bekleme süresi.
-    /// Çıkış emirlerinde (SL/TP) execute_basket kullanılmaya devam eder.
-    pub fn execute_basket_limit(&self, signal: Signal, amount: f64, price: f64, timeout_ms: u64) -> Vec<Result<Trade>> {
-        let symbols = self.resolve_symbols();
-        let basket_size = symbols.len();
-        symbols
-            .iter()
-            .map(|sym| match self.policy_decision(&signal, sym, amount, basket_size) {
-                ExecutionDecision::Allow => self.executor.execute_limit(signal.clone(), sym, amount, price, timeout_ms),
-                ExecutionDecision::Skip { reason } => {
-                    Err(format!("ExecutionPolicy skip [{sym}]: {reason}").into())
-                }
-            })
-            .collect()
-    }
-
     /// Tüm işlemleri iptal et
     pub fn cancel_all(&self) {
         let symbols = self.resolve_symbols();

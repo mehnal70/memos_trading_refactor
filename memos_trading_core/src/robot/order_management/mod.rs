@@ -11,8 +11,6 @@ pub mod binance;
 pub mod validator;
 pub use validator::{OrderValidator, ValidationRules};
 
-pub mod oms; // Yeni eklenen dosya
-
 pub mod paper_executor;
 pub use paper_executor::PaperTradingExecutor;
 pub mod orderbook_sim;
