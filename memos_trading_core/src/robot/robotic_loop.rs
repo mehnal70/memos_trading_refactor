@@ -50,6 +50,10 @@ pub struct FinanceVault {
     /// sıfırlanır; bu atomic sayaç ise DB'deki `account_state` ile hidrate
     /// edilir → heartbeat ve raporlar tutarlı kalır.
     pub closed_trades_total: Arc<AtomicUsize>,
+    /// Sembol → son pozisyon kapanış anı (re-entry cooldown). close_paper_position
+    /// yazar, open_paper_position okur: REENTRY_COOLDOWN_SECS içinde yeniden açılış
+    /// engellenir (churn/flip-flop koruması). Monotonik Instant; persist edilmez.
+    pub last_close_at: Arc<RwLock<HashMap<String, std::time::Instant>>>,
 }
 
 impl FinanceVault {
@@ -254,6 +258,7 @@ impl AppState {
             equity_history: Arc::new(RwLock::new(initial_history)),
             live_orders: Arc::new(RwLock::new(HashMap::new())),
             closed_trades_total: Arc::new(AtomicUsize::new(0)),
+            last_close_at: Arc::new(RwLock::new(HashMap::new())),
         };
 
         let intelligence_hub = crate::robot::ml_engine::intelligence_hub::IntelligenceHub::new(

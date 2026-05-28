@@ -134,6 +134,27 @@ impl Engine {
             return;
         }
 
+        // ⏳ Re-entry cooldown: son kapanıştan REENTRY_COOLDOWN_SECS geçmediyse yeni
+        // açılış engellenir — churn/flip-flop (aç→kapa→hemen aç) koruması. 0 → kapalı.
+        // Her iki açılış yolu (scalp_swing + strateji) buradan geçtiği için tek-nokta.
+        let cooldown_block = state.lock().ok().and_then(|st| {
+            let cd = st.tuning.reentry_cooldown_secs;
+            if cd == 0 { return None; }
+            st.finance.last_close_at.read().ok()
+                .and_then(|m| m.get(symbol).copied())
+                .map(|t| t.elapsed().as_secs())
+                .filter(|elapsed| *elapsed < cd)
+                .map(|elapsed| (elapsed, cd))
+        });
+        if let Some((elapsed, cd)) = cooldown_block {
+            if log_throttle_should_emit(symbol, "reentry_cooldown", 30) {
+                push_state_log(state, format!(
+                    "⏳ {} açılış atlandı: re-entry cooldown ({}/{}sn)", symbol, elapsed, cd,
+                ));
+            }
+            return;
+        }
+
         let is_long = matches!(signal, Signal::Buy);
         // Entry fiyatı: önce st.fleet.live_price (price_poll 5sn REST snapshot),
         // yoksa candles.last().close (DB son mum). Sadece candle close kullanılınca
@@ -948,6 +969,11 @@ impl Engine {
             }
             // Tüm-zaman kapalı işlem sayacı (restart'a karşı korunur).
             st.finance.closed_trades_total.fetch_add(1, Ordering::Relaxed);
+            // Re-entry cooldown mührü: open_paper_position bu zamanı okuyup
+            // REENTRY_COOLDOWN_SECS içinde yeniden açılışı engeller (churn koruması).
+            if let Ok(mut lc) = st.finance.last_close_at.write() {
+                lc.insert(symbol.to_string(), std::time::Instant::now());
+            }
 
             let pnl_pct_val = if pos.entry_price > 0.0 && pos.qty > 0.0 {
                 (pnl_val / (pos.entry_price * pos.qty)) * 100.0

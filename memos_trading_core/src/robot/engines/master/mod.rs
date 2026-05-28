@@ -213,6 +213,10 @@ pub struct RuntimeTuning {
     /// 0 → kapalı. Default 3600 (1 saat). Yüksek interval'da (4h/1d) yükselt.
     /// Env STALE_FEED_MAX_AGE_SECS.
     pub stale_feed_max_age_secs: i64,
+    /// ⏳ Re-entry cooldown (sn): bir sembolde pozisyon kapandıktan sonra bu süre
+    /// içinde YENİ açılış engellenir — churn/flip-flop (aç→kapa→hemen aç) koruması.
+    /// 0 → kapalı (default, sıfır regresyon). Önerilen ~60. Env REENTRY_COOLDOWN_SECS.
+    pub reentry_cooldown_secs: u64,
 }
 
 impl Default for RuntimeTuning {
@@ -243,6 +247,7 @@ impl Default for RuntimeTuning {
             fallback_tp_pct: 3.0,
             fallback_sl_pct: 1.5,
             stale_feed_max_age_secs: 3600,
+            reentry_cooldown_secs: 0,
         }
     }
 }
@@ -300,6 +305,7 @@ impl RuntimeTuning {
                 if v.is_finite() && v > 0.0 { v } else { d.fallback_sl_pct }
             },
             stale_feed_max_age_secs: env_parse("STALE_FEED_MAX_AGE_SECS", d.stale_feed_max_age_secs),
+            reentry_cooldown_secs: env_parse("REENTRY_COOLDOWN_SECS", d.reentry_cooldown_secs),
         }
     }
 

@@ -35,6 +35,17 @@ fn threshold_parsed_from_env_and_zero_disables() {
 }
 
 #[test]
+fn reentry_cooldown_default_zero_and_env_parse() {
+    let _env = lock_env();
+    std::env::remove_var("REENTRY_COOLDOWN_SECS");
+    // Default 0 = kapalı (sıfır regresyon).
+    assert_eq!(AppState::new(RoboticLoopConfig::default()).tuning.reentry_cooldown_secs, 0);
+    std::env::set_var("REENTRY_COOLDOWN_SECS", "60");
+    assert_eq!(AppState::new(RoboticLoopConfig::default()).tuning.reentry_cooldown_secs, 60);
+    std::env::remove_var("REENTRY_COOLDOWN_SECS");
+}
+
+#[test]
 fn fresh_candle_passes_stale_candle_blocked() {
     let now = chrono::Utc::now();
     let fresh = now - chrono::Duration::seconds(10);
