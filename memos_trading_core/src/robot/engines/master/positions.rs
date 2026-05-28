@@ -211,6 +211,11 @@ impl Engine {
             live_dry_run: bool,
             live_max_notional: f64,
             atr_mult: f64,
+            use_limit_entry: bool,
+            limit_entry_timeout_ms: u64,
+            limit_entry_max_attempts: u32,
+            limit_entry_max_spread_bps: f64,
+            limit_entry_fallback_market: bool,
         }
         let plan: Option<OpenPlan> = {
             let mut st = state.lock().unwrap();
@@ -314,6 +319,11 @@ impl Engine {
                 live_dry_run: st.live_dry_run,
                 live_max_notional: st.live_max_notional_usd,
                 atr_mult,
+                use_limit_entry: st.tuning.use_limit_entry,
+                limit_entry_timeout_ms: st.tuning.limit_entry_timeout_ms,
+                limit_entry_max_attempts: st.tuning.limit_entry_max_attempts,
+                limit_entry_max_spread_bps: st.tuning.limit_entry_max_spread_bps,
+                limit_entry_fallback_market: st.tuning.limit_entry_fallback_market,
             })
         }; // st burada drop
         let plan = match plan { Some(p) => p, None => return };
@@ -332,8 +342,16 @@ impl Engine {
         let sl_pct = plan.sl_pct;
         let strategy_name = plan.strategy_name.clone();
         let atr_mult = plan.atr_mult;
+        let use_limit_entry = plan.use_limit_entry;
+        let limit_entry_timeout_ms = plan.limit_entry_timeout_ms;
+        let limit_entry_max_attempts = plan.limit_entry_max_attempts;
+        let limit_entry_max_spread_bps = plan.limit_entry_max_spread_bps;
+        let limit_entry_fallback_market = plan.limit_entry_fallback_market;
 
         let mut live_order_id: Option<String> = None;
+        // Giriş gerçekten maker (POST_ONLY) dolumuyla mı gerçekleşti? Komisyon
+        // muhasebesi (maker vs taker oranı) ve log etiketi buna göre seçilir.
+        let mut used_maker = false;
         // Filtre sonrası qty ve SL/TP fiyatları burada güncellenir; local pozisyon
         // (new_pos) borsaya gönderilen değerle birebir eşleşsin diye mutable.
         let mut qty_val = qty_val;
@@ -393,89 +411,159 @@ impl Engine {
 
             if live_dry_run {
                 if let Ok(mut st2) = state.lock() {
+                    let mode = if use_limit_entry { "LIMIT-MAKER" } else { "MARKET" };
                     st2.push_log(format!(
-                        "🟡 [LIVE-DRY-RUN] {} {} {:.4} @ {:.2} (${:.2}) → emir gönderilmedi",
-                        symbol, side, qty_val, entry, alloc_capital,
+                        "🟡 [LIVE-DRY-RUN] {} {} {:.4} @ {:.2} (${:.2}) [{}] → emir gönderilmedi",
+                        symbol, side, qty_val, entry, alloc_capital, mode,
                     ));
                 }
             } else {
-                match executor.place_market_order(symbol, side, qty_val).await {
-                    Ok(resp) => {
-                        live_order_id = resp.get("orderId").map(|v| v.to_string());
-                        if let Ok(mut st2) = state.lock() {
-                            st2.push_log(format!(
-                                "💱 [LIVE] {} {} {:.4} @ {:.2} (${:.2}) ✓ order={}",
-                                symbol, side, qty_val, entry, alloc_capital,
-                                live_order_id.as_deref().unwrap_or("?"),
-                            ));
-                        }
-
-                        // 🛡️ Borsa-tarafı koruma: SL ve TP emirlerini hemen yerleştir.
-                        // Bot ölse / network kopsa bile pozisyon korumalı kalır.
-                        let pos_sl = new_pos.stop_loss;
-                        let pos_tp = new_pos.take_profit;
-                        let (sl_res, tp_res) = executor.place_protection_orders(
-                            symbol, is_long, qty_val, pos_sl, pos_tp,
-                        ).await;
-                        let sl_id = sl_res.as_ref().ok()
-                            .and_then(|r| r.get("orderId").map(|v| v.to_string()));
-                        let tp_id = tp_res.as_ref().ok()
-                            .and_then(|r| r.get("orderId").map(|v| v.to_string()));
-                        let sl_status = match &sl_res {
-                            Ok(_)  => format!("SL ✓ ({})", sl_id.as_deref().unwrap_or("?")),
-                            Err(e) => format!("SL ❌ {:?}", e),
-                        };
-                        let tp_status = match &tp_res {
-                            Ok(_)  => format!("TP ✓ ({})", tp_id.as_deref().unwrap_or("?")),
-                            Err(e) => format!("TP ❌ {:?}", e),
-                        };
-                        // Order ID eşlemesini state'e mühürle (cancel için audit trail).
-                        if let Ok(mut st2) = state.lock() {
-                            if let Ok(mut map) = st2.finance.live_orders.write() {
-                                map.insert(symbol.to_string(), crate::core::model::LiveOrderRefs {
-                                    entry_order_id: live_order_id.clone(),
-                                    sl_order_id: sl_id.clone(),
-                                    tp_order_id: tp_id.clone(),
-                                    placed_at: chrono::Utc::now().to_rfc3339(),
-                                });
+                // ── Giriş emri: maker (opt-in, POST_ONLY) → taker MARKET dispatch ──
+                // use_limit_entry ise önce best_bid/ask'e katılan maker denenir; N
+                // deneme dolmazsa limit_entry_fallback_market'a göre taker'a düşülür
+                // ya da trade atlanır. Kapalıysa eski davranış (doğrudan MARKET).
+                // Dönüş: dolmuş emir Value'su (orderId + maker yolunda avgPrice).
+                let entry_resp: std::result::Result<serde_json::Value, ()> = if use_limit_entry {
+                    match executor.place_smart_limit_entry(
+                        symbol, side, qty_val,
+                        limit_entry_timeout_ms, limit_entry_max_attempts, limit_entry_max_spread_bps,
+                    ).await {
+                        Ok(r) => { used_maker = true; Ok(r) }
+                        Err(e) => {
+                            if limit_entry_fallback_market {
+                                if let Ok(mut st2) = state.lock() {
+                                    st2.push_log(format!(
+                                        "↩️ [LIVE-MAKER→MARKET] {} {} maker dolmadı ({:?}) → taker fallback",
+                                        symbol, side, e,
+                                    ));
+                                }
+                                executor.place_market_order(symbol, side, qty_val).await.map_err(|me| {
+                                    if let Ok(mut st2) = state.lock() {
+                                        st2.push_log(format!(
+                                            "❌ [LIVE] {} {} fallback market hatası: {:?} — pozisyon kaydedilmedi",
+                                            symbol, side, me,
+                                        ));
+                                    }
+                                })
+                            } else {
+                                if let Ok(mut st2) = state.lock() {
+                                    st2.push_log(format!(
+                                        "⏭️ [LIVE-MAKER] {} {} maker dolmadı ({:?}) → trade atlandı (fallback kapalı)",
+                                        symbol, side, e,
+                                    ));
+                                }
+                                Err(())
                             }
-                            st2.push_log(format!(
-                                "🛡️ [LIVE-PROTECT] {} @ SL={:.4} TP={:.4} · {} · {}",
-                                symbol, pos_sl, pos_tp, sl_status, tp_status,
-                            ));
-                        }
-
-                        // Kritik uyarı: SL emri başarısızsa pozisyon korumasız — emergency.
-                        if sl_res.is_err() {
-                            if let Ok(mut st2) = state.lock() {
-                                st2.push_alert(
-                                    "LIVE-EMERGENCY",
-                                    crate::robot::infra::telegram_notifier::Severity::Critical,
-                                    format!(
-                                        "[LIVE-EMERGENCY] {} SL emri verilemedi → pozisyon acil kapatılıyor",
-                                        symbol,
-                                    ),
-                                );
-                                st2.guardian.repair_log.push_back(format!(
-                                    "[{}] live SL hatası: {} emergency close",
-                                    chrono::Local::now().format("%H:%M:%S"), symbol,
-                                ));
-                                while st2.guardian.repair_log.len() > 100 { st2.guardian.repair_log.pop_front(); }
-                            }
-                            // Hemen pozisyonu kapat — koruma sağlanamadı.
-                            let _ = executor.close_position(symbol).await;
-                            return;
                         }
                     }
-                    Err(e) => {
+                } else {
+                    executor.place_market_order(symbol, side, qty_val).await.map_err(|e| {
                         if let Ok(mut st2) = state.lock() {
                             st2.push_log(format!(
                                 "❌ [LIVE] {} {} emir hatası: {:?} — pozisyon kaydedilmedi",
                                 symbol, side, e,
                             ));
                         }
-                        return; // Live emir başarısızsa paper'ı da çalıştırma.
+                    })
+                };
+
+                // Giriş emri başarısız (ve fallback yok / fallback de patladı) → paper'ı da çalıştırma.
+                let resp = match entry_resp { Ok(r) => r, Err(()) => return };
+                live_order_id = resp.get("orderId").map(|v| v.to_string());
+
+                // 🧮 Maker dolum reconciliation: gerçek fill fiyatı entry'den saparsa
+                // pozisyonu, SL/TP'yi ve trailing'i fill fiyatından yeniden hesapla
+                // (PnL ve borsa koruma emirleri gerçeğe otursun). Market yolunda futures
+                // yanıtı avgPrice taşımayabilir → entry referansı korunur (eski davranış).
+                if used_maker {
+                    let fill_price = resp.get("avgPrice")
+                        .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok())
+                        .filter(|&p| p > 0.0)
+                        .unwrap_or(entry);
+                    if (fill_price - entry).abs() > f64::EPSILON {
+                        new_pos.entry_price = fill_price;
+                        new_pos.current_price = fill_price;
+                        new_pos.max_favorable_price = fill_price;
+                        new_pos.stop_loss = if is_long { fill_price * (1.0 - sl_pct / 100.0) }
+                                            else        { fill_price * (1.0 + sl_pct / 100.0) };
+                        new_pos.take_profit = if is_long { fill_price * (1.0 + tp_pct / 100.0) }
+                                              else        { fill_price * (1.0 - tp_pct / 100.0) };
+                        new_pos.trailing_stop = if is_long { fill_price - atr * atr_mult }
+                                                else        { fill_price + atr * atr_mult };
+                        if let Ok(map) = executor.filters.read() {
+                            if let Some(f) = map.get(symbol) {
+                                new_pos.stop_loss = f.round_price(new_pos.stop_loss);
+                                new_pos.take_profit = f.round_price(new_pos.take_profit);
+                                new_pos.trailing_stop = f.round_price(new_pos.trailing_stop);
+                            }
+                        }
                     }
+                }
+
+                let live_label = if used_maker { "LIVE-MAKER" } else { "LIVE" };
+                if let Ok(mut st2) = state.lock() {
+                    st2.push_log(format!(
+                        "💱 [{}] {} {} {:.4} @ {:.2} (${:.2}) ✓ order={}",
+                        live_label, symbol, side, qty_val, new_pos.entry_price, alloc_capital,
+                        live_order_id.as_deref().unwrap_or("?"),
+                    ));
+                }
+
+                // 🛡️ Borsa-tarafı koruma: SL ve TP emirlerini hemen yerleştir.
+                // Bot ölse / network kopsa bile pozisyon korumalı kalır.
+                let pos_sl = new_pos.stop_loss;
+                let pos_tp = new_pos.take_profit;
+                let (sl_res, tp_res) = executor.place_protection_orders(
+                    symbol, is_long, qty_val, pos_sl, pos_tp,
+                ).await;
+                let sl_id = sl_res.as_ref().ok()
+                    .and_then(|r| r.get("orderId").map(|v| v.to_string()));
+                let tp_id = tp_res.as_ref().ok()
+                    .and_then(|r| r.get("orderId").map(|v| v.to_string()));
+                let sl_status = match &sl_res {
+                    Ok(_)  => format!("SL ✓ ({})", sl_id.as_deref().unwrap_or("?")),
+                    Err(e) => format!("SL ❌ {:?}", e),
+                };
+                let tp_status = match &tp_res {
+                    Ok(_)  => format!("TP ✓ ({})", tp_id.as_deref().unwrap_or("?")),
+                    Err(e) => format!("TP ❌ {:?}", e),
+                };
+                // Order ID eşlemesini state'e mühürle (cancel için audit trail).
+                if let Ok(mut st2) = state.lock() {
+                    if let Ok(mut map) = st2.finance.live_orders.write() {
+                        map.insert(symbol.to_string(), crate::core::model::LiveOrderRefs {
+                            entry_order_id: live_order_id.clone(),
+                            sl_order_id: sl_id.clone(),
+                            tp_order_id: tp_id.clone(),
+                            placed_at: chrono::Utc::now().to_rfc3339(),
+                        });
+                    }
+                    st2.push_log(format!(
+                        "🛡️ [LIVE-PROTECT] {} @ SL={:.4} TP={:.4} · {} · {}",
+                        symbol, pos_sl, pos_tp, sl_status, tp_status,
+                    ));
+                }
+
+                // Kritik uyarı: SL emri başarısızsa pozisyon korumasız — emergency.
+                if sl_res.is_err() {
+                    if let Ok(mut st2) = state.lock() {
+                        st2.push_alert(
+                            "LIVE-EMERGENCY",
+                            crate::robot::infra::telegram_notifier::Severity::Critical,
+                            format!(
+                                "[LIVE-EMERGENCY] {} SL emri verilemedi → pozisyon acil kapatılıyor",
+                                symbol,
+                            ),
+                        );
+                        st2.guardian.repair_log.push_back(format!(
+                            "[{}] live SL hatası: {} emergency close",
+                            chrono::Local::now().format("%H:%M:%S"), symbol,
+                        ));
+                        while st2.guardian.repair_log.len() > 100 { st2.guardian.repair_log.pop_front(); }
+                    }
+                    // Hemen pozisyonu kapat — koruma sağlanamadı.
+                    let _ = executor.close_position(symbol).await;
+                    return;
                 }
             }
         }
@@ -496,7 +584,12 @@ impl Engine {
         // entry hiç düşmüyordu = asimetri). Bu, paper performansını gerçeğinden
         // yüksek gösteriyordu ve "fee sonrası gerçekten karlı mı?" sorusunu maskeliyordu.
         // Artık entry/exit komisyon muhasebesi simetrik.
-        let commission = alloc_capital * st.tuning.commission_rate;
+        // Maker dolumda (POST_ONLY giriş) taker'dan düşük maker_commission_rate uygulanır;
+        // taker/market girişte normal commission_rate. used_maker yalnız gerçek maker
+        // dolumunda true (fallback-market → false).
+        let entry_commission_rate = if used_maker { st.tuning.maker_commission_rate }
+                                     else          { st.tuning.commission_rate };
+        let commission = alloc_capital * entry_commission_rate;
         if let Ok(mut costs) = st.finance.live_execution_costs.write() {
             costs.commission_usd += commission;
             costs.total_cost_usd += commission;

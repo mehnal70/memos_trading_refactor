@@ -87,6 +87,120 @@ impl BinanceFuturesExecutor {
         self.signed_request(Method::POST, path, params).await
     }
 
+    /// Maker limit fiyatı: long → best_bid'e katıl, short → best_ask'a katıl
+    /// (touch'a yerleş = POST_ONLY garanti maker; spread'e girmez). Saf; I/O yok.
+    pub fn maker_limit_price(is_long: bool, best_bid: f64, best_ask: f64) -> f64 {
+        if is_long { best_bid } else { best_ask }
+    }
+
+    /// Spread (bps) = (ask-bid)/mid*10_000. Geçersiz kotada (mid≤0 ya da ask≤bid) 0
+    /// döner → guard tetiklenmez (kota yoksa caller akışı zaten reddeder). Saf.
+    pub fn spread_bps(best_bid: f64, best_ask: f64) -> f64 {
+        let mid = (best_bid + best_ask) / 2.0;
+        if mid <= 0.0 || best_ask <= best_bid { return 0.0; }
+        (best_ask - best_bid) / mid * 10_000.0
+    }
+
+    /// 💱 Maker giriş orkestrasyonu: best_bid/ask'e POST_ONLY limit koyar, dolana
+    /// kadar en çok `max_attempts` kez re-quote eder. Spread `max_spread_bps`'i
+    /// (0 → guard kapalı) aşarsa o deneme atlanır. Her denemede `timeout_ms` içinde
+    /// fill beklenir, dolmazsa emir iptal edilip yeniden kote edilir.
+    /// Dönüş: FILLED emir Value'su (orderId + avgPrice içerir). Hata: deneme tükendi
+    /// / kota alınamadı / spread sürekli geniş.
+    /// `place_post_only_limit_order` zaten futures GTX / spot LIMIT_MAKER yönlendirir
+    /// → maker garantisi tek kaynakta.
+    pub async fn place_smart_limit_entry(
+        &self,
+        symbol: &str,
+        side: &str, // "BUY" | "SELL"
+        qty: f64,
+        timeout_ms: u64,
+        max_attempts: u32,
+        max_spread_bps: f64,
+    ) -> Result<Value> {
+        let is_long = side.eq_ignore_ascii_case("BUY");
+        let attempts = max_attempts.max(1);
+        let backoff = std::time::Duration::from_millis(200);
+        let poll = std::time::Duration::from_millis(500);
+
+        for attempt in 1..=attempts {
+            let last = attempt >= attempts;
+            let (bid, ask) = self.fetch_book_ticker(symbol).await.unwrap_or((0.0, 0.0));
+
+            // Geçerli kota yoksa fiyatlandıramayız.
+            if bid <= 0.0 || ask <= 0.0 || ask <= bid {
+                if !last { tokio::time::sleep(backoff).await; continue; }
+                return Err(MemosTradingError::Api(format!("maker giriş: geçerli kota yok [{}]", symbol)));
+            }
+
+            // Spread guard.
+            let spr = Self::spread_bps(bid, ask);
+            if max_spread_bps > 0.0 && spr > max_spread_bps {
+                if !last { tokio::time::sleep(backoff).await; continue; }
+                return Err(MemosTradingError::Api(format!(
+                    "maker giriş: spread {:.1}bps > {:.1}bps [{}]", spr, max_spread_bps, symbol)));
+            }
+
+            // Fiyatı tickSize'a yuvarla (cache'teki filtre; yoksa ham fiyat).
+            let raw_price = Self::maker_limit_price(is_long, bid, ask);
+            let price = self.filters.read().ok()
+                .and_then(|m| m.get(symbol).map(|f| f.round_price(raw_price)))
+                .filter(|&p| p > 0.0)
+                .unwrap_or(raw_price);
+
+            let resp = match self.place_post_only_limit_order(symbol, side, qty, price).await {
+                Ok(r) => r,
+                Err(e) => {
+                    if !last { tokio::time::sleep(backoff).await; continue; }
+                    return Err(e);
+                }
+            };
+
+            match resp.get("status").and_then(|v| v.as_str()).unwrap_or("") {
+                "FILLED" => return Ok(resp),
+                // GTX/LIMIT_MAKER anında iptal → taker olurdu, re-quote.
+                "EXPIRED" | "REJECTED" => {
+                    if !last { tokio::time::sleep(backoff).await; continue; }
+                    return Err(MemosTradingError::Api(format!(
+                        "maker giriş: GTX anında iptal (taker olurdu) [{}] @ {}", symbol, price)));
+                }
+                _ => {}
+            }
+
+            // NEW / PARTIALLY_FILLED → fill polling.
+            let order_id = match resp.get("orderId").and_then(|v| v.as_u64()) {
+                Some(id) => id,
+                None => {
+                    if !last { tokio::time::sleep(backoff).await; continue; }
+                    return Err(MemosTradingError::Api(format!("maker giriş: orderId yok [{}]", symbol)));
+                }
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+            let mut filled: Option<Value> = None;
+            loop {
+                tokio::time::sleep(poll).await;
+                let st = self.get_order_status(symbol, order_id).await?;
+                match st.get("status").and_then(|v| v.as_str()).unwrap_or("UNKNOWN") {
+                    "FILLED" => { filled = Some(st); break; }
+                    "CANCELED" | "EXPIRED" | "REJECTED" => break,
+                    _ => {
+                        if std::time::Instant::now() >= deadline {
+                            let _ = self.cancel_order(symbol, order_id).await;
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(f) = filled { return Ok(f); }
+            if last {
+                return Err(MemosTradingError::Api(format!(
+                    "maker giriş: {} deneme sonunda fill yok [{}]", attempts, symbol)));
+            }
+            tokio::time::sleep(backoff).await;
+        }
+        Err(MemosTradingError::Api(format!("maker giriş: beklenmedik akış [{}]", symbol)))
+    }
+
     /// 🛡️ STOP-LOSS emri (pozisyonu trigger fiyatında kapatır).
     /// `side` pozisyonun KAPATMA yönü (long pozisyon için "SELL", short için "BUY").
     /// Futures: STOP_MARKET + reduceOnly. Spot: STOP_LOSS (market stop).
@@ -330,5 +444,31 @@ impl BinanceFuturesExecutor {
             Err(e) => return Err(format!("exchangeInfo çekilemedi ({}): {:?}", symbol, e)),
         };
         filters.validate(qty, price)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maker_price_joins_touch() {
+        // Long best_bid'e, short best_ask'a katılır (spread'e girmez = maker).
+        assert_eq!(BinanceFuturesExecutor::maker_limit_price(true, 100.0, 100.5), 100.0);
+        assert_eq!(BinanceFuturesExecutor::maker_limit_price(false, 100.0, 100.5), 100.5);
+    }
+
+    #[test]
+    fn spread_bps_basic() {
+        // bid 100, ask 100.1 → mid 100.05 → 0.1/100.05*1e4 ≈ 9.995
+        let s = BinanceFuturesExecutor::spread_bps(100.0, 100.1);
+        assert!((s - 9.995).abs() < 0.01, "spread={s}");
+    }
+
+    #[test]
+    fn spread_bps_invalid_quote_is_zero() {
+        assert_eq!(BinanceFuturesExecutor::spread_bps(0.0, 0.0), 0.0);  // kota yok
+        assert_eq!(BinanceFuturesExecutor::spread_bps(100.0, 100.0), 0.0); // ask==bid
+        assert_eq!(BinanceFuturesExecutor::spread_bps(100.0, 99.0), 0.0);  // ask<bid (bozuk)
     }
 }

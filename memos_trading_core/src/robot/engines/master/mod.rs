@@ -171,6 +171,24 @@ pub struct RuntimeTuning {
     /// cycle predict_confidence çağrılır (eski davranış). Default false → GBT yalnız
     /// regime'de; edge saf matematik (momentum + yavaş brain.ml_confidence). [[regime_context]]
     pub gbt_edge_legacy: bool,
+    /// 💱 Canlı girişi taker MARKET yerine maker LIMIT (POST_ONLY) ile aç. Default
+    /// false (opt-in). Açıkken `place_smart_limit_entry` best_bid/ask'e katılır;
+    /// dolmazsa `limit_entry_fallback_market`'a göre davranır. Paper yolu etkilenmez.
+    /// Env: USE_LIMIT_ENTRY.
+    pub use_limit_entry: bool,
+    /// Maker giriş: tek denemede fill bekleme süresi (ms). Env LIMIT_ENTRY_TIMEOUT_MS, default 2000.
+    pub limit_entry_timeout_ms: u64,
+    /// Maker giriş: re-quote deneme sayısı. Env LIMIT_ENTRY_MAX_ATTEMPTS, default 3.
+    pub limit_entry_max_attempts: u32,
+    /// Maker giriş: spread guard (bps). Spread bunun üstündeyse o deneme atlanır.
+    /// 0 → guard kapalı. Env LIMIT_ENTRY_MAX_SPREAD_BPS, default 50.
+    pub limit_entry_max_spread_bps: f64,
+    /// Maker giriş: N deneme dolmazsa taker MARKET'e düş (true) ya da trade'i atla
+    /// (false). Env LIMIT_ENTRY_FALLBACK_MARKET, default true (trade kaçırma).
+    pub limit_entry_fallback_market: bool,
+    /// Maker dolumda uygulanan komisyon oranı (taker `commission_rate`'ten düşük).
+    /// Default = commission_rate (ayrı set edilmezse fark yok). Env MAKER_COMMISSION_RATE.
+    pub maker_commission_rate: f64,
 }
 
 impl Default for RuntimeTuning {
@@ -188,6 +206,12 @@ impl Default for RuntimeTuning {
             regime_context_ttl_secs: 900,
             regime_gbt: true,
             gbt_edge_legacy: false,
+            use_limit_entry: false,
+            limit_entry_timeout_ms: 2000,
+            limit_entry_max_attempts: 3,
+            limit_entry_max_spread_bps: 50.0,
+            limit_entry_fallback_market: true,
+            maker_commission_rate: 0.001,
         }
     }
 }
@@ -215,6 +239,16 @@ impl RuntimeTuning {
             // REGIME_GBT default açık (0/false → kapat). GBT_EDGE_LEGACY default kapalı.
             regime_gbt: !matches!(std::env::var("REGIME_GBT").ok().as_deref(), Some("0") | Some("false") | Some("off")),
             gbt_edge_legacy: env_truthy("GBT_EDGE_LEGACY"),
+            use_limit_entry: env_truthy("USE_LIMIT_ENTRY"),
+            limit_entry_timeout_ms: env_parse("LIMIT_ENTRY_TIMEOUT_MS", d.limit_entry_timeout_ms),
+            limit_entry_max_attempts: env_parse("LIMIT_ENTRY_MAX_ATTEMPTS", d.limit_entry_max_attempts),
+            limit_entry_max_spread_bps: env_parse("LIMIT_ENTRY_MAX_SPREAD_BPS", d.limit_entry_max_spread_bps),
+            // Default açık (0/false/off → kapat) — opt-in maker'ın trade kaçırmaması için.
+            limit_entry_fallback_market: !matches!(std::env::var("LIMIT_ENTRY_FALLBACK_MARKET").ok().as_deref(), Some("0") | Some("false") | Some("off")),
+            maker_commission_rate: {
+                let v = env_parse("MAKER_COMMISSION_RATE", commission_rate);
+                if v.is_finite() && v >= 0.0 { v } else { commission_rate }
+            },
         }
     }
 
