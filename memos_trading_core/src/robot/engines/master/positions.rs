@@ -223,12 +223,15 @@ impl Engine {
 
             let risk_appetite = st.finance.calculate_risk_appetite();
             let ml_conf = st.brain.ml_confidence;
+            // Kelly pencereleri env-ayarlı (RuntimeTuning); closure'lardan önce lokal'e al.
+            let kelly_loss_window = st.tuning.kelly_loss_streak_window;
+            let kelly_stats_window = st.tuning.kelly_stats_window;
             let loss_streak = st.finance.live_closed_trades.read()
-                .map(|tr| tr.iter().rev().take(5).filter(|t| t.pnl < 0.0).count())
+                .map(|tr| tr.iter().rev().take(kelly_loss_window).filter(|t| t.pnl < 0.0).count())
                 .unwrap_or(0);
             let (wins, losses, sum_win, sum_loss) = st.finance.live_closed_trades.read().map(|tr| {
                 let mut w = 0u32; let mut l = 0u32; let mut sw = 0.0f64; let mut sl = 0.0f64;
-                for t in tr.iter().rev().take(50) {
+                for t in tr.iter().rev().take(kelly_stats_window) {
                     if t.pnl > 0.0 { w += 1; sw += t.pnl; }
                     else if t.pnl < 0.0 { l += 1; sl += -t.pnl; }
                 }
@@ -254,7 +257,7 @@ impl Engine {
                     let tr = p.trade_risk_for(regime.as_str());
                     (tr.take_profit_pct, tr.stop_loss_pct)
                 })
-                .unwrap_or((3.0, 1.5));
+                .unwrap_or((st.tuning.fallback_tp_pct, st.tuning.fallback_sl_pct));
             let sl_pct = sl_pct.max(0.1);
             // LET_WINNERS_RUN: sabit TP'yi çok uzağa it (≥%50) → kâr çıkışını ATR
             // trailing yönetir. Geçerli pozitif bir TP kalır (live koruma emri bozulmaz)

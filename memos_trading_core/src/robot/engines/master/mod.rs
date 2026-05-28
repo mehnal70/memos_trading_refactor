@@ -195,6 +195,18 @@ pub struct RuntimeTuning {
     /// Tahsisat tabanı: dinamik Kelly ölçeği base_alloc × bu oranın altına inemez.
     /// Default 0.25. Env ALLOC_FLOOR_FRACTION.
     pub alloc_floor_fraction: f64,
+    /// Kelly loss-streak penceresi: son N kapanışta zarar sayımı (dinamik ölçek girdisi).
+    /// Default 5. Env KELLY_LOSS_STREAK_WINDOW.
+    pub kelly_loss_streak_window: usize,
+    /// Kelly istatistik penceresi: win_prob/avg_win/avg_loss için son N kapanış. Default 50.
+    /// Env KELLY_STATS_WINDOW.
+    pub kelly_stats_window: usize,
+    /// TP fallback (%): ParameterStore trade_risk okunamazsa kullanılan son-çare. Default 3.0.
+    /// Asıl kaynak ParameterStore; bu yalnız hata yolundadır. Env FALLBACK_TP_PCT.
+    pub fallback_tp_pct: f64,
+    /// SL fallback (%): ParameterStore trade_risk okunamazsa kullanılan son-çare. Default 1.5.
+    /// Env FALLBACK_SL_PCT.
+    pub fallback_sl_pct: f64,
 }
 
 impl Default for RuntimeTuning {
@@ -220,6 +232,10 @@ impl Default for RuntimeTuning {
             maker_commission_rate: 0.001,
             base_alloc_fraction: 0.10,
             alloc_floor_fraction: 0.25,
+            kelly_loss_streak_window: 5,
+            kelly_stats_window: 50,
+            fallback_tp_pct: 3.0,
+            fallback_sl_pct: 1.5,
         }
     }
 }
@@ -264,6 +280,17 @@ impl RuntimeTuning {
             alloc_floor_fraction: {
                 let v = env_parse("ALLOC_FLOOR_FRACTION", d.alloc_floor_fraction);
                 if v.is_finite() && v >= 0.0 { v } else { d.alloc_floor_fraction }
+            },
+            // Pencereler en az 1 (0 → istatistik anlamsız); geçersizde default.
+            kelly_loss_streak_window: env_parse("KELLY_LOSS_STREAK_WINDOW", d.kelly_loss_streak_window).max(1),
+            kelly_stats_window: env_parse("KELLY_STATS_WINDOW", d.kelly_stats_window).max(1),
+            fallback_tp_pct: {
+                let v = env_parse("FALLBACK_TP_PCT", d.fallback_tp_pct);
+                if v.is_finite() && v > 0.0 { v } else { d.fallback_tp_pct }
+            },
+            fallback_sl_pct: {
+                let v = env_parse("FALLBACK_SL_PCT", d.fallback_sl_pct);
+                if v.is_finite() && v > 0.0 { v } else { d.fallback_sl_pct }
             },
         }
     }

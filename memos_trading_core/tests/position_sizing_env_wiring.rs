@@ -15,8 +15,13 @@ fn lock_env() -> MutexGuard<'static, ()> {
 }
 
 fn clear_env() {
-    std::env::remove_var("BASE_ALLOC_FRACTION");
-    std::env::remove_var("ALLOC_FLOOR_FRACTION");
+    for k in [
+        "BASE_ALLOC_FRACTION", "ALLOC_FLOOR_FRACTION",
+        "KELLY_LOSS_STREAK_WINDOW", "KELLY_STATS_WINDOW",
+        "FALLBACK_TP_PCT", "FALLBACK_SL_PCT",
+    ] {
+        std::env::remove_var(k);
+    }
 }
 
 #[test]
@@ -51,6 +56,46 @@ fn invalid_or_nonpositive_base_falls_back_to_default() {
     let t = &AppState::new(RoboticLoopConfig::default()).tuning;
     assert!((t.base_alloc_fraction - 0.10).abs() < 1e-12, "0 → default'a düşmeli");
     assert!((t.alloc_floor_fraction - 0.25).abs() < 1e-12, "geçersiz → default'a düşmeli");
+    clear_env();
+}
+
+#[test]
+fn kelly_windows_and_fallback_defaults() {
+    let _env = lock_env();
+    clear_env();
+    let t = &AppState::new(RoboticLoopConfig::default()).tuning;
+    assert_eq!(t.kelly_loss_streak_window, 5, "default loss-streak penceresi 5");
+    assert_eq!(t.kelly_stats_window, 50, "default istatistik penceresi 50");
+    assert!((t.fallback_tp_pct - 3.0).abs() < 1e-12, "default TP fallback 3.0");
+    assert!((t.fallback_sl_pct - 1.5).abs() < 1e-12, "default SL fallback 1.5");
+    clear_env();
+}
+
+#[test]
+fn kelly_windows_and_fallback_parsed_from_env() {
+    let _env = lock_env();
+    clear_env();
+    std::env::set_var("KELLY_LOSS_STREAK_WINDOW", "10");
+    std::env::set_var("KELLY_STATS_WINDOW", "200");
+    std::env::set_var("FALLBACK_TP_PCT", "4.5");
+    std::env::set_var("FALLBACK_SL_PCT", "2.0");
+    let t = &AppState::new(RoboticLoopConfig::default()).tuning;
+    assert_eq!(t.kelly_loss_streak_window, 10);
+    assert_eq!(t.kelly_stats_window, 200);
+    assert!((t.fallback_tp_pct - 4.5).abs() < 1e-12);
+    assert!((t.fallback_sl_pct - 2.0).abs() < 1e-12);
+    clear_env();
+}
+
+#[test]
+fn kelly_window_zero_clamps_to_one_and_invalid_fallback_defaults() {
+    let _env = lock_env();
+    clear_env();
+    std::env::set_var("KELLY_STATS_WINDOW", "0");      // 0 → en az 1'e clamp
+    std::env::set_var("FALLBACK_TP_PCT", "-1");        // negatif → default 3.0
+    let t = &AppState::new(RoboticLoopConfig::default()).tuning;
+    assert_eq!(t.kelly_stats_window, 1, "0 pencere → 1'e clamp");
+    assert!((t.fallback_tp_pct - 3.0).abs() < 1e-12, "negatif TP → default'a düşmeli");
     clear_env();
 }
 
