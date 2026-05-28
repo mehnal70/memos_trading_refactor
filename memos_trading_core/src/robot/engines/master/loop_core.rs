@@ -262,14 +262,36 @@ impl Engine {
                 }
             }
 
-            // ─── ScalpSwing A2: alt-kanal fırsat avı ──────────────────────────
-            // scalp_swing_config enabled (SCALP_SWING_ENABLE=1) ise ScalpEngine
-            // ve SwingEngine fırsat üretmeye çalışır; SlotGuard ile kanal-bazlı
-            // limit + hedge kontrolü yapılır. Uygun ise açılış doğrudan
-            // ScalpSwing patikasından gider (kind=Some(TradeType)) — bu turda
-            // klasik strateji yolu (Strategy.generate_signal) pas geçilir.
-            // Disabled ise sessiz false → eski davranış aynen.
-            if Self::try_open_scalp_swing(state, symbol, &candles).await {
+            // ─── Adım 1: rejim bağlamı (HTF-tercihli, cache'li) — ERKEN, tek-kaynak ───
+            // Eskiden rejim regular yolda (aşağıda) hesaplanıyordu; scalp_swing açarsa
+            // atlanıyordu → scalp/swing auto-gate base-1m classify_regime kullanıyordu
+            // (1m hep "Ranging" → scalp-only). Artık HTF rejim ERKEN hesaplanıp hem
+            // scalp/swing gate'ini hem regular yolu besler → denge geniş TF rejimle
+            // otonom sürülür (TRADE_INTERVAL/threshold zorlamadan). ensure_regime_patch
+            // de artık her cycle çalışır (scalp açsa bile) → TP/SL rejim patch'i tutarlı.
+            let (multi_tf_enabled, multi_tf_min) = state.lock().ok()
+                .and_then(|st| st.brain.parameters.read().ok()
+                    .map(|p| (p.multi_tf.enabled, p.multi_tf.min_required)))
+                .unwrap_or((true, crate::robot::data_pipeline::HTF_MIN_REQUIRED));
+            let htf_candles_vec = if multi_tf_enabled {
+                crate::robot::data_pipeline::load_htf_candles(db_path, symbol, interval, multi_tf_min)
+            } else {
+                Vec::new()
+            };
+            let htf_slice: Option<&[crate::core::types::Candle]> =
+                if htf_candles_vec.is_empty() { None } else { Some(&htf_candles_vec) };
+            let regime = Self::regime_for_cycle(
+                state, symbol, &candles, interval, htf_slice,
+                tuning.regime_context_ttl_secs, tuning.regime_gbt,
+            );
+            Self::ensure_regime_patch(state, regime.as_str());
+            Self::observe_regime_drift(state, regime.as_str());
+
+            // ─── ScalpSwing A2: alt-kanal fırsat avı (auto-gate yukarıdaki HTF rejimle) ──
+            // SCALP_SWING_ENABLE=1 ise Scalp/SwingEngine fırsat üretir; SlotGuard kanal-bazlı
+            // limit + hedge kontrolü yapar. Uygun ise açılış ScalpSwing patikasından gider
+            // (kind=Some(TradeType)); bu turda klasik strateji pas geçilir. Disabled → false.
+            if Self::try_open_scalp_swing(state, symbol, &candles, regime).await {
                 return;
             }
 
@@ -326,24 +348,7 @@ impl Engine {
                     .map(|p| p.resolve_strategy_params(&strategy_name)))
                 .unwrap_or_default();
 
-            // ─── Multi-TF Faz B c2/c3: HTF mumlarını yükle (env+param gate) ───
-            // load_htf_candles önce DB'den (HTF interval), yetersizse 1m'den
-            // CandleSynth ile aggregate. Boş Vec → strategies/utils
-            // htf_trend_filter `len() < slow` guard'ı ile pass-through yapar.
-            // MULTI_TF_ENABLED=false → htf=None ile legacy single-TF davranış.
-            let (multi_tf_enabled, multi_tf_min) = state.lock().ok()
-                .and_then(|st| st.brain.parameters.read().ok()
-                    .map(|p| (p.multi_tf.enabled, p.multi_tf.min_required)))
-                .unwrap_or((true, crate::robot::data_pipeline::HTF_MIN_REQUIRED));
-            let htf_candles_vec = if multi_tf_enabled {
-                crate::robot::data_pipeline::load_htf_candles(
-                    db_path, symbol, interval, multi_tf_min,
-                )
-            } else {
-                Vec::new()
-            };
-            let htf_slice: Option<&[crate::core::types::Candle]> =
-                if htf_candles_vec.is_empty() { None } else { Some(&htf_candles_vec) };
+            // (HTF mumları + rejim yukarıda ERKEN yüklendi — htf_slice/regime burada hazır.)
 
             // ─── Faz 3 (StrategyEval): sinyal üretimi ─────────────────────
             let signal = match strategy.generate_signal(&candles, &strat_params, None, htf_slice) {
@@ -395,14 +400,7 @@ impl Engine {
             // Faz 2 c4: edge_threshold rejim-bazlı override'a açık.
             // Faz 3 c1: rejim ilk kez görülüyorsa adaptive heuristic patch otomatik.
             // Faz 3 c3: rejim drift değişimi → ekstra savunmacı tighten + bildirim.
-            // Adım 1: rejim bağlamı — cache'li, HTF-tercihli, seyrek (TTL). Cold-start
-            // veya TTL=0'da eski classify_regime ile birebir (aynı tek-kaynak fn).
-            let regime = Self::regime_for_cycle(
-                state, symbol, &candles, interval, htf_slice,
-                tuning.regime_context_ttl_secs, tuning.regime_gbt,
-            );
-            Self::ensure_regime_patch(state, regime.as_str());
-            Self::observe_regime_drift(state, regime.as_str());
+            // (Rejim + ensure_regime_patch + observe_regime_drift yukarıda ERKEN yapıldı.)
             let edge_threshold = state.lock().ok()
                 .and_then(|st| st.brain.parameters.read().ok()
                     .map(|p| p.edge_threshold_for(regime.as_str(), ml_conf_used)))

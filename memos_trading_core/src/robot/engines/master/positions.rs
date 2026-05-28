@@ -14,6 +14,7 @@ impl Engine {
         state: &Arc<Mutex<AppState>>,
         symbol: &str,
         candles: &[Candle],
+        regime: crate::evolution::MarketRegime,
     ) -> bool {
         use crate::robot::scalp_swing::{
             ScalpEngine, SwingEngine, SlotGuard, OpenSlot, ScalpSwingConfig,
@@ -48,8 +49,10 @@ impl Engine {
         //   Weak*/Unknown         → her ikisi de aday (genel)
         // cfg.scalp_enabled/swing_enabled'in üstüne biner — disabled kanal
         // hiçbir koşulda açılmaz; enabled kanal yalnız uygun rejimde aday olur.
+        // Rejim artık çağırandan (process_symbol_cycle) geliyor: HTF-tercihli, cache'li
+        // RegimeContext (Adım 1) — base-1m classify_regime yerine. Geniş TF rejim →
+        // scalp/swing dengesi otonom: HTF trend → swing, ranging → scalp.
         use crate::evolution::MarketRegime;
-        let regime = Self::classify_regime(candles);
         if matches!(regime, MarketRegime::HighVolatility) {
             return false; // savunma
         }
