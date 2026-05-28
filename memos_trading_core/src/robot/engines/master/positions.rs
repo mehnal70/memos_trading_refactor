@@ -99,10 +99,16 @@ impl Engine {
             "{}_{}", opp.trade_type.label(),
             if opp.is_long { "BUY" } else { "SELL" },
         );
-        push_state_log(state, format!(
-            "⚡ ScalpSwing {} açılış: {} score={:.2} | {}",
-            opp.trade_type.label(), symbol, opp.score, opp.reason,
-        ));
+        // Bu "deneme" logu sembol başına throttle'lanır: fırsat her cycle (500ms)
+        // tespit edilip açılış re-entry cooldown / risk ile bloklanınca olay günlüğünü
+        // taşırıyordu (84/100 satır). Gerçek açılış zaten open_paper_position'da
+        // "🚀 [PAPER-...] açıldı" ile onaylanıyor → bu yalnız bağlam (score/reason).
+        if log_throttle_should_emit(symbol, "scalp_open_attempt", 60) {
+            push_state_log(state, format!(
+                "⚡ ScalpSwing {} açılış: {} score={:.2} | {}",
+                opp.trade_type.label(), symbol, opp.score, opp.reason,
+            ));
+        }
         Self::open_paper_position(
             state, symbol, &signal, candles, &strategy_name, Some(opp.trade_type),
         ).await;

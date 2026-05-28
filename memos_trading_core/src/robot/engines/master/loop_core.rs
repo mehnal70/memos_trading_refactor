@@ -480,10 +480,15 @@ impl Engine {
                         return;
                     }
                     Self::mark_pipeline_stage(state, PipelineStage::RiskGate, StepStatus::Done);
-                    push_state_log(state, format!(
-                        "📊 {} {} edge={:.2} ✓ + risk ✓ ⇒ POZİSYON AÇILIYOR (strat={})",
-                        symbol, signal_label, edge, strategy_name,
-                    ));
+                    // Sembol başına throttle: açılış re-entry cooldown / stale-feed ile
+                    // bloklanınca bu "AÇILIYOR" satırı her cycle basılıp olay günlüğünü
+                    // taşırıyordu. Gerçek açılış open_paper_position'da "🚀 açıldı" ile onaylanır.
+                    if log_throttle_should_emit(symbol, "open_attempt", 60) {
+                        push_state_log(state, format!(
+                            "📊 {} {} edge={:.2} ✓ + risk ✓ ⇒ POZİSYON AÇILIYOR (strat={})",
+                            symbol, signal_label, edge, strategy_name,
+                        ));
+                    }
                     Self::open_paper_position(state, symbol, &signal, &candles, &strategy_name, None).await;
                 }
                 // Pozisyon varken TERS yönde sinyal → kapanış (edge filtresi gevşek).
