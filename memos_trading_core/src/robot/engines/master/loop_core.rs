@@ -241,6 +241,26 @@ impl Engine {
                 return; // bu sembolde tur bitti, yeniden açılış aynı turda denenmesin
             }
 
+            // === 1.6) 🧊 STALE-FEED KAPISI: feed pratikte ölmüşse YENİ açılış yapma ===
+            // BTCUSDC örneği: mum günlerce eski + live_price donuk ($87.840,60 sabit) →
+            // donuk fiyat üzerinden phantom giriş/çıkış, sahte SL/TP ve komisyon erozyonu.
+            // Açık pozisyon yönetimi (1.5) etkilenmez; yalnız yeni açılış kısa-devre.
+            // Eşik RuntimeTuning'den (STALE_FEED_MAX_AGE_SECS); 0 → kapalı.
+            if tuning.stale_feed_max_age_secs > 0 {
+                if let Some(last) = candles.last() {
+                    if !candle_is_fresh_within(&last.timestamp, tuning.stale_feed_max_age_secs) {
+                        let age = (chrono::Utc::now() - last.timestamp).num_seconds();
+                        if log_throttle_should_emit(symbol, "stale_feed_skip", tuning.log_dataingest_cooldown_secs) {
+                            push_state_log(state, format!(
+                                "🧊 {} açılış atlandı: feed bayat (son mum {}sn eski > {}sn) — phantom giriş koruması",
+                                symbol, age, tuning.stale_feed_max_age_secs,
+                            ));
+                        }
+                        return;
+                    }
+                }
+            }
+
             // ─── ScalpSwing A2: alt-kanal fırsat avı ──────────────────────────
             // scalp_swing_config enabled (SCALP_SWING_ENABLE=1) ise ScalpEngine
             // ve SwingEngine fırsat üretmeye çalışır; SlotGuard ile kanal-bazlı

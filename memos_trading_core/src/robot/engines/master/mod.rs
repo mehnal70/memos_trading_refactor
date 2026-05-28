@@ -207,6 +207,12 @@ pub struct RuntimeTuning {
     /// SL fallback (%): ParameterStore trade_risk okunamazsa kullanılan son-çare. Default 1.5.
     /// Env FALLBACK_SL_PCT.
     pub fallback_sl_pct: f64,
+    /// 🧊 Stale-feed kapısı: en yeni mum bu süreden (sn) eskiyse sembolde YENİ açılış
+    /// yapılmaz — donuk/ölü feed'de phantom giriş koruması (BTCUSDC: mum günlerce eski,
+    /// live_price donuk → sahte SL/TP + churn). Açık pozisyon yönetimi etkilenmez.
+    /// 0 → kapalı. Default 3600 (1 saat). Yüksek interval'da (4h/1d) yükselt.
+    /// Env STALE_FEED_MAX_AGE_SECS.
+    pub stale_feed_max_age_secs: i64,
 }
 
 impl Default for RuntimeTuning {
@@ -236,6 +242,7 @@ impl Default for RuntimeTuning {
             kelly_stats_window: 50,
             fallback_tp_pct: 3.0,
             fallback_sl_pct: 1.5,
+            stale_feed_max_age_secs: 3600,
         }
     }
 }
@@ -292,6 +299,7 @@ impl RuntimeTuning {
                 let v = env_parse("FALLBACK_SL_PCT", d.fallback_sl_pct);
                 if v.is_finite() && v > 0.0 { v } else { d.fallback_sl_pct }
             },
+            stale_feed_max_age_secs: env_parse("STALE_FEED_MAX_AGE_SECS", d.stale_feed_max_age_secs),
         }
     }
 
