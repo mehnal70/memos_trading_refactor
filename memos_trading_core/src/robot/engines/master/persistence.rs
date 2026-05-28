@@ -260,6 +260,9 @@ impl Engine {
             "🚮 Delisted detection: {} sembolü {} ardışık fetch hatasından sonra purge ediliyor",
             symbol, n_fail,
         );
+        // Kalıcı dışlama: symbol_eligible_for_live artık reddeder → screener tekrar
+        // seçse bile price_poll/cycle/download yoklamaz (geri gelme döngüsü biter).
+        super::mark_delisted_skip(symbol);
         if let Ok(mut st) = state.lock() {
             // 1) Orchestrator'dan çıkar (stop_symbol = workers.remove + stop signal)
             let removed_from_orch = st.fleet.symbol_orchestrator.write()

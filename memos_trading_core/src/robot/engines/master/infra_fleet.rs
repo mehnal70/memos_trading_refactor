@@ -150,6 +150,8 @@ impl Engine {
                     if sym.is_empty() { continue; }
                     match fetcher.fetch_latest(sym, &interval, 1).await {
                         Ok(candles) => {
+                            // Fetch döndü → sembol borsada var (delisted değil); sayacı sıfırla.
+                            delisted_record_success(sym);
                             if let Some(last) = candles.last() {
                                 if last.close <= 0.0 { continue; }
                                 let age = (chrono::Utc::now() - last.timestamp).num_seconds();
@@ -170,6 +172,19 @@ impl Engine {
                         "price_poll: {} sembol için stale candle (>{}sn) — live_price güncellenmedi: {}",
                         stale_skipped.len(), max_candle_age, stale_skipped.join(","),
                     );
+                }
+
+                // 🚮 Delist tespiti: ardışık price-poll fetch hatası eşiği aşan sembolü
+                // purge et. price_poll 5sn'de → delisted (BEATUSDT/BLESSUSDT decode hatası)
+                // hızlı yakalanır; download'a (15dk) güvenmeden ApiError storm + "Recovering"
+                // sticky biter. Eşik altındakiler aşağıda yine ApiError anomaly basar.
+                let dl_threshold = delisted_detection_threshold();
+                let mut to_purge: Vec<(String, u32)> = Vec::new();
+                if dl_threshold > 0 {
+                    for (sym, _e) in &errors {
+                        let n = delisted_record_failure(sym);
+                        if n >= dl_threshold { to_purge.push((sym.clone(), n)); }
+                    }
                 }
 
                 let now_secs = started_at.elapsed().as_secs();
@@ -224,6 +239,9 @@ impl Engine {
                         };
                         pipe.record_step("price_poll", status, now_epoch_secs, 0);
                         for (sym, e) in &errors {
+                            // Bu tur purge edilecek (delisted) sembol için ApiError basma —
+                            // purge_delisted_symbol kendi DELISTED anomaly'sini düşürür.
+                            if to_purge.iter().any(|(s, _)| s == sym) { continue; }
                             pipe.push_anomaly(
                                 AnomalySeverity::Warning,
                                 AnomalyKind::ApiError,
@@ -232,6 +250,11 @@ impl Engine {
                         }
                     }
                     if let Some(msg) = summary_msg { st.push_log(msg); }
+                }
+
+                // Eşik aşan delisted sembolleri purge et (lock dışı — purge kendi lock'ını alır).
+                for (sym, n) in &to_purge {
+                    Self::purge_delisted_symbol(&st_px, sym, *n);
                 }
 
                 sleep(Duration::from_secs(poll_secs)).await;

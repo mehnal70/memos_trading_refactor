@@ -70,6 +70,27 @@ pub fn delisted_detection_threshold() -> u32 {
         .ok().and_then(|s| s.parse().ok()).unwrap_or(3)
 }
 
+/// Delisted olarak mühürlenmiş semboller (purge sonrası). `symbol_eligible_for_live`
+/// bunları reddeder → price_poll/cycle/download/hydrate (hepsi eligible kullanıyor)
+/// artık yoklamaz → ApiError storm + "Recovering" sticky biter, sembol geri gelmez.
+/// Oturum-içi (restart'ta price_poll ~threshold×poll_secs içinde yeniden tespit eder).
+static DELISTED_SKIP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>>
+    = std::sync::OnceLock::new();
+
+fn delisted_skip_set() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    DELISTED_SKIP.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Sembolü delisted-skip setine ekle (purge_delisted_symbol çağırır).
+pub fn mark_delisted_skip(symbol: &str) {
+    if let Ok(mut s) = delisted_skip_set().lock() { s.insert(symbol.to_string()); }
+}
+
+/// Sembol delisted-skip setinde mi (eligibility gate okur).
+pub fn is_delisted_skipped(symbol: &str) -> bool {
+    delisted_skip_set().lock().ok().map(|s| s.contains(symbol)).unwrap_or(false)
+}
+
 fn trail_obs_queue() -> &'static std::sync::Mutex<
     std::collections::VecDeque<crate::robot::parameters::PendingTrailObservation>
 > {
@@ -328,6 +349,9 @@ impl RuntimeTuning {
     /// varsa ya da operatör force ettiyse true. **Tüm market-bazlı dışlama tek nokta** —
     /// motorun başka hiçbir yerinde borsa-adı sabiti olmamalı.
     pub fn symbol_eligible_for_live(&self, symbol: &str) -> bool {
+        // Delisted tespit edilmiş sembol → her zaman uygun değil (tüm seçim noktaları
+        // bu gate'i kullandığı için tek noktada dışlanır).
+        if is_delisted_skipped(symbol) { return false; }
         let ex = crate::core::types::Exchange::classify(symbol);
         ex.has_live_feed() || self.force_live_exchanges.contains(&ex)
     }
