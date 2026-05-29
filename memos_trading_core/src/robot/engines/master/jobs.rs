@@ -934,7 +934,7 @@ impl Engine {
         // Canlı feed'i olmayan borsa sembolleri (örn. BIST) download'a gönderilmez →
         // aksi halde "Veri Format Hatası" log kirliliği. Karar market-agnostik tek nokta:
         // RuntimeTuning.symbol_eligible_for_live (hydrate/price_poll/cycle ile aynı).
-        let (symbols, interval, db_path, limit) = {
+        let (symbols, interval, symbol_interval, db_path, limit) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             let tuning = Arc::clone(&st.tuning);
             let eligible = |s: &str| tuning.symbol_eligible_for_live(s);
@@ -963,7 +963,9 @@ impl Engine {
                 }
             }
             syms.retain(|s| !s.is_empty());
-            (syms, st.config.interval.clone(), st.config.db_path.clone(),
+            let symbol_interval = st.brain.parameters.read().ok()
+                .map(|p| p.symbol_interval.clone()).unwrap_or_default();
+            (syms, st.config.interval.clone(), symbol_interval, st.config.db_path.clone(),
              st.config.download_candle_limit.max(50))
         };
 
@@ -987,7 +989,9 @@ impl Engine {
         let mut per_symbol_summary: Vec<String> = Vec::new();
 
         for sym in &symbols {
-            match fetcher.fetch_latest(sym, &interval, limit).await {
+            // Per-sembol otonom interval; map'te yoksa config.interval (sıfır regresyon).
+            let sym_iv = symbol_interval.get(sym).cloned().unwrap_or_else(|| interval.clone());
+            match fetcher.fetch_latest(sym, &sym_iv, limit).await {
                 Ok(candles) => {
                     // Başarılı fetch → delisted sayacını sıfırla (geçici hata
                     // sonrası sembol normalleştiyse yanlış pozitif olmasın).
@@ -1039,7 +1043,7 @@ impl Engine {
                             if let Some(stats) = crate::robot::parameters::compute_symbol_stats(&candles) {
                                 if let Ok(st) = state.lock() {
                                     if let Ok(mut params) = st.brain.parameters.write() {
-                                        params.update_symbol_stats(sym, &interval, stats);
+                                        params.update_symbol_stats(sym, &sym_iv, stats);
                                     }
                                 }
                             }
@@ -1054,8 +1058,8 @@ impl Engine {
                                 .and_then(|st| st.brain.parameters.read().ok()
                                     .map(|p| p.multi_tf.enabled && p.multi_tf.download_htf))
                                 .unwrap_or(true);
-                            let htf_interval = crate::robot::data_pipeline::DataPipeline::get_htf_interval(&interval);
-                            if download_htf && htf_interval != interval {
+                            let htf_interval = crate::robot::data_pipeline::DataPipeline::get_htf_interval(&sym_iv);
+                            if download_htf && htf_interval != sym_iv {
                                 let htf_limit = (limit / 4).max(50);
                                 match fetcher.fetch_latest(sym, htf_interval, htf_limit).await {
                                     Ok(htf_candles) if !htf_candles.is_empty() => {

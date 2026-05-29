@@ -315,6 +315,12 @@ pub struct ParameterStore {
     /// cycle `resolve_strategy_params` ile okur, yoksa `StrategyParams::default()`.
     #[serde(default)]
     pub strategy_params: HashMap<String, crate::core::types::StrategyParams>,
+    /// Per-sembol otonom trading interval (TF). Key = sembol, value = "15m"/"1h"...
+    /// Değerlendirme job'ı (jobs.rs) aday TF'ler arası walk-forward A/B ile doldurur;
+    /// cycle dispatch + download per-sembol bu TF'i kullanır. Boş ise tüm semboller
+    /// `config.interval`'e düşer (sıfır regresyon). [[project_adaptive_regime]].
+    #[serde(default)]
+    pub symbol_interval: HashMap<String, String>,
 }
 
 /// Strateji niyetiyle hizalı default trail target'lar (yüzde, entry'den uzaklık).
@@ -364,6 +370,7 @@ impl Default for ParameterStore {
             multi_tf: MultiTfParams::default(),
             leverage: LeverageParams::default(),
             strategy_params: HashMap::new(),
+            symbol_interval: HashMap::new(),
         }
     }
 }
@@ -539,6 +546,13 @@ impl ParameterStore {
             .and_then(|p| p.policy)
             .and_then(|pol| pol.regime_directional)
             .unwrap_or(fallback)
+    }
+
+    /// Bu sembol için otonom seçilmiş trading interval; yoksa `fallback` (config.interval).
+    /// `symbol_interval` map'i değerlendirme job'ı doldurur; boş → tüm semboller fallback
+    /// (sıfır regresyon). Cycle dispatch + download tek-nokta bunu çağırır.
+    pub fn interval_for(&self, symbol: &str, fallback: &str) -> String {
+        self.symbol_interval.get(symbol).cloned().unwrap_or_else(|| fallback.to_string())
     }
 
     /// İlgili rejim için (override varsa o, yoksa base) TradeRiskParams.
@@ -1356,6 +1370,17 @@ mod tests {
         assert!(s.regime_directional_for("Ranging", true));
         // is_empty: yalnız policy taşıyan patch boş sayılmaz.
         assert!(!RegimePatch::empty().with_policy(RegimePolicy { regime_directional: Some(true) }).is_empty());
+    }
+
+    #[test]
+    fn interval_for_uses_map_else_fallback() {
+        let mut s = ParameterStore::default();
+        // Boş map → her sembol fallback (config.interval).
+        assert_eq!(s.interval_for("BTCUSDT", "1h"), "1h");
+        // Map'e yaz → o sembol map'ten, diğeri fallback.
+        s.symbol_interval.insert("BTCUSDT".into(), "15m".into());
+        assert_eq!(s.interval_for("BTCUSDT", "1h"), "15m");
+        assert_eq!(s.interval_for("ETHUSDT", "1h"), "1h");
     }
 
     #[test]

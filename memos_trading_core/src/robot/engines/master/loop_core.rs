@@ -148,7 +148,7 @@ impl Engine {
     /// → aç/kapat kararı.
     pub(crate) async fn execute_trade_cycle(state: &Arc<Mutex<AppState>>, snap: &MissionControl) {
         // 1) Mark-to-market: aktif pozisyonların current_price'ı güncel.
-        let (candidates, db_path, interval, live_strategy, ml_confidence, tuning) = {
+        let (candidates, db_path, interval, symbol_interval, live_strategy, ml_confidence, tuning) = {
             let st = match state.lock() { Ok(s) => s, Err(_) => return };
             let price_map = st.fleet.live_price.read().ok().map(|g| g.clone()).unwrap_or_default();
             if let Ok(mut positions) = st.finance.live_positions.write() {
@@ -181,8 +181,11 @@ impl Engine {
             }
             let live_strategy = st.brain.live_strategy.read()
                 .map(|s| s.clone()).unwrap_or_else(|_| "MA_CROSSOVER".to_string());
+            // Per-sembol otonom interval map'i (boş → tüm semboller config.interval'e düşer).
+            let symbol_interval = st.brain.parameters.read().ok()
+                .map(|p| p.symbol_interval.clone()).unwrap_or_default();
             (candidates, st.config.db_path.clone(), st.config.interval.clone(),
-             live_strategy, st.brain.ml_confidence, tuning)
+             symbol_interval, live_strategy, st.brain.ml_confidence, tuning)
         };
 
         // 2) Paralel sembol infazı — her sembol için ayrı tokio task. State Arc<Mutex> üzerinden
@@ -195,7 +198,8 @@ impl Engine {
         for symbol in candidates {
             let state_clone = Arc::clone(state);
             let db_path_c = db_path.clone();
-            let interval_c = interval.clone();
+            // Per-sembol otonom interval; map'te yoksa config.interval (sıfır regresyon).
+            let interval_c = symbol_interval.get(&symbol).cloned().unwrap_or_else(|| interval.clone());
             let live_strategy_c = live_strategy.clone();
             let snap_clone = snap.clone();
             let tuning_c = Arc::clone(&tuning);
