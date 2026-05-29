@@ -798,6 +798,40 @@ impl Engine {
             regime_min_samples,
         );
 
+        // ─── 3c) Per-sembol otonom INTERVAL A/B (aday TF'ler arası WF skoru) ──────
+        // Aday TF'lerden (env AUTO_INTERVAL_CANDIDATES, default 15m,1h) her biri için o
+        // sembolün o TF'deki mumlarıyla WF skoru (sharpe + tutarlılık) hesapla; en iyiyi
+        // evaluate_symbol_interval (→ pick_best_with_margin) ile seç (mevcut TF'i marjla
+        // geçmezse değişme = flip-flop guard). Chicken-egg: yeterli mumu olmayan aday atlanır.
+        let auto_iv_candidates: Vec<String> = std::env::var("AUTO_INTERVAL_CANDIDATES")
+            .unwrap_or_else(|_| "15m,1h".into())
+            .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        let min_iv_bars = wf_is + wf_oos; // en az bir IS+OOS penceresi
+        // Mevcut seçim: önce symbol_interval, yoksa config.interval (flip-flop guard referansı).
+        let current_iv = state.lock().ok()
+            .and_then(|st| st.brain.parameters.read().ok()
+                .and_then(|p| p.symbol_interval.get(&symbol).cloned()))
+            .unwrap_or_else(|| interval.clone());
+        const IV_MARGIN: f64 = 0.05;
+        let (iv_chosen, iv_scored) = crate::robot::backtester::walk_forward::evaluate_symbol_interval(
+            &auto_iv_candidates,
+            |tf| crate::persistence::reader::read_candles(&db_path, &symbol, tf, 5000).unwrap_or_default(),
+            |tf, cand_candles| {
+                if cand_candles.len() < min_iv_bars { return None; }
+                let wf_cfg = WalkForwardConfig {
+                    in_sample_bars: wf_is, out_of_sample_bars: wf_oos, step_bars: wf_step,
+                    initial_balance: capital, strategy_name: best_name.clone(),
+                    symbol: symbol.clone(), interval: tf.to_string(),
+                    commission_pct: 0.001, use_htf, edge_min_score: edge_min,
+                    orderbook_sim: orderbook_sim.clone(),
+                };
+                WalkForwardTester::new(wf_cfg).run(cand_candles).map(|wf|
+                    wf.avg_oos_sharpe * (1.0 - WF_CONSISTENCY_WEIGHT)
+                        + wf.consistency_score * WF_CONSISTENCY_WEIGHT)
+            },
+            Some(&current_iv), IV_MARGIN,
+        );
+
         // brain.live_strategy + best_params + ParameterStore.trade_risk güncellenir.
         {
             let mut st = state.lock().map_err(|e| format!("state lock: {}", e))?;
@@ -840,6 +874,23 @@ impl Engine {
                 if let Some((sp, _, _)) = &best_strategy_params {
                     params.set_strategy_params(best_name.clone(), *sp);
                 }
+                // Per-sembol otonom interval kazananı (evaluate_symbol_interval seçti):
+                // mevcuttan farklıysa yaz. Aynı/None ise dokunma (flip-flop guard zaten
+                // pick_best_with_margin'de uygulandı).
+                if let Some(ref best) = iv_chosen {
+                    if *best != current_iv {
+                        params.symbol_interval.insert(symbol.clone(), best.clone());
+                    }
+                }
+            }
+            // Per-sembol otonom interval seçimi (varsa) — gözlemlenebilirlik.
+            if let Some(ref iv) = iv_chosen {
+                let scores: Vec<String> = iv_scored.iter()
+                    .map(|(c, s)| format!("{c}={s:.2}")).collect();
+                st.push_log(format!(
+                    "📐 {} auto-interval → {} (aday skorları: {})",
+                    symbol, iv, scores.join(" "),
+                ));
             }
             // hyperopt_score WF skoruna mühürlenir — UI/legacy okuyucular için
             // overfitting-koruyucu seçim ölçütü.
@@ -907,6 +958,9 @@ impl Engine {
                 "step_bars": wf_step,
                 "regime_overrides": regime_breakdown,
                 "regime_min_samples": regime_min_samples,
+                "auto_interval": iv_chosen,
+                "auto_interval_scores": iv_scored.iter()
+                    .map(|(c, s)| (c.clone(), serde_json::json!(s))).collect::<serde_json::Map<_, _>>(),
                 "sealed_at": chrono::Utc::now().to_rfc3339(),
             })
         };

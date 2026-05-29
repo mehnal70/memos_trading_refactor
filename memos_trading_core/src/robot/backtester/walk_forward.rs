@@ -312,6 +312,31 @@ pub(crate) fn pick_best_with_margin<T: Clone + PartialEq>(
     }
 }
 
+/// Per-sembol otonom INTERVAL seçimi (otonom `symbol_interval` girdisi). Her aday TF için
+/// `load(tf) -> candles` ile o TF'in mumlarını yükle, `score(tf, &candles) -> Option<f64>`
+/// ile WF skoru hesapla (yeterli mumu olmayan/skorlanamayan aday → None ile atlanır),
+/// sonra `pick_best_with_margin` ile mevcut `current`'i `margin` ile geçen en iyiyi seç.
+/// Döner: (seçim, tüm aday skorları) — skorlar log/snapshot için. Hiç aday yoksa (None, []).
+/// `score`/`load` closure'ları persistence + WalkForwardTester'ı çağırana bırakır (decoupled,
+/// test edilebilir). Faz 0 `pick_best_with_margin`'i yeniden kullanır. [[project_adaptive_regime]].
+pub fn evaluate_symbol_interval<L, S>(
+    candidates: &[String], load: L, score: S, current: Option<&str>, margin: f64,
+) -> (Option<String>, Vec<(String, f64)>)
+where
+    L: Fn(&str) -> Vec<Candle>,
+    S: Fn(&str, &[Candle]) -> Option<f64>,
+{
+    let mut scored: Vec<(String, f64)> = Vec::new();
+    for c in candidates {
+        let candles = load(c);
+        if let Some(s) = score(c, &candles) { scored.push((c.clone(), s)); }
+    }
+    if scored.is_empty() { return (None, scored); }
+    let cur = current.map(|s| s.to_string());
+    let choice = pick_best_with_margin(&scored, cur.as_ref(), margin);
+    (choice, scored)
+}
+
 /// Per-rejim YÖN DİSİPLİNİ A/B'si (otonom `RegimePolicy.regime_directional` girdisi).
 /// Her rejimin OOS pencerelerinde aynı strateji/param ile LongOnly vs RegimeDirectional
 /// backtest koşar, rejim başına toplam PnL'i kıyaslar. Dönen map: regime → disiplin
@@ -429,6 +454,30 @@ mod tests {
         let only_short = score_config_over_windows(&dir_base_cfg(), &candles, &[wnd(100, 110, 4.0, 2.0)]);
         assert_eq!(only_short, 0.0, "kısa pencere (<30) atlanmalı");
         assert!(s_all.is_finite());
+    }
+
+    #[test]
+    fn evaluate_symbol_interval_selects_and_skips_and_holds() {
+        let cands = vec!["5m".to_string(), "15m".to_string(), "1h".to_string()];
+        // load: hepsi dolu (boş döndürmüyoruz); score: 5m skorlanamaz (None → atlanır),
+        // 15m=1.0, 1h=1.5. current yok → en iyi (1h) + skorlar 5m hariç.
+        let load = |_tf: &str| -> Vec<Candle> { vec![Candle::default(); 100] };
+        let score = |tf: &str, _c: &[Candle]| -> Option<f64> {
+            match tf { "5m" => None, "15m" => Some(1.0), "1h" => Some(1.5), _ => None }
+        };
+        let (choice, scored) = evaluate_symbol_interval(&cands, load, score, None, 0.0);
+        assert_eq!(choice, Some("1h".to_string()));
+        assert_eq!(scored.len(), 2, "5m skorlanamadı → atlanmalı");
+
+        // current=15m, margin 1.0: 1h (1.5) > 15m (1.0)+1.0=2.0 DEĞİL → 15m korunur.
+        let (hold, _) = evaluate_symbol_interval(&cands, load, score, Some("15m"), 1.0);
+        assert_eq!(hold, Some("15m".to_string()), "marj altında interval değişmemeli");
+
+        // Hiçbir aday skorlanamazsa (None,[]) — flip-flop/yanlış yazım önleme.
+        let none_score = |_tf: &str, _c: &[Candle]| -> Option<f64> { None };
+        let (empty_choice, empty_scored) = evaluate_symbol_interval(&cands, load, none_score, Some("1h"), 0.0);
+        assert_eq!(empty_choice, None);
+        assert!(empty_scored.is_empty());
     }
 
     #[test]
