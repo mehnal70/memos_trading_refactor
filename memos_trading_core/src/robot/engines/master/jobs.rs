@@ -1161,6 +1161,39 @@ impl Engine {
             }
         }
 
+        // 3b) Faz 3 — Otonom interval eval'in chicken-egg'i: konfigüre sembol için
+        // AUTO_INTERVAL_CANDIDATES TF'lerini de çek (ana loop yalnız sym_iv'yi çeker).
+        // Böylece run_backtest_job aday TF'leri GERÇEK veriyle kıyaslayabilir. Yalnız
+        // TEK sembol (config.symbol) + bounded aday → API yükü sınırlı. Zaten çekilen
+        // sym_iv atlanır. [[project_adaptive_regime]] Faz 3.
+        let auto_iv_candidates: Vec<String> = std::env::var("AUTO_INTERVAL_CANDIDATES")
+            .unwrap_or_else(|_| "15m,1h".into())
+            .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        if !auto_iv_candidates.is_empty() {
+            let cfg_symbol = state.lock().ok().map(|st| st.config.symbol.clone()).unwrap_or_default();
+            let primary_iv = symbol_interval.get(&cfg_symbol).cloned().unwrap_or_else(|| interval.clone());
+            if !cfg_symbol.is_empty() {
+                for cand in auto_iv_candidates.iter().filter(|c| **c != primary_iv) {
+                    match fetcher.fetch_latest(&cfg_symbol, cand, limit).await {
+                        Ok(c) if !c.is_empty() => {
+                            let db2 = db_path.clone();
+                            let cc = c.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                if let Ok(conn) = rusqlite::Connection::open(&db2) {
+                                    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+                                    for k in &cc {
+                                        let _ = crate::persistence::writer::save_candle(&conn, "binance", "spot", k);
+                                    }
+                                }
+                            }).await;
+                            log::info!("🌐 aday-TF mum: {} {} ({} mum, interval-eval için)", cfg_symbol, cand, c.len());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         // 4) Özet
         log::info!(
             "🌐 Download ✓ tamamlandı: {} mum (başarılı={}, başarısız={}) · {}",
