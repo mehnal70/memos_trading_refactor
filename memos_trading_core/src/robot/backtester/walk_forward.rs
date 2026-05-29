@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use rayon::prelude::*; // Paralel işleme desteği
 use crate::core::types::Candle;
-use crate::robot::backtester::{Backtester, BacktestConfig, BacktestResult};
+use crate::robot::backtester::{Backtester, BacktestConfig, BacktestResult, DirectionMode};
 
 // --- 1. YAPILANDIRMA VE SONUÇ MODELLERİ ---
 
@@ -265,6 +265,48 @@ where
     out
 }
 
+/// Per-rejim YÖN DİSİPLİNİ A/B'si (otonom `RegimePolicy.regime_directional` girdisi).
+/// Her rejimin OOS pencerelerinde aynı strateji/param ile LongOnly vs RegimeDirectional
+/// backtest koşar, rejim başına toplam PnL'i kıyaslar. Dönen map: regime → disiplin
+/// uygulansın mı (`RegimeDirectional PnL >= LongOnly PnL`). `min_samples` altı rejimler
+/// atlanır. `base`'in YALNIZ `direction`'ı override edilir (gate/strateji/param sabit →
+/// izole yön etkisi). `run_backtest_job` bunu `regime_overrides[regime].policy`'ye yazar;
+/// canlı cycle o rejimde `regime_directional_for` ile okur. [[project_adaptive_regime]].
+pub fn evaluate_regime_direction<F>(
+    candles: &[Candle],
+    windows: &[WindowResult],
+    classify: F,
+    base: &BacktestConfig,
+    min_samples: usize,
+) -> HashMap<String, bool>
+where
+    F: Fn(&[Candle]) -> String,
+{
+    // regime → (long_pnl_toplam, regimedir_pnl_toplam, pencere_sayısı)
+    let mut acc: HashMap<String, (f64, f64, usize)> = HashMap::new();
+    for w in windows {
+        let (start, end) = w.oos_range;
+        if end > candles.len() || start >= end { continue; }
+        let slice = &candles[start..end];
+        if slice.len() < 30 { continue; } // anlamlı backtest için min derinlik
+        let regime = classify(slice);
+        let run = |dir: DirectionMode| -> f64 {
+            let mut c = base.clone();
+            c.direction = dir;
+            Backtester::new(c).run(slice).map(|r| r.total_pnl).unwrap_or(0.0)
+        };
+        let lp = run(DirectionMode::LongOnly);
+        let rp = run(DirectionMode::RegimeDirectional);
+        let e = acc.entry(regime).or_insert((0.0, 0.0, 0));
+        e.0 += lp; e.1 += rp; e.2 += 1;
+    }
+    // RD >= Long → disiplin uygula (eşitlikte uygula: RD ayrıca tail-risk azaltır).
+    acc.into_iter()
+        .filter(|(_, (_, _, n))| *n >= min_samples)
+        .map(|(r, (lp, rp, _))| (r, rp >= lp))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,6 +352,54 @@ mod tests {
         assert_eq!(t.sample_count, 3);
         assert!((t.median_tp_pct - 6.0).abs() < 1e-9);
         assert!((t.median_sl_pct - 3.0).abs() < 1e-9);
+    }
+
+    fn dir_base_cfg() -> BacktestConfig {
+        BacktestConfig {
+            symbol: "T".into(), interval: "1h".into(),
+            initial_balance: 10_000.0, max_position_size: 1.0,
+            take_profit_pct: 4.0, stop_loss_pct: 2.0,
+            strategy_name: "EMA_CROSSOVER".into(),
+            commission_pct: 0.0004, breakeven_at_rr: Some(1.0), atr_trail_mult: Some(2.0),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn evaluate_regime_direction_prefers_directional_in_downtrend() {
+        use chrono::{TimeZone, Utc};
+        // İstikrarlı düşüş: LongOnly ya işlem açmaz ya zarar; RegimeDirectional short ile
+        // yakalar → rp >= lp → "Down" rejimi için true.
+        let candles: Vec<Candle> = (0..200).map(|i| {
+            let f = i as f64;
+            let c = 200.0 - 0.10 * f + 4.0 * (f * 0.3).sin();
+            Candle {
+                timestamp: Utc.timestamp_opt(1_700_000_000 + i as i64 * 3600, 0).unwrap(),
+                open: c, high: c * 1.004, low: c * 0.996, close: c,
+                volume: 1000.0, symbol: "T".into(), interval: "1h".into(),
+            }
+        }).collect();
+        let windows = vec![wnd(0, 200, 4.0, 2.0)];
+        let map = evaluate_regime_direction(
+            &candles, &windows, |_| "Down".to_string(), &dir_base_cfg(), 1,
+        );
+        assert_eq!(map.get("Down"), Some(&true),
+            "düşüşte RegimeDirectional LongOnly'yi en az eşitlemeli (short kazancı)");
+    }
+
+    #[test]
+    fn evaluate_regime_direction_respects_min_samples() {
+        let candles: Vec<Candle> = (0..60).map(|i| Candle {
+            close: 100.0 - i as f64, open: 100.0 - i as f64,
+            high: 100.0 - i as f64, low: 100.0 - i as f64,
+            ..Default::default()
+        }).collect();
+        // Tek pencere → n=1; min_samples=2 ile elenir → boş map.
+        let windows = vec![wnd(0, 60, 4.0, 2.0)];
+        let map = evaluate_regime_direction(
+            &candles, &windows, |_| "Down".to_string(), &dir_base_cfg(), 2,
+        );
+        assert!(map.is_empty(), "min_samples=2 altında rejim yazılmamalı");
     }
 
     #[test]

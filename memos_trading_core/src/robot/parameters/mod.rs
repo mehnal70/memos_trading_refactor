@@ -31,6 +31,10 @@ pub struct RegimePatch {
     pub edge_thresholds: Option<EdgeThresholds>,
     #[serde(default)]
     pub trade_risk: Option<TradeRiskParams>,
+    /// Otonom işlem politikası (yön disiplini vb.) — değerlendirme job'ı backtest
+    /// A/B sonucuna göre doldurur, canlı cycle bu rejimde okur. None → env/operatör.
+    #[serde(default)]
+    pub policy: Option<RegimePolicy>,
 }
 
 impl RegimePatch {
@@ -46,11 +50,28 @@ impl RegimePatch {
         self
     }
 
+    pub fn with_policy(mut self, p: RegimePolicy) -> Self {
+        self.policy = Some(p);
+        self
+    }
+
     /// Patch hiçbir alanı override etmiyor mu? Engine boş patch'leri store'a
     /// koymaktan kaçınmak için bunu kontrol eder.
     pub fn is_empty(&self) -> bool {
-        self.edge_thresholds.is_none() && self.trade_risk.is_none()
+        self.edge_thresholds.is_none() && self.trade_risk.is_none() && self.policy.is_none()
     }
+}
+
+/// Per-rejim otonom işlem politikası. Değerlendirme job'ı (jobs.rs) her rejim için
+/// backtest A/B (LongOnly vs RegimeDirectional, OOS) koşup kazananı buraya yazar;
+/// canlı cycle o rejimdeyken okur. Tüm alanlar Option → None = env/operatör davranışına
+/// düş (geriye-uyum, sıfır regresyon). [[project_adaptive_regime]] [[feedback_autonomy_first]].
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct RegimePolicy {
+    /// Bu rejimde rejim-yön disiplini uygulansın mı? (long yalnız non-downtrend, short
+    /// yalnız non-uptrend). A/B OOS kazancına göre otonom seçilir. None → env fallback.
+    #[serde(default)]
+    pub regime_directional: Option<bool>,
 }
 
 /// Rejim-bazlı trade feedback kuyruğu. Faz 3 c2: her kapanış pnl_pct'sini ilgili
@@ -508,6 +529,16 @@ impl ParameterStore {
     /// `edge_thresholds_for` üstüne `for_confidence` zinciri — engine direkt çağırır.
     pub fn edge_threshold_for(&self, regime: &str, ml_confidence: f64) -> f64 {
         self.edge_thresholds_for(regime).for_confidence(ml_confidence)
+    }
+
+    /// Bu rejimde rejim-yön disiplini uygulanmalı mı? Otonom per-rejim policy varsa onu
+    /// (değerlendirme job'ı backtest A/B ile doldurur), yoksa `fallback` (RuntimeTuning
+    /// env'i). Sparse: policy yoksa/None ise fallback → sıfır regresyon.
+    pub fn regime_directional_for(&self, regime: &str, fallback: bool) -> bool {
+        self.regime_overrides.get(regime)
+            .and_then(|p| p.policy)
+            .and_then(|pol| pol.regime_directional)
+            .unwrap_or(fallback)
     }
 
     /// İlgili rejim için (override varsa o, yoksa base) TradeRiskParams.
@@ -1305,6 +1336,26 @@ mod tests {
 
         // Patch'siz başka bir rejim base'i kullanır
         assert!((s.edge_threshold_for("Ranging", 0.99) - 0.55).abs() < 1e-9);
+    }
+
+    #[test]
+    fn regime_directional_policy_overrides_fallback() {
+        let mut s = ParameterStore::default();
+        // Policy yokken her rejim env fallback'e düşer (sparse, sıfır regresyon).
+        assert!(s.regime_directional_for("Ranging", true));
+        assert!(!s.regime_directional_for("Ranging", false));
+        // HighVolatility için policy: disiplin AÇIK; StrongUptrend için KAPALI.
+        s.set_regime_patch("HighVolatility",
+            RegimePatch::empty().with_policy(RegimePolicy { regime_directional: Some(true) }));
+        s.set_regime_patch("StrongUptrend",
+            RegimePatch::empty().with_policy(RegimePolicy { regime_directional: Some(false) }));
+        // Policy fallback'i EZER (her iki fallback değerinde de).
+        assert!(s.regime_directional_for("HighVolatility", false), "policy=true fallback=false'u ezmeli");
+        assert!(!s.regime_directional_for("StrongUptrend", true), "policy=false fallback=true'yu ezmeli");
+        // Policy'siz rejim hâlâ fallback.
+        assert!(s.regime_directional_for("Ranging", true));
+        // is_empty: yalnız policy taşıyan patch boş sayılmaz.
+        assert!(!RegimePatch::empty().with_policy(RegimePolicy { regime_directional: Some(true) }).is_empty());
     }
 
     #[test]

@@ -772,6 +772,32 @@ impl Engine {
             regime_min_samples,
         );
 
+        // ─── 3b) Per-rejim YÖN disiplini A/B (otonom RegimePolicy) ───────────
+        // Her rejimin OOS pencerelerinde LongOnly vs RegimeDirectional backtest →
+        // kazanan regime_overrides[regime].policy'ye yazılır, canlı cycle o rejimde
+        // regime_directional_for ile okur (env yerine veri-temelli, per-rejim otonom).
+        let dir_ab_base = crate::robot::backtester::BacktestConfig {
+            symbol: symbol.clone(),
+            interval: interval.clone(),
+            initial_balance: capital,
+            max_position_size: final_res.best_parameters.max_position_size,
+            take_profit_pct: final_res.best_parameters.take_profit_pct,
+            stop_loss_pct: final_res.best_parameters.stop_loss_pct,
+            strategy_name: best_name.clone(),
+            strategy_params: best_strategy_params.as_ref().map(|(sp, _, _)| *sp),
+            commission_pct: 0.001,
+            use_htf,
+            edge_min_score: edge_min,
+            ..Default::default()
+        };
+        let regime_dir_map = crate::robot::backtester::walk_forward::evaluate_regime_direction(
+            &candles,
+            &best_wf_res.windows,
+            |oos_slice| Self::classify_regime(oos_slice).as_str().to_string(),
+            &dir_ab_base,
+            regime_min_samples,
+        );
+
         // brain.live_strategy + best_params + ParameterStore.trade_risk güncellenir.
         {
             let mut st = state.lock().map_err(|e| format!("state lock: {}", e))?;
@@ -793,17 +819,22 @@ impl Engine {
                     final_res.best_parameters.stop_loss_pct,
                     final_res.best_parameters.max_position_size,
                 );
-                // Rejim katmanları — PS global, TP/SL rejime özgü.
+                // Rejim katmanları — PS global, TP/SL rejime özgü + otonom yön policy.
                 for (regime, agg) in &regime_agg {
                     let trade_risk = crate::robot::parameters::TradeRiskParams {
                         take_profit_pct:   agg.median_tp_pct,
                         stop_loss_pct:     agg.median_sl_pct,
                         max_position_size: final_res.best_parameters.max_position_size,
                     };
-                    params.set_regime_patch(
-                        regime.clone(),
-                        crate::robot::parameters::RegimePatch::empty().with_trade_risk(trade_risk),
-                    );
+                    let mut patch = crate::robot::parameters::RegimePatch::empty()
+                        .with_trade_risk(trade_risk);
+                    // Per-rejim yön disiplini A/B kazananı (varsa) → RegimePolicy.
+                    if let Some(&directional) = regime_dir_map.get(regime) {
+                        patch = patch.with_policy(crate::robot::parameters::RegimePolicy {
+                            regime_directional: Some(directional),
+                        });
+                    }
+                    params.set_regime_patch(regime.clone(), patch);
                 }
                 // Kazanan stratejinin yapısal (indikatör) parametreleri — Faz 1b.
                 if let Some((sp, _, _)) = &best_strategy_params {
@@ -842,8 +873,9 @@ impl Engine {
             } else {
                 let mut entries: Vec<String> = regime_agg.iter()
                     .map(|(r, a)| format!(
-                        "{r}(n={}) TP={:.1}% SL={:.1}%",
+                        "{r}(n={}) TP={:.1}% SL={:.1}% dir={}",
                         a.sample_count, a.median_tp_pct, a.median_sl_pct,
+                        match regime_dir_map.get(r) { Some(true) => "RD", Some(false) => "long", None => "—" },
                     ))
                     .collect();
                 entries.sort();
@@ -857,6 +889,7 @@ impl Engine {
                 "median_tp_pct": a.median_tp_pct,
                 "median_sl_pct": a.median_sl_pct,
                 "sample_count": a.sample_count,
+                "regime_directional": regime_dir_map.get(r).copied(),
             })))
             .collect::<serde_json::Map<_, _>>()
             .into();

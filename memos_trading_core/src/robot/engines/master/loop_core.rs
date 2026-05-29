@@ -287,11 +287,19 @@ impl Engine {
             Self::ensure_regime_patch(state, regime.as_str());
             Self::observe_regime_drift(state, regime.as_str());
 
+            // 🧭 Rejim-yön disiplini: ÖNCE per-rejim otonom policy (değerlendirme job'ı
+            // backtest A/B ile regime_overrides'a yazar), YOKSA RuntimeTuning env'i. Tek
+            // noktada çözülüp her iki açılış yoluna (ScalpSwing + regular) verilir.
+            let regime_directional_eff = state.lock().ok()
+                .and_then(|st| st.brain.parameters.read().ok()
+                    .map(|p| p.regime_directional_for(regime.as_str(), tuning.regime_directional)))
+                .unwrap_or(tuning.regime_directional);
+
             // ─── ScalpSwing A2: alt-kanal fırsat avı (auto-gate yukarıdaki HTF rejimle) ──
             // SCALP_SWING_ENABLE=1 ise Scalp/SwingEngine fırsat üretir; SlotGuard kanal-bazlı
             // limit + hedge kontrolü yapar. Uygun ise açılış ScalpSwing patikasından gider
             // (kind=Some(TradeType)); bu turda klasik strateji pas geçilir. Disabled → false.
-            if Self::try_open_scalp_swing(state, symbol, &candles, regime, tuning.regime_directional).await {
+            if Self::try_open_scalp_swing(state, symbol, &candles, regime, regime_directional_eff).await {
                 return;
             }
 
@@ -445,7 +453,7 @@ impl Engine {
                     // 🧭 Rejim-yön kapısı (opt-in): canlı motor Sell→short açıyor (Both modu);
                     // bu kapı ters-trend girişini eler (A/B: Both -661 → RegimeDirectional +980).
                     // Tek-kaynak `regime_confirms_direction`; default kapalı → davranış değişmez.
-                    if tuning.regime_directional
+                    if regime_directional_eff
                         && !crate::robot::logic::market_regime::regime_confirms_direction(
                             regime, matches!(signal, crate::core::types::Signal::Buy))
                     {
