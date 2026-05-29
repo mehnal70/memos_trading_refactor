@@ -69,6 +69,12 @@ impl Agg {
 }
 
 fn cfg_for(symbol: &str, strat: &str, ref_price: f64, gate: RegimeGate, dir: DirectionMode) -> BacktestConfig {
+    cfg_full(symbol, strat, ref_price, gate, dir, None)
+}
+
+fn cfg_full(
+    symbol: &str, strat: &str, ref_price: f64, gate: RegimeGate, dir: DirectionMode, ob: Option<&str>,
+) -> BacktestConfig {
     let initial = 10_000.0;
     BacktestConfig {
         symbol: symbol.to_string(),
@@ -84,6 +90,7 @@ fn cfg_for(symbol: &str, strat: &str, ref_price: f64, gate: RegimeGate, dir: Dir
         atr_trail_mult: Some(2.0),
         regime_gate: gate,
         direction: dir,
+        orderbook_sim: ob.map(|s| s.to_string()),
         ..Default::default()
     }
 }
@@ -188,4 +195,79 @@ fn direction_ab() {
     eprintln!("yapısal kaldıraç gerçek → canlıya opt-in bağla; aksi halde long-only kalsın.\n");
 
     assert!(used_symbols > 0);
+}
+
+#[test]
+#[ignore = "veri-bağımlı; elle: cargo test --test regime_gate_ab direction_robustness -- --ignored --nocapture"]
+fn direction_robustness_ab() {
+    // Doğrulama kapıları #1 (walk-forward/OOS tutarlılık) + #2 (slippage). Aggregate
+    // +980 tek bir ayı dönemine mi bağlı? Seriyi K ardışık ZAMAN DİLİMİNE böl; her dilimde
+    // LongOnly vs RegimeDirectional vs RegimeDirectional+slippage. Tutarlılık = RegimeDir'in
+    // LongOnly'yi YENDİĞİ dilim sayısı (tek-dönem artefaktı değilse çoğunu yenmeli).
+    let Some(db) = resolve_db() else {
+        eprintln!("⏭  DB bulunamadı — robustluk A/B atlandı.");
+        return;
+    };
+    eprintln!("📂 DB: {db}");
+
+    let symbols = [
+        "BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT",
+        "XRPUSDT", "TRXUSDT", "DOGEUSDT", "ZECUSDT",
+    ];
+    let strategies = ["SUPERTREND", "EMA_CROSSOVER", "MACD", "RSI", "BB"];
+    let limit = 6000;
+    let folds = 6;
+    let gate = RegimeGate::Adaptive { pctl: 0.90 };
+
+    // Dilim başına 3 kol: [LongOnly, RegimeDir, RegimeDir+slippage(liquid)].
+    let mut by_fold: Vec<[Agg; 3]> = (0..folds).map(|_| [Agg::default(); 3]).collect();
+
+    for sym in symbols {
+        let candles = match read_candles(&db, sym, "1h", limit) {
+            Ok(c) if c.len() >= folds * 300 => c,
+            _ => continue,
+        };
+        // read_candles DESC döner; zaman sırasına sok ki dilimler kronolojik olsun.
+        let mut cs = candles;
+        cs.sort_by_key(|c| c.timestamp);
+        let ref_price = cs.iter().map(|c| c.close).sum::<f64>() / cs.len() as f64;
+        let fold_len = cs.len() / folds;
+
+        for f in 0..folds {
+            let start = f * fold_len;
+            let end = if f == folds - 1 { cs.len() } else { (f + 1) * fold_len };
+            let seg = &cs[start..end];
+            for strat in strategies {
+                let run = |dir, ob| Backtester::new(cfg_full(sym, strat, ref_price, gate, dir, ob)).run(seg);
+                if let Ok(r) = run(DirectionMode::LongOnly, None) { by_fold[f][0].add(&r); }
+                if let Ok(r) = run(DirectionMode::RegimeDirectional, None) { by_fold[f][1].add(&r); }
+                if let Ok(r) = run(DirectionMode::RegimeDirectional, Some("liquid")) { by_fold[f][2].add(&r); }
+            }
+        }
+    }
+
+    eprintln!("\n=== Yön Robustluk: zaman-dilimi tutarlılığı + slippage ({folds} dilim, 1h) ===");
+    eprintln!("{:>5} | {:>22} | {:>22} | {:>22}", "dilim", "LongOnly Σpnl%", "RegimeDir Σpnl%", "RegimeDir+slip Σpnl%");
+    let (mut wins, mut wins_slip) = (0, 0);
+    for f in 0..folds {
+        let lo = by_fold[f][0].sum_pnl_pct;
+        let rd = by_fold[f][1].sum_pnl_pct;
+        let rs = by_fold[f][2].sum_pnl_pct;
+        if rd > lo { wins += 1; }
+        if rs > lo { wins_slip += 1; }
+        eprintln!("{:>5} | {:>22.1} | {:>22.1} | {:>22.1}{}", f + 1, lo, rd, rs,
+            if rd > lo { "  ✓RD" } else { "" });
+    }
+    eprintln!("\nTutarlılık: RegimeDir {folds} dilimin {wins}'inde LongOnly'yi yendi; \
+               slippage'la {wins_slip}/{folds}.");
+    eprintln!("Aggregate PF/Sharpe (slippage'lı):");
+    by_fold.iter().fold(Agg::default(), |mut a, arr| {
+        a.runs += arr[2].runs; a.trades += arr[2].trades; a.wins += arr[2].wins;
+        a.sum_pnl_pct += arr[2].sum_pnl_pct; a.sum_pf += arr[2].sum_pf; a.pf_runs += arr[2].pf_runs;
+        a.sum_sharpe += arr[2].sum_sharpe; a
+    }).report("RD+slip");
+    eprintln!("\nKarar: RegimeDir dilimlerin ÇOĞUNDA (≥4/6) ve slippage'la kazanıyorsa edge");
+    eprintln!("dönem-bağımsız → canlı opt-in'e tam güven; aksi halde tek-dönem artefaktı.\n");
+
+    assert!(by_fold.iter().any(|a| a[0].runs > 0), "hiç veri işlenemedi");
 }
