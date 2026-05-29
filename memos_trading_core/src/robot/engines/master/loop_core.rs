@@ -291,7 +291,7 @@ impl Engine {
             // SCALP_SWING_ENABLE=1 ise Scalp/SwingEngine fırsat üretir; SlotGuard kanal-bazlı
             // limit + hedge kontrolü yapar. Uygun ise açılış ScalpSwing patikasından gider
             // (kind=Some(TradeType)); bu turda klasik strateji pas geçilir. Disabled → false.
-            if Self::try_open_scalp_swing(state, symbol, &candles, regime).await {
+            if Self::try_open_scalp_swing(state, symbol, &candles, regime, tuning.regime_directional).await {
                 return;
             }
 

@@ -15,6 +15,7 @@ impl Engine {
         symbol: &str,
         candles: &[Candle],
         regime: crate::evolution::MarketRegime,
+        regime_directional: bool,
     ) -> bool {
         use crate::robot::scalp_swing::{
             ScalpEngine, SwingEngine, SlotGuard, OpenSlot, ScalpSwingConfig,
@@ -77,6 +78,24 @@ impl Engine {
             (None,    Some(b)) => b,
             (None,    None)    => return false,
         };
+
+        // 🧭 Rejim-yön kapısı (opt-in): ScalpSwing yönü de rejimle hizalı olmalı —
+        // regular-strateji yoluyla AYNI kural (regime_confirms_direction, tek-kaynak).
+        // Aksi halde StrongUptrend'de SwingEngine short açabiliyordu (ters-trend). Canlı
+        // paper doğrulamasında bu boşluk yakalandı. default false → davranış değişmez.
+        if regime_directional
+            && !crate::robot::logic::market_regime::regime_confirms_direction(regime, opp.is_long)
+        {
+            if log_throttle_should_emit(symbol, "scalp_regime_dir_block", 60) {
+                push_state_log(state, format!(
+                    "🧭 ScalpSwing {} {} ⇒ REDDEDİLDİ (rejim-yön teyidi yok, rejim={})",
+                    opp.trade_type.label(),
+                    if opp.is_long { "BUY" } else { "SELL" },
+                    regime.as_str(),
+                ));
+            }
+            return false;
+        }
 
         // 4) SlotGuard: kanal-bazlı kapasite + hedge engeli.
         let (ok, reason) = SlotGuard::can_open(
