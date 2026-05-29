@@ -39,6 +39,7 @@ fn cfg(strategy: &str) -> BacktestConfig {
         edge_min_score: None, orderbook_sim: None,
         regime_gate: Default::default(),
         direction: Default::default(),
+        atr_sl_mult: None, atr_tp_mult: None, vol_target_pct: None,
     }
 }
 

@@ -746,6 +746,9 @@ impl Engine {
                     orderbook_sim: orderbook_sim.clone(),
                     regime_gate: Default::default(),
                     direction: Default::default(),
+                    atr_sl_mult: None,
+                    atr_tp_mult: None,
+                    vol_target_pct: None,
                 };
                 crate::robot::ml_engine::hyperopt::HyperOpt::spec_search(
                     &candles, &specs, n_iters, &bt_cfg, Some(12345),

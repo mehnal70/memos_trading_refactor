@@ -71,6 +71,22 @@ pub struct BacktestConfig {
     /// [[project_autonomy_backlog]].
     #[serde(default)]
     pub direction: DirectionMode,
+    /// 📐 ATR-relatif SL çarpanı: `Some(m)` ise SL mesafesi = `m × ATR%` (14-periyot),
+    /// sabit `stop_loss_pct` yerine. Volatiliteye uyarlı: yüksek-vol'de geniş stop
+    /// (gürültü stop-out'unu eler), düşük-vol'de sıkı. `atr_tp_mult` ile birlikte aktif.
+    /// None → sabit % (legacy). [[project_adaptive_regime]].
+    #[serde(default)]
+    pub atr_sl_mult: Option<f64>,
+    /// 📐 ATR-relatif TP çarpanı: `Some(m)` → TP mesafesi = `m × ATR%`. `atr_sl_mult` ile
+    /// birlikte ATR-exits modunu açar (ikisi de Some olmalı). None → sabit `take_profit_pct`.
+    #[serde(default)]
+    pub atr_tp_mult: Option<f64>,
+    /// 🎚️ Volatilite-hedefli sizing: `Some(r)` → her trade ≈ `r%` sermaye riski alacak
+    /// şekilde qty = (r%×sermaye) / SL-mesafesi. SL mesafesi ATR'den geldiğinde (atr_sl_mult)
+    /// yüksek-vol → küçük qty (deleverage), düşük-vol → büyük qty (lever-up) = rejim-koşullu
+    /// sizing. None → sabit `max_position_size`. Notional 3× sermaye ile sınırlı. [[project_adaptive_regime]].
+    #[serde(default)]
+    pub vol_target_pct: Option<f64>,
 }
 
 /// İşlem yönü modu — long-only yapısal kusurunu kapatma kaldıracı (A/B kolu).
@@ -303,18 +319,45 @@ impl Backtester {
             };
             if let Some(is_long) = dir {
                 let s = if is_long { 1.0 } else { -1.0 };
+                let window = &sorted[..=idx];
+
+                // ── Çıkış mesafeleri: ATR-relatif (vol-adaptif) ya da sabit % ──
+                // ATR%: 14-periyot, fiyatın %'si. atr_sl_mult&atr_tp_mult ikisi de Some
+                // ve ATR>0 ise mesafe = mult × ATR%; aksi halde sabit config %'leri.
+                let atr_pct = crate::robot::logic::market_regime::compute_atr_pct(window);
+                let (sl_pct_eff, tp_pct_eff) = match (self.config.atr_sl_mult, self.config.atr_tp_mult) {
+                    (Some(slm), Some(tpm)) if atr_pct.is_finite() && atr_pct > 0.0 =>
+                        ((slm * atr_pct).clamp(0.1, 50.0), (tpm * atr_pct).clamp(0.1, 100.0)),
+                    _ => (self.config.stop_loss_pct, self.config.take_profit_pct),
+                };
+
+                // ── Sizing: vol-hedefli (rejim-koşullu) ya da sabit qty ──
+                // Risk(trade) = qty × entry × (sl_pct/100) = r% × sermaye → qty türetilir.
+                // SL mesafesi ATR'den gelince yüksek-vol→küçük qty, düşük-vol→büyük qty.
+                // Notional 3× sermaye tavanı (degenerate düşük-vol patlamasını önler).
+                let qty = match self.config.vol_target_pct {
+                    Some(r) if r > 0.0 && sl_pct_eff > 0.0 && candle.close > 0.0 => {
+                        let risk_dollars = r / 100.0 * self.config.initial_balance;
+                        let notional = (risk_dollars / (sl_pct_eff / 100.0))
+                            .min(self.config.initial_balance * 3.0);
+                        notional / candle.close
+                    }
+                    _ => self.config.max_position_size,
+                };
+                if qty <= 0.0 { continue; }
+
                 // Giriş emri yönü: long → BUY, short → SELL (slippage doğru tarafta).
-                let entry = self.sim_fill_price(is_long, candle.close, self.config.max_position_size);
+                let entry = self.sim_fill_price(is_long, candle.close, qty);
                 // SL girişin ters tarafında, TP lehte (yön-farkında).
-                let sl = entry * (1.0 - s * self.config.stop_loss_pct / 100.0);
-                let tp = entry * (1.0 + s * self.config.take_profit_pct / 100.0);
-                let trail_pct = self.config.atr_trail_mult.map(|m| Self::calc_atr_pct(&sorted[..=idx]) * m);
+                let sl = entry * (1.0 - s * sl_pct_eff / 100.0);
+                let tp = entry * (1.0 + s * tp_pct_eff / 100.0);
+                let trail_pct = self.config.atr_trail_mult.map(|m| Self::calc_atr_pct(window) * m);
 
                 pos = Some(BacktestPos {
                     entry_price: entry,
                     entry_idx: idx,
                     entry_ts: candle.timestamp,
-                    qty: self.config.max_position_size,
+                    qty,
                     sl_price: sl,
                     tp_price: tp,
                     risk_distance: (entry - sl).abs().max(f64::EPSILON),
@@ -543,6 +586,9 @@ mod edge_filter_tests {
             orderbook_sim: None,
             regime_gate: RegimeGate::Off,
             direction: DirectionMode::LongOnly,
+            atr_sl_mult: None,
+            atr_tp_mult: None,
+            vol_target_pct: None,
         }
     }
 
@@ -570,6 +616,41 @@ mod edge_filter_tests {
         let up = synthetic_uptrend(300);
         let r = Backtester::new(cfg(None)).run(&up).unwrap();
         assert!(r.total_trades > 0, "uptrend long-only işlem üretmeli");
+    }
+
+    #[test]
+    fn vol_target_scales_exposure_with_risk() {
+        // orderbook kapalı → qty fill fiyatını etkilemez, aynı işlemler oluşur; vol_target
+        // riski büyüdükçe qty (dolayısıyla |PnL|) orantılı büyür → sizing gerçekten etkili.
+        let up = synthetic_uptrend(300);
+        let mk = |r: f64| {
+            let mut c = cfg(None);
+            c.vol_target_pct = Some(r);
+            Backtester::new(c).run(&up).unwrap()
+        };
+        let lo = mk(0.5);
+        let hi = mk(5.0);
+        assert!(lo.total_trades > 0 && lo.total_trades == hi.total_trades,
+            "aynı işlemler (slippage yok): {} vs {}", lo.total_trades, hi.total_trades);
+        assert!(hi.total_pnl.abs() > lo.total_pnl.abs() * 5.0,
+            "yüksek risk ~10× exposure: |hi|={:.2} |lo|={:.2}", hi.total_pnl, lo.total_pnl);
+    }
+
+    #[test]
+    fn atr_exits_widen_stops_in_higher_volatility() {
+        // ATR-relatif exit: yüksek volatilitede SL mesafesi genişler → düşük-vol seriyle
+        // aynı çarpanda farklı stop davranışı. Burada smoke + geçerlilik: ATR-exit modu
+        // çalışır, sonuç sonlu, işlem üretir (fixed % ile farklı sonuç verir).
+        let up = synthetic_uptrend(300);
+        let mut c = cfg(None);
+        c.atr_sl_mult = Some(1.5);
+        c.atr_tp_mult = Some(3.0);
+        let r = Backtester::new(c).run(&up).unwrap();
+        assert!(r.total_pnl.is_finite());
+        let fixed = Backtester::new(cfg(None)).run(&up).unwrap();
+        // Vol-relatif eşikler sabit %3/%1.5'ten farklı tetiklenir → trade sayısı/PnL ayrışır.
+        assert!(r.total_trades != fixed.total_trades || (r.total_pnl - fixed.total_pnl).abs() > f64::EPSILON,
+            "ATR-exit sabit %'den farklı sonuç vermeli");
     }
 
     #[test]

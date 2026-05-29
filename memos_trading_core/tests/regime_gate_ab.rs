@@ -197,6 +197,76 @@ fn direction_ab() {
     assert!(used_symbols > 0);
 }
 
+/// RegimeDirectional + Adaptive90 üstüne vol-adaptif katmanlar (ATR-exits / vol-target).
+fn cfg_va(
+    symbol: &str, strat: &str, ref_price: f64, ob: Option<&str>,
+    atr: Option<(f64, f64)>, vt: Option<f64>,
+) -> BacktestConfig {
+    let mut c = cfg_full(symbol, strat, ref_price,
+        RegimeGate::Adaptive { pctl: 0.90 }, DirectionMode::RegimeDirectional, ob);
+    if let Some((sl, tp)) = atr { c.atr_sl_mult = Some(sl); c.atr_tp_mult = Some(tp); }
+    c.vol_target_pct = vt;
+    c
+}
+
+#[test]
+#[ignore = "veri-bağımlı; elle: cargo test --test regime_gate_ab vol_adaptive -- --ignored --nocapture"]
+fn vol_adaptive_ab() {
+    // Kaldıraç #2+#3: RegimeDir'in zayıf/tutarsız dilimlerini (benign dönemde geri kalma)
+    // ATR-relatif exit + vol-hedefli sizing toparlıyor mu? Slippage AÇIK (gerçekçi).
+    //   A: RegimeDir baz (sabit %4/%2 exit, sabit qty)
+    //   B: + ATR-exits (SL 1.5×ATR, TP 3.0×ATR → vol-relatif 2:1)
+    //   C: + ATR-exits + vol-target (%1 risk/trade → rejim-koşullu sizing)
+    let Some(db) = resolve_db() else { eprintln!("⏭  DB yok — atlandı."); return; };
+    eprintln!("📂 DB: {db}");
+    let symbols = ["BTCUSDT","ETHUSDT","BNBUSDT","ADAUSDT","XRPUSDT","TRXUSDT","DOGEUSDT","ZECUSDT"];
+    let strategies = ["SUPERTREND","EMA_CROSSOVER","MACD","RSI","BB"];
+    let (limit, folds) = (6000, 6);
+    let ob = Some("liquid");
+
+    let mut by_fold: Vec<[Agg; 3]> = (0..folds).map(|_| [Agg::default(); 3]).collect();
+    for sym in symbols {
+        let candles = match read_candles(&db, sym, "1h", limit) {
+            Ok(c) if c.len() >= folds * 300 => c, _ => continue,
+        };
+        let mut cs = candles; cs.sort_by_key(|c| c.timestamp);
+        let ref_price = cs.iter().map(|c| c.close).sum::<f64>() / cs.len() as f64;
+        let fold_len = cs.len() / folds;
+        for f in 0..folds {
+            let start = f * fold_len;
+            let end = if f == folds - 1 { cs.len() } else { (f + 1) * fold_len };
+            let seg = &cs[start..end];
+            for strat in strategies {
+                let run = |atr, vt| Backtester::new(cfg_va(sym, strat, ref_price, ob, atr, vt)).run(seg);
+                if let Ok(r) = run(None, None) { by_fold[f][0].add(&r); }
+                if let Ok(r) = run(Some((1.5, 3.0)), None) { by_fold[f][1].add(&r); }
+                if let Ok(r) = run(Some((1.5, 3.0)), Some(1.0)) { by_fold[f][2].add(&r); }
+            }
+        }
+    }
+
+    eprintln!("\n=== Vol-Adaptif A/B (RegimeDir+Adaptive90+slippage, {folds} dilim, 1h) ===");
+    eprintln!("{:>5} | {:>14} | {:>18} | {:>22}", "dilim", "A:baz Σpnl%", "B:ATRexit Σpnl%", "C:ATR+volTgt Σpnl%");
+    for f in 0..folds {
+        eprintln!("{:>5} | {:>14.1} | {:>18.1} | {:>22.1}",
+            f + 1, by_fold[f][0].sum_pnl_pct, by_fold[f][1].sum_pnl_pct, by_fold[f][2].sum_pnl_pct);
+    }
+    let agg = |i: usize| by_fold.iter().fold(Agg::default(), |mut a, arr| {
+        a.runs += arr[i].runs; a.trades += arr[i].trades; a.wins += arr[i].wins;
+        a.sum_pnl_pct += arr[i].sum_pnl_pct; a.sum_pf += arr[i].sum_pf;
+        a.pf_runs += arr[i].pf_runs; a.sum_sharpe += arr[i].sum_sharpe; a
+    });
+    eprintln!("\nAggregate:");
+    agg(0).report("A:baz");
+    agg(1).report("B:ATRexit");
+    agg(2).report("C:ATR+volTgt");
+    let pos_a = (0..folds).filter(|&f| by_fold[f][0].sum_pnl_pct > 0.0).count();
+    let pos_c = (0..folds).filter(|&f| by_fold[f][2].sum_pnl_pct > 0.0).count();
+    eprintln!("\nPozitif dilim: A={pos_a}/{folds}, C={pos_c}/{folds}. Karar: C, A'nın PF/Sharpe");
+    eprintln!("ve pozitif-dilim sayısını artırıyorsa vol-adaptif katman benimse.\n");
+    assert!(by_fold.iter().any(|a| a[0].runs > 0));
+}
+
 #[test]
 #[ignore = "veri-bağımlı; elle: cargo test --test regime_gate_ab direction_robustness -- --ignored --nocapture"]
 fn direction_robustness_ab() {
