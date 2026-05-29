@@ -54,6 +54,30 @@ pub struct BacktestConfig {
     /// `BACKTEST_ORDERBOOK` ile doldurur. [[regime_context]]
     #[serde(default)]
     pub orderbook_sim: Option<String>,
+    /// Rejim Volatile-kapısı (A/B): canlı motorun `Volatile → IDLE_PROTECT` (giriş
+    /// bastırma) davranışını aynalar. `Off` (default) → kapı yok, eski davranış
+    /// (backward-compat: screener/optimizer/WF/eski testler). `Absolute` → sabit
+    /// `RegimeThresholds::default()` (ATR%>7) ile Volatile barlarda giriş yok.
+    /// `Adaptive{pctl}` → Volatile sınırı sembolün KENDİ rolling ATR% persentilinden
+    /// (`adaptive_thresholds`). A/B = Absolute vs Adaptive volatile-gate PnL/win-rate.
+    /// [[project_autonomy_backlog]] #1.
+    #[serde(default)]
+    pub regime_gate: RegimeGate,
+}
+
+/// Backtest rejim Volatile-kapısı modu — canlı IDLE-in-volatile aynası, A/B kolu.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum RegimeGate {
+    /// Kapı yok (legacy). Her uygun sinyal açılır.
+    Off,
+    /// Sabit eşik (`RegimeThresholds::default()`, ATR%>7) → Volatile barda giriş yok.
+    Absolute,
+    /// Adaptif: Volatile sınırı sembolün kendi ATR% dağılımının `pctl` persentili.
+    Adaptive { pctl: f64 },
+}
+
+impl Default for RegimeGate {
+    fn default() -> Self { Self::Off }
 }
 
 fn default_commission() -> f64 { 0.001 }
@@ -221,10 +245,12 @@ impl Backtester {
             }
 
             // Stratejik Giriş Kontrolü
-            if pos.is_none() && Self::entry_long_signal(
-                entry_strat.as_ref(), &entry_params, &sorted, idx, &htf_full, htf_bucket_secs,
-                self.config.edge_min_score,
-            ) {
+            if pos.is_none()
+                && !self.regime_blocks_entry(&sorted, idx)
+                && Self::entry_long_signal(
+                    entry_strat.as_ref(), &entry_params, &sorted, idx, &htf_full, htf_bucket_secs,
+                    self.config.edge_min_score,
+                ) {
                 // Giriş = market BUY → orderbook açıksa slippage'li avg fill (yoksa close).
                 let entry = self.sim_fill_price(true, candle.close, self.config.max_position_size);
                 let sl = entry * (1.0 - self.config.stop_loss_pct / 100.0);
@@ -347,6 +373,27 @@ impl Backtester {
     /// REDDEDİLDİ` kapısının BİREBİR aynısı (`compute_edge_score_with`, ml_confidence=0
     /// çünkü harness'te GBT yok, ters-momentum cezası 0.4 = canlı default). Böylece
     /// param araması zayıf/ters-momentum girişlerini canlıyla aynı şekilde eler.
+    /// Rejim Volatile-kapısı: canlı `Volatile → IDLE_PROTECT`'in backtest aynası.
+    /// `Off` → asla blokla (legacy). `Absolute`/`Adaptive` → o anki bara kadarki
+    /// pencerede (look-ahead'siz) rejim Volatile ise girişi engelle. Pencere
+    /// `entry_long_signal` ile aynı (W=200) → tek-kaynak görünüm.
+    fn regime_blocks_entry(&self, candles: &[Candle], idx: usize) -> bool {
+        use crate::robot::logic::market_regime::{
+            detect_adx_regime_with, adaptive_thresholds, AdxRegime, RegimeThresholds,
+        };
+        const W: usize = 200;
+        let thr = match self.config.regime_gate {
+            RegimeGate::Off => return false,
+            RegimeGate::Absolute => RegimeThresholds::default(),
+            RegimeGate::Adaptive { pctl } => {
+                let start = (idx + 1).saturating_sub(W);
+                adaptive_thresholds(&candles[start..=idx], pctl)
+            }
+        };
+        let start = (idx + 1).saturating_sub(W);
+        matches!(detect_adx_regime_with(&candles[start..=idx], &thr), AdxRegime::Volatile)
+    }
+
     /// `None` → filtre yok (legacy).
     fn entry_long_signal(
         strat: &dyn Strategy,
@@ -438,6 +485,7 @@ mod edge_filter_tests {
             use_htf: false,
             edge_min_score: edge_min,
             orderbook_sim: None,
+            regime_gate: RegimeGate::Off,
         }
     }
 

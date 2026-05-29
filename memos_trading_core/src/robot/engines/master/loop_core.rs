@@ -282,7 +282,7 @@ impl Engine {
                 if htf_candles_vec.is_empty() { None } else { Some(&htf_candles_vec) };
             let regime = Self::regime_for_cycle(
                 state, symbol, &candles, interval, htf_slice,
-                tuning.regime_context_ttl_secs, tuning.regime_gbt,
+                tuning.regime_context_ttl_secs, tuning.regime_gbt, tuning.regime_adaptive_pctl,
             );
             Self::ensure_regime_patch(state, regime.as_str());
             Self::observe_regime_drift(state, regime.as_str());
@@ -296,6 +296,9 @@ impl Engine {
             }
 
             // 3) Strateji seçimi: brain.live_strategy "Default"/"AUTO" ise otonom seç.
+            // Rejim eşikleri (sabit ya da adaptif sembol-relatif) tek noktada üretilir;
+            // hem eval-path Volatile savunması hem default-path select_best aynısını kullanır.
+            let regime_thr = tuning.regime_thresholds(&candles);
             let strategy_name = if live_strategy.eq_ignore_ascii_case("default")
                                   || live_strategy.eq_ignore_ascii_case("auto")
                                   || live_strategy.is_empty() {
@@ -303,8 +306,8 @@ impl Engine {
                     // Değerlendirme-tabanlı: her aday KENDİ resolve'lu paramıyla
                     // mini-backtest skoruna göre yarışır (param_spec optimizasyonu
                     // seçime de girer). Volatile rejimde IDLE savunması korunur.
-                    use crate::robot::logic::market_regime::{detect_adx_regime, AdxRegime};
-                    if matches!(detect_adx_regime(&candles), AdxRegime::Volatile) {
+                    use crate::robot::logic::market_regime::{detect_adx_regime_with, AdxRegime};
+                    if matches!(detect_adx_regime_with(&candles, &regime_thr), AdxRegime::Volatile) {
                         crate::robot::ml_engine::strategy_selector::IDLE_PROTECT.to_string()
                     } else {
                         let ps = state.lock().ok().map(|st| std::sync::Arc::clone(&st.brain.parameters));
@@ -322,7 +325,7 @@ impl Engine {
                 } else {
                     // Default: rejim→strateji lookup (param-free, hızlı, kanıtlı savunma).
                     let sel = crate::robot::ml_engine::strategy_selector::StrategySelector::new();
-                    sel.select_best(&candles, &crate::core::types::StrategyParams::default()).to_string()
+                    sel.select_best_with(&candles, &crate::core::types::StrategyParams::default(), &regime_thr).to_string()
                 }
             } else {
                 live_strategy.to_string()
@@ -781,10 +784,12 @@ impl Engine {
         htf_slice: Option<&[Candle]>,
         ttl_secs: u64,
         gbt_enabled: bool,
+        regime_adaptive_pctl: Option<f64>,
     ) -> crate::evolution::MarketRegime {
         use crate::robot::logic::regime_context::{build_context, default_regime_detector, RegimeContext};
         use crate::robot::logic::market_regime::{
-            classify_market_regime_with_score, compute_adx_from_candles, compute_atr_pct,
+            adaptive_thresholds, classify_market_regime_with,
+            compute_adx_from_candles, compute_atr_pct,
         };
         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64).unwrap_or(0);
@@ -833,18 +838,35 @@ impl Engine {
             None
         };
 
+        // Adaptif Volatile eşiği (opt-in): set ise det_candles'ın kendi ATR% dağılımından
+        // türetilir → sınıflandırma sembol-relatif Volatile sınırı kullanır. None →
+        // sabit (Default) eşik = mevcut davranış birebir (parite korunur).
+        let thr = match regime_adaptive_pctl {
+            Some(p) => adaptive_thresholds(det_candles, p),
+            None => Default::default(),
+        };
+
         // dir_score varsa GBT-zenginleştirilmiş; yoksa pluggable detector (math; ileride
-        // onnx) — ikisi de tek-kaynak classify_market_regime_with_score'a iner.
-        let ctx = match dir_score {
-            Some(s) => RegimeContext {
-                regime: classify_market_regime_with_score(det_candles, Some(s)),
+        // onnx). Adaptif eşik kapalıyken (None) eski yollar birebir korunur (parite);
+        // açıkken ikisi de tek-kaynak classify_market_regime_with'e iner (eşik-farkında).
+        let ctx = match (dir_score, regime_adaptive_pctl) {
+            (Some(s), _) => RegimeContext {
+                regime: classify_market_regime_with(det_candles, Some(s), &thr),
                 adx: compute_adx_from_candles(det_candles),
                 atr_pct: compute_atr_pct(det_candles),
                 source_interval: src.to_string(),
                 computed_at_ms: now_ms,
                 detector: "gbt",
             },
-            None => {
+            (None, Some(_)) => RegimeContext {
+                regime: classify_market_regime_with(det_candles, None, &thr),
+                adx: compute_adx_from_candles(det_candles),
+                atr_pct: compute_atr_pct(det_candles),
+                source_interval: src.to_string(),
+                computed_at_ms: now_ms,
+                detector: "math-adaptive",
+            },
+            (None, None) => {
                 let detector = default_regime_detector();
                 build_context(detector.as_ref(), det_candles, src, now_ms)
             }

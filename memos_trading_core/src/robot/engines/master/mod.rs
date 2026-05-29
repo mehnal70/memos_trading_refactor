@@ -275,6 +275,13 @@ pub struct RuntimeTuning {
     /// içinde YENİ açılış engellenir — churn/flip-flop (aç→kapa→hemen aç) koruması.
     /// 0 → kapalı (default, sıfır regresyon). Önerilen ~60. Env REENTRY_COOLDOWN_SECS.
     pub reentry_cooldown_secs: u64,
+    /// 🎚️ Adaptif rejim Volatile eşiği: `Some(pctl)` → Volatile sınırı sembolün KENDİ
+    /// rolling ATR% dağılımının `pctl` persentilinden türetilir (sabit ATR%>7 yerine
+    /// sembol-relatif). `None` (default) → sabit eşik (mevcut davranış birebir). A/B
+    /// (regime_gate harness) 1h'de Adaptive90'ı sabit/Off'a üstün buldu → opt-in.
+    /// Env `REGIME_ADAPTIVE_PCTL` (örn. 0.90); (0,1) dışı/geçersiz → None. ADX bandları
+    /// her durumda sabit kalır. [[project_autonomy_backlog]] #1.
+    pub regime_adaptive_pctl: Option<f64>,
 }
 
 impl Default for RuntimeTuning {
@@ -306,6 +313,7 @@ impl Default for RuntimeTuning {
             fallback_sl_pct: 1.5,
             stale_feed_max_age_secs: 3600,
             reentry_cooldown_secs: 0,
+            regime_adaptive_pctl: None,
         }
     }
 }
@@ -364,6 +372,23 @@ impl RuntimeTuning {
             },
             stale_feed_max_age_secs: env_parse("STALE_FEED_MAX_AGE_SECS", d.stale_feed_max_age_secs),
             reentry_cooldown_secs: env_parse("REENTRY_COOLDOWN_SECS", d.reentry_cooldown_secs),
+            // (0,1) aralığında geçerli persentil → Some; aksi (set edilmemiş/0/1/NaN) → None (sabit eşik).
+            regime_adaptive_pctl: std::env::var("REGIME_ADAPTIVE_PCTL").ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|p| p.is_finite() && *p > 0.0 && *p < 1.0),
+        }
+    }
+
+    /// Bu cycle için rejim eşikleri. `regime_adaptive_pctl` set ise sembolün kendi
+    /// ATR% dağılımından adaptif Volatile sınırı; değilse sabit (`Default`) eşikler.
+    /// Tek nokta: hem RegimeContext sınıflandırması hem Volatile→IDLE gate'i bunu kullanır.
+    pub fn regime_thresholds(
+        &self, candles: &[crate::core::types::Candle],
+    ) -> crate::robot::logic::market_regime::RegimeThresholds {
+        use crate::robot::logic::market_regime::{adaptive_thresholds, RegimeThresholds};
+        match self.regime_adaptive_pctl {
+            Some(p) => adaptive_thresholds(candles, p),
+            None => RegimeThresholds::default(),
         }
     }
 
@@ -479,6 +504,42 @@ impl ExitReason {
     }
 }
 
+
+#[cfg(test)]
+mod tuning_tests {
+    use super::RuntimeTuning;
+    use crate::core::types::Candle;
+    use chrono::{TimeZone, Utc};
+
+    fn calm_candles(n: usize) -> Vec<Candle> {
+        // Sıkı bantlı (düşük ATR%) yükseliş — adaptif sınır absolute 7.0'ın altına insin.
+        (0..n).map(|i| {
+            let c = 100.0 + i as f64;
+            Candle {
+                timestamp: Utc.timestamp_opt(1_700_000_000 + i as i64 * 60, 0).unwrap(),
+                open: c, high: c + 0.5, low: c - 0.5, close: c,
+                volume: 1.0, symbol: "T".into(), interval: "1m".into(),
+            }
+        }).collect()
+    }
+
+    #[test]
+    fn regime_thresholds_none_is_default() {
+        // regime_adaptive_pctl=None → sabit eşik (mevcut davranış birebir).
+        let t = RuntimeTuning { regime_adaptive_pctl: None, ..RuntimeTuning::default() };
+        assert_eq!(t.regime_thresholds(&calm_candles(80)), Default::default());
+    }
+
+    #[test]
+    fn regime_thresholds_adaptive_is_symbol_relative() {
+        // Some(pctl) → sembolün kendi dağılımından adaptif Volatile sınırı (< absolute 7.0).
+        let t = RuntimeTuning { regime_adaptive_pctl: Some(0.90), ..RuntimeTuning::default() };
+        let thr = t.regime_thresholds(&calm_candles(80));
+        assert!(thr.atr_volatile_pct < 7.0 && thr.atr_volatile_pct > 0.0,
+            "adaptif sınır absolute'ın altında olmalı: {}", thr.atr_volatile_pct);
+        assert_eq!((thr.adx_ranging, thr.adx_trending), (20.0, 25.0), "ADX bandları sabit kalır");
+    }
+}
 
 // ── Faz 1: impl Engine sorumluluk modüllerine bölündü (davranış birebir) ──
 mod loop_core;

@@ -53,6 +53,7 @@ fn cfg(symbol: &str, interval: &str, tp: f64) -> BacktestConfig {
         use_htf: false,
         edge_min_score: None,
         orderbook_sim: None,
+        regime_gate: Default::default(),
     }
 }
 

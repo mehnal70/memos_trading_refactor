@@ -744,6 +744,7 @@ impl Engine {
                     use_htf,
                     edge_min_score: edge_min,
                     orderbook_sim: orderbook_sim.clone(),
+                    regime_gate: Default::default(),
                 };
                 crate::robot::ml_engine::hyperopt::HyperOpt::spec_search(
                     &candles, &specs, n_iters, &bt_cfg, Some(12345),

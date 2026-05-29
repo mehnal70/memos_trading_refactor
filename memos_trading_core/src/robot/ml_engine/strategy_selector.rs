@@ -10,7 +10,7 @@
 // olarak yorumlar (engine sembolde sinyal üretmeyi atlar).
 
 use crate::core::types::{Candle, StrategyParams};
-use crate::robot::logic::market_regime::{detect_adx_regime, AdxRegime};
+use crate::robot::logic::market_regime::{detect_adx_regime_with, AdxRegime, RegimeThresholds};
 
 pub struct StrategySelector;
 
@@ -27,13 +27,21 @@ impl StrategySelector {
     /// Mevcut piyasa koşullarına göre en yüksek olasılıklı stratejiyi seçer.
     /// Dönen ad ya `IDLE_PROTECT` sentinel'idir ya da default StrategyRegistry'de
     /// canonical olarak çözülen bir isimdir (SUPERTREND / BB / RSI / MA_CROSSOVER).
-    pub fn select_best(&self, candles: &[Candle], _params: &StrategyParams) -> &'static str {
+    pub fn select_best(&self, candles: &[Candle], params: &StrategyParams) -> &'static str {
+        self.select_best_with(candles, params, &RegimeThresholds::default())
+    }
+
+    /// `select_best`'in eşik-parametreli hali (tek-kaynak). `thr` adaptif (sembol-relatif
+    /// Volatile sınırı) ya da sabit (Default) olabilir → rejim→strateji eşlemesi aynı.
+    pub fn select_best_with(
+        &self, candles: &[Candle], _params: &StrategyParams, thr: &RegimeThresholds,
+    ) -> &'static str {
         if candles.is_empty() {
             return IDLE_PROTECT;
         }
 
-        // 1. Piyasa Rejimini Tespit Et (ADX/ATR Tabanlı)
-        let regime = detect_adx_regime(candles);
+        // 1. Piyasa Rejimini Tespit Et (ADX/ATR Tabanlı — eşik-parametreli)
+        let regime = detect_adx_regime_with(candles, thr);
 
         // 2. Rejime Göre Strateji Matrisi (Otonom Karar)
         match regime {

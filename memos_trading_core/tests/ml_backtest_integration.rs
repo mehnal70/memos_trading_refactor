@@ -33,6 +33,7 @@ fn base_cfg(strategy: &str) -> BacktestConfig {
         commission_pct: 0.001, strategy_params: None,
         breakeven_at_rr: None, atr_trail_mult: None, partial_tp_ratio: None,
         use_htf: false, edge_min_score: None, orderbook_sim: None,
+        regime_gate: Default::default(),
     }
 }
 

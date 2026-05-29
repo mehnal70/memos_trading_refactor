@@ -123,12 +123,71 @@ pub fn compute_atr_pct(candles: &[Candle]) -> f64 {
     if last_close > 0.0 { (atr / last_close) * 100.0 } else { 0.0 }
 }
 
-/// Ana Rejim Dedektörü: robotic_loop'un "Vites Kolu".
+/// Rejim eşikleri — Volatile sınırı + ADX bandları. `Default` tarihsel sabitleri
+/// birebir taşır (legacy davranış: ATR%>7 → Volatil, ADX<20 → Yatay, ADX>25 → Trend).
+/// Adaptif modda yalnız `atr_volatile_pct` sembolün KENDİ ATR% dağılımının bir
+/// persentilinden türetilir ("bu sembol kendisi için olağandışı volatil mi" — cross-
+/// symbol sabit yerine relatif). ADX bandları sabit kalır: ADX zaten 0-100 normalize,
+/// sembolden bağımsız kıyaslanabilir → adaptif yapmak gereksiz serbestlik (overfit).
+/// [[project_autonomy_backlog]] #1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RegimeThresholds {
+    pub atr_volatile_pct: f64,
+    pub adx_ranging: f64,
+    pub adx_trending: f64,
+}
+
+impl Default for RegimeThresholds {
+    fn default() -> Self {
+        Self { atr_volatile_pct: 7.0, adx_ranging: 20.0, adx_trending: 25.0 }
+    }
+}
+
+/// Bir mum dilimi boyunca kayan-pencere ATR% serisi üretir (her bitiş indeksinde
+/// 14-pencere ATR%). Adaptif Volatile sınırının (sembolün kendi dağılımının
+/// persentili) girdisidir. n<16 → boş (yeterli örnek yok).
+fn rolling_atr_pct_series(candles: &[Candle]) -> Vec<f64> {
+    let n = candles.len();
+    if n < 16 { return Vec::new(); }
+    // İlk 15 mum ATR penceresini doldurur; sonraki her bitişte ATR% örneği üret.
+    (15..=n).map(|end| compute_atr_pct(&candles[..end])).filter(|v| v.is_finite() && *v > 0.0).collect()
+}
+
+/// `sorted`'a göre değil; kopyalayıp sıralar. `pctl` ∈ [0,1]. Boş → None.
+/// Doğrusal-enterpolasyonsuz "nearest-rank" (basit, kararlı).
+fn percentile(values: &[f64], pctl: f64) -> Option<f64> {
+    if values.is_empty() { return None; }
+    let mut v = values.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p = pctl.clamp(0.0, 1.0);
+    let idx = ((v.len() as f64 - 1.0) * p).round() as usize;
+    v.get(idx).copied()
+}
+
+/// Sembolün kendi son ATR% dağılımından adaptif Volatile sınırını türetir.
+/// `pctl` örn. 0.80 → "ATR% kendi son dağılımının üst %20'sine girince Volatil".
+/// Yeterli örnek yoksa absolute default'a düşer (kısa seri / cold-start güvenli).
+pub fn adaptive_thresholds(candles: &[Candle], pctl: f64) -> RegimeThresholds {
+    let base = RegimeThresholds::default();
+    match percentile(&rolling_atr_pct_series(candles), pctl) {
+        Some(p) if p.is_finite() && p > 0.0 => RegimeThresholds { atr_volatile_pct: p, ..base },
+        _ => base,
+    }
+}
+
+/// Ana Rejim Dedektörü: robotic_loop'un "Vites Kolu". Tarihsel sabit eşiklerle
+/// (`RegimeThresholds::default()`) delege — davranış birebir korunur.
 pub fn detect_adx_regime(candles: &[Candle]) -> AdxRegime {
-    if compute_atr_pct(candles) > 7.0 { return AdxRegime::Volatile; }
+    detect_adx_regime_with(candles, &RegimeThresholds::default())
+}
+
+/// Eşik-parametreli rejim dedektörü (tek-kaynak). Absolute (Default) ya da adaptif
+/// (`adaptive_thresholds`) eşik geçilebilir; mantık aynı.
+pub fn detect_adx_regime_with(candles: &[Candle], thr: &RegimeThresholds) -> AdxRegime {
+    if compute_atr_pct(candles) > thr.atr_volatile_pct { return AdxRegime::Volatile; }
     match compute_adx_from_candles(candles) {
-        a if a < 20.0 => AdxRegime::Ranging,
-        a if a > 25.0 => AdxRegime::Trending,
+        a if a < thr.adx_ranging => AdxRegime::Ranging,
+        a if a > thr.adx_trending => AdxRegime::Trending,
         _ => AdxRegime::Neutral,
     }
 }
@@ -144,9 +203,19 @@ pub fn detect_adx_regime(candles: &[Candle]) -> AdxRegime {
 pub fn classify_market_regime_with_score(
     candles: &[Candle], dir_score: Option<f64>,
 ) -> crate::evolution::MarketRegime {
+    classify_market_regime_with(candles, dir_score, &RegimeThresholds::default())
+}
+
+/// `classify_market_regime_with_score`'un eşik-parametreli hali (tek-kaynak). Yalnız
+/// ADX/ATR yapı kararı `thr`'den etkilenir (adaptif Volatile sınırı); yön bandları
+/// (momentum ±2%/±0.5%) sabit — sembol-ölçekli adaptasyon Volatile gate'inde test
+/// ediliyor, yön persentilleri ayrı bir adım (telemetri/bucketing etkisi, A/B'siz).
+pub fn classify_market_regime_with(
+    candles: &[Candle], dir_score: Option<f64>, thr: &RegimeThresholds,
+) -> crate::evolution::MarketRegime {
     use crate::evolution::MarketRegime;
     if candles.len() < 20 { return MarketRegime::Unknown; }
-    let adx = detect_adx_regime(candles);
+    let adx = detect_adx_regime_with(candles, thr);
     let recent = &candles[candles.len() - 20..];
     let first = recent.first().map(|c| c.close).unwrap_or(0.0);
     let last  = recent.last().map(|c| c.close).unwrap_or(0.0);
@@ -218,6 +287,61 @@ mod regime_classify_tests {
     fn trending_series_is_detected_as_trending() {
         // Test serisi gerçekten Trending olmalı (yön branch'i çalışsın).
         assert_eq!(detect_adx_regime(&trending_up(60)), AdxRegime::Trending);
+    }
+
+    /// Geniş bantlı (yüksek ATR%) seri — adaptif sınır testi için.
+    fn jittery(n: usize, amp: f64) -> Vec<Candle> {
+        (0..n).map(|i| {
+            let base = 100.0;
+            let c = base + (i as f64 * 0.7).sin() * amp;
+            Candle {
+                timestamp: Utc.timestamp_opt(1_700_000_000 + i as i64 * 60, 0).unwrap(),
+                open: c, high: c + amp, low: c - amp, close: c,
+                volume: 1.0, symbol: "J".into(), interval: "1m".into(),
+            }
+        }).collect()
+    }
+
+    #[test]
+    fn default_thresholds_match_legacy_constants() {
+        // RegimeThresholds::default() tarihsel sabitleri birebir taşır.
+        let t = RegimeThresholds::default();
+        assert_eq!((t.atr_volatile_pct, t.adx_ranging, t.adx_trending), (7.0, 20.0, 25.0));
+    }
+
+    #[test]
+    fn detect_with_default_equals_legacy_detect() {
+        // _with(Default) ≡ detect_adx_regime (parity/regresyon, tek-kaynak).
+        for cs in [trending_up(60), jittery(60, 3.0), jittery(60, 0.1)] {
+            assert_eq!(detect_adx_regime(&cs), detect_adx_regime_with(&cs, &RegimeThresholds::default()));
+        }
+    }
+
+    #[test]
+    fn percentile_nearest_rank() {
+        let v = [1.0, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(percentile(&v, 0.0), Some(1.0));
+        assert_eq!(percentile(&v, 1.0), Some(5.0));
+        assert_eq!(percentile(&v, 0.5), Some(3.0));
+        assert_eq!(percentile(&[], 0.5), None);
+    }
+
+    #[test]
+    fn adaptive_threshold_falls_back_on_short_series() {
+        // Yetersiz örnek → absolute default (cold-start güvenli).
+        assert_eq!(adaptive_thresholds(&trending_up(5), 0.8), RegimeThresholds::default());
+    }
+
+    #[test]
+    fn adaptive_threshold_is_symbol_relative() {
+        // Sıkı bantlı sembolde adaptif Volatile sınırı absolute 7.0'ın ÇOK altına
+        // iner → sembol kendi ölçeğinde "olağandışı volatil"i daha erken yakalar.
+        let calm = trending_up(80); // ATR% ~ %1 civarı
+        let thr = adaptive_thresholds(&calm, 0.8);
+        assert!(thr.atr_volatile_pct < 7.0, "adaptif sınır absolute'ın altında olmalı: {}", thr.atr_volatile_pct);
+        assert!(thr.atr_volatile_pct > 0.0);
+        // ADX bandları değişmez (sabit kalır).
+        assert_eq!((thr.adx_ranging, thr.adx_trending), (20.0, 25.0));
     }
 
     #[test]

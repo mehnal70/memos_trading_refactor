@@ -37,6 +37,7 @@ fn cfg(strategy: &str) -> BacktestConfig {
         atr_trail_mult: Some(2.0), partial_tp_ratio: None,
         position_profile: None, security_profile: None, use_htf: false,
         edge_min_score: None, orderbook_sim: None,
+        regime_gate: Default::default(),
     }
 }
 
