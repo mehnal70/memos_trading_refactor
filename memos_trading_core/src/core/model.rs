@@ -176,6 +176,39 @@ impl RoboticLoopConfig {
     /// Akıcı (Fluent) Builder API Entegrasyonu
     pub fn new() -> Self { Self::default() }
 
+    /// Env değişkenlerinden runtime config'i kurar — **tüm interface'ler (rtc_tui,
+    /// rtc_headless, …) için TEK kaynak**. Eskiden her main aynı env okumasını kopyalıyordu
+    /// ve diverge etmişti (TUI `TRADE_INTERVAL`'i düşürmüş → her zaman 1m). Tek nokta →
+    /// tekrar yok, divergence imkânsız. Tanınan env'ler:
+    ///   TRADE_SYMBOL (BTCUSDT) · TRADE_MARKET (spot) · TRADE_INTERVAL (1m) · DB_PATH
+    ///   (data/trader.db) · TRADING_MODE (Paper; legacy BINANCE_PAPER_MODE=false→Live) ·
+    ///   STARTING_CAPITAL · BINANCE_API_KEY/SECRET. Geri kalan alanlar `Default`.
+    pub fn from_env() -> Self {
+        let trading_mode = if let Ok(v) = std::env::var("TRADING_MODE") {
+            TradingMode::from_env_str(&v)
+        } else if std::env::var("BINANCE_PAPER_MODE").map(|v| v == "false").unwrap_or(false) {
+            TradingMode::Live
+        } else {
+            TradingMode::Paper
+        };
+        let d = Self::default();
+        let capital = std::env::var("STARTING_CAPITAL").ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(d.capital);
+        Self {
+            symbol:   std::env::var("TRADE_SYMBOL").unwrap_or_else(|_| "BTCUSDT".to_owned()),
+            market:   std::env::var("TRADE_MARKET").unwrap_or_else(|_| "spot".to_owned()),
+            interval: std::env::var("TRADE_INTERVAL").unwrap_or_else(|_| "1m".to_owned()),
+            db_path:  std::env::var("DB_PATH").unwrap_or_else(|_| "data/trader.db".to_owned()),
+            trading_mode,
+            capital,
+            api_key:    std::env::var("BINANCE_API_KEY").ok(),
+            secret_key: std::env::var("BINANCE_API_SECRET").ok(),
+            ..d
+        }
+    }
+
     pub fn with_exchange(mut self, exchange: impl Into<String>) -> Self {
         self.exchange = exchange.into();
         self

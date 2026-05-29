@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::Ordering;
-use std::{env, fs};
+use std::fs;
 use anyhow::Result;
 use memos_trading_core::core::model::RoboticLoopConfig;
 use memos_trading_core::robot::robotic_loop::AppState;
@@ -53,64 +53,25 @@ async fn main() -> Result<()> {
         .format_timestamp_millis()
         .try_init();
 
-    let symbol      = env::var("TRADE_SYMBOL").unwrap_or_else(|_| "BTCUSDT".to_owned());
-    let market      = env::var("TRADE_MARKET").unwrap_or_else(|_| "spot".to_owned());
-    // İşlem/analiz zaman dilimi (cycle + backtest + screener bu interval'i kullanır).
-    // Default 1m. TF seçimi healthier backtest için kritik (1h/4h trend, 1m sadece infaz).
-    let interval    = env::var("TRADE_INTERVAL").unwrap_or_else(|_| "1m".to_owned());
-    // Kanonik DB: data/trader.db. Tüm interface'ler (rtc_tui, rtc_healthcheck,
-    // RoboticLoopConfig::default) aynı path'i kullanır → engine'in yazdığı DB
-    // ile TUI'nin okuduğu DB uyumlu. Override için env DB_PATH.
-    let db_path     = env::var("DB_PATH").unwrap_or_else(|_| "data/trader.db".to_owned());
-
-    // Trading mode env önceliği:
-    //   1. TRADING_MODE=Live|Paper|Backtest (case-insensitive, doğru kaynak)
-    //   2. Legacy BINANCE_PAPER_MODE=false (geriye uyum) → Live
-    //   3. Default: Paper (güvenli)
-    let trading_mode = if let Ok(v) = env::var("TRADING_MODE") {
-        memos_trading_core::core::model::TradingMode::from_env_str(&v)
-    } else if env::var("BINANCE_PAPER_MODE").map(|v| v == "false").unwrap_or(false) {
-        memos_trading_core::core::model::TradingMode::Live
-    } else {
-        memos_trading_core::core::model::TradingMode::Paper
-    };
-    let api_key = env::var("BINANCE_API_KEY").ok();
-    let secret_key = env::var("BINANCE_API_SECRET").ok();
+    // Env → config TEK KAYNAK (rtc_tui ile ortak): RoboticLoopConfig::from_env.
+    // Tanınan env'ler ve default'lar orada; her interface aynı sözleşmeyi paylaşır.
+    let config = RoboticLoopConfig::from_env();
 
     println!("⚡ [INIT] rtc_headless | sembol={} | borsa={} | interval={} | mod={}",
-        symbol, market, interval, trading_mode.as_str());
-    if matches!(trading_mode, memos_trading_core::core::model::TradingMode::Live)
-       && (api_key.is_none() || secret_key.is_none()) {
+        config.symbol, config.market, config.interval, config.trading_mode.as_str());
+    if matches!(config.trading_mode, memos_trading_core::core::model::TradingMode::Live)
+       && (config.api_key.is_none() || config.secret_key.is_none()) {
         eprintln!("⚠️ TRADING_MODE=Live ama BINANCE_API_KEY/SECRET yok → Paper-fallback");
     }
 
     // 2. Klasörlerin varlığı
     fs::create_dir_all("logs").ok();
-    if let Some(parent) = std::path::Path::new(&db_path).parent() {
+    if let Some(parent) = std::path::Path::new(&config.db_path).parent() {
         fs::create_dir_all(parent).ok();
     }
 
-    // 3. Profil yüklemesi (best_params'a yansıtılır)
+    // 3. Profil yüklemesi (best_params'a yansıtılır; headless-özel)
     let profile = load_profiles();
-    // Başlangıç sermayesi: env STARTING_CAPITAL (geçersiz/eksik → RoboticLoopConfig
-    // default'u = $10.000). Değiştirmek aynı zamanda recovery guard'ı uyuşmazlığa
-    // düşürür → DB'ye dokunmadan cold-start (bkz hydrate_account_state_from_db).
-    let capital = std::env::var("STARTING_CAPITAL").ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or_else(|| RoboticLoopConfig::default().capital);
-
-    let config = RoboticLoopConfig {
-        symbol: symbol.clone(),
-        market: market.clone(),
-        interval: interval.clone(),
-        db_path: db_path.clone(),
-        trading_mode,
-        capital,
-        api_key,
-        secret_key,
-        ..Default::default()
-    };
 
     // Pozisyon yönetimi parametreleri config'den geliyor ama yeni AppState onları
     // brain.best_params üzerinden tutuyor — burada init'ten sonra dolduracağız.

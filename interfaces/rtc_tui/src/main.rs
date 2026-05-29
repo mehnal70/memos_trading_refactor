@@ -18,58 +18,28 @@ use crate::handlers::input::TuiManager;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
-    // --- Env değişkenlerinden config'i süzdür (rtc_headless ile aynı sözleşme) ---
-    let symbol  = std::env::var("TRADE_SYMBOL").unwrap_or_else(|_| "BTCUSDT".to_owned());
-    let market  = std::env::var("TRADE_MARKET").unwrap_or_else(|_| "spot".to_owned());
-    let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "data/trader.db".to_owned());
-
-    // Trading mode env önceliği (headless ile aynı kontrat):
-    //   1. TRADING_MODE=Live|Paper|Backtest
-    //   2. Legacy BINANCE_PAPER_MODE=false → Live
-    //   3. Default: Paper
-    let trading_mode = if let Ok(v) = std::env::var("TRADING_MODE") {
-        memos_trading_core::core::model::TradingMode::from_env_str(&v)
-    } else if std::env::var("BINANCE_PAPER_MODE").map(|v| v == "false").unwrap_or(false) {
-        memos_trading_core::core::model::TradingMode::Live
-    } else {
-        memos_trading_core::core::model::TradingMode::Paper
-    };
-    let api_key = std::env::var("BINANCE_API_KEY").ok();
-    let secret_key = std::env::var("BINANCE_API_SECRET").ok();
+    // --- Env → config TEK KAYNAK: RoboticLoopConfig::from_env (rtc_headless ile ortak).
+    // Eskiden her main env okumasını kopyalıyordu; TUI `TRADE_INTERVAL`'i düşürmüştü →
+    // hep 1m koşuyordu. Artık tek nokta → tekrar yok, divergence imkânsız.
+    let config = RoboticLoopConfig::from_env();
 
     // Klasörlerin varlığını garantile (logs/ ve data/ üst dizini)
     let _ = std::fs::create_dir_all("logs");
-    if let Some(parent) = std::path::Path::new(&db_path).parent() {
+    if let Some(parent) = std::path::Path::new(&config.db_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // Başlangıç sermayesi: env STARTING_CAPITAL (rtc_headless ile aynı sözleşme).
-    // Geçersiz/eksik → RoboticLoopConfig default'u = $10.000.
-    let capital = std::env::var("STARTING_CAPITAL").ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or_else(|| RoboticLoopConfig::default().capital);
-
-    let config = RoboticLoopConfig {
-        symbol: symbol.clone(),
-        market: market.clone(),
-        db_path: db_path.clone(),
-        trading_mode,
-        capital,
-        api_key,
-        secret_key,
-        ..Default::default()
-    };
     let state = Arc::new(Mutex::new(AppState::new(config)));
 
     // SQLite bağlantısının gerçekten kurulduğunu doğrula; başarısız ise kullanıcıya bildir.
     {
         let st = state.lock().unwrap();
         if st.guardian.db_conn.is_none() {
-            eprintln!("⚠️  Uyarı: SQLite bağlantısı kurulamadı (path={}). Persistence devre dışı.", db_path);
+            eprintln!("⚠️  Uyarı: SQLite bağlantısı kurulamadı (path={}). Persistence devre dışı.", st.config.db_path);
         } else {
-            println!("⚡ [INIT] rtc_tui | sembol={} | borsa={} | db={} | mod={}",
-                symbol, market, db_path, st.config.trading_mode.as_str());
+            println!("⚡ [INIT] rtc_tui | sembol={} | borsa={} | interval={} | db={} | mod={}",
+                st.config.symbol, st.config.market, st.config.interval, st.config.db_path,
+                st.config.trading_mode.as_str());
         }
     }
 
