@@ -294,6 +294,29 @@ pub(crate) fn score_config_over_windows(
     total
 }
 
+/// `n` mumdan WF OOS pencere aralıklarını üretir — param-opt YOK, yalnız index aralıkları
+/// (run()'ın stepping aritmetiğiyle aynı). `score_config_over_windows` için HAFİF pencere
+/// kaynağı: pool-wide interval eval'de full WalkForwardTester (per-pencere param re-opt)
+/// yerine kullanılır → ucuz + ekseni (interval) izole eder. tp/sl alanları kullanılmaz.
+pub(crate) fn wf_oos_windows(n: usize, is_bars: usize, oos_bars: usize, step: usize) -> Vec<WindowResult> {
+    let window_size = is_bars + oos_bars;
+    let step = step.max(1);
+    let mut out = Vec::new();
+    let (mut start, mut idx) = (0usize, 0usize);
+    while window_size > 0 && start + window_size <= n {
+        let is_end = start + is_bars;
+        out.push(WindowResult {
+            window_idx: idx,
+            in_sample_range: (start, is_end),
+            oos_range: (is_end, is_end + oos_bars),
+            best_tp_pct: 0.0, best_sl_pct: 0.0,
+            oos_metrics: BacktestMetrics::default(),
+        });
+        start += step; idx += 1;
+    }
+    out
+}
+
 /// Aday `(varyant, skor)` listesinden en iyiyi seç; ancak `current` (mevcut seçim,
 /// varsa) skorunu `margin` ile AŞIYORSA değiştir — aksi halde mevcut korunur
 /// (flip-flop/instabilite koruması). `current` yoksa salt en iyi. Boş → None.
@@ -454,6 +477,20 @@ mod tests {
         let only_short = score_config_over_windows(&dir_base_cfg(), &candles, &[wnd(100, 110, 4.0, 2.0)]);
         assert_eq!(only_short, 0.0, "kısa pencere (<30) atlanmalı");
         assert!(s_all.is_finite());
+    }
+
+    #[test]
+    fn wf_oos_windows_steps_and_bounds() {
+        // n=100, is=20, oos=10 (window=30), step=10 → start 0,10,...,70 = 8 pencere.
+        let w = wf_oos_windows(100, 20, 10, 10);
+        assert_eq!(w.len(), 8);
+        assert_eq!(w[0].oos_range, (20, 30));
+        assert_eq!(w[1].oos_range, (30, 40));
+        assert_eq!(w.last().unwrap().oos_range, (90, 100));
+        // n < window → boş.
+        assert!(wf_oos_windows(20, 20, 10, 10).is_empty());
+        // step=0 → 1'e clamp (sonsuz döngü yok).
+        assert!(!wf_oos_windows(100, 20, 10, 0).is_empty());
     }
 
     #[test]
