@@ -265,6 +265,53 @@ where
     out
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Otonom değerlendirme/seçim çekirdeği (DRY) — rejim-yön ve sembol-interval
+// değerlendiricilerinin ORTAK atomu. Kopyala-yapıştır yerine tek kaynak.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Anlamlı backtest için bir OOS penceresinin minimum mum derinliği.
+pub(crate) const MIN_EVAL_WINDOW_LEN: usize = 30;
+
+/// Bir `BacktestConfig` varyantını tek bir mum dilimi üzerinde koşar, toplam PnL
+/// döndürür (hata/boş → 0.0). Otonom değerlendiricilerin paylaşılan skorlama atomu.
+pub(crate) fn backtest_pnl(cfg: &BacktestConfig, slice: &[Candle]) -> f64 {
+    Backtester::new(cfg.clone()).run(slice).map(|r| r.total_pnl).unwrap_or(0.0)
+}
+
+/// `cfg`'i tüm OOS pencere dilimlerinde koşup toplam PnL döndürür — her pencere
+/// bağımsız (look-ahead'siz). `MIN_EVAL_WINDOW_LEN` altı pencereler atlanır.
+/// Sembol-interval değerlendirmesi bunu aday TF başına kullanır.
+pub(crate) fn score_config_over_windows(
+    cfg: &BacktestConfig, candles: &[Candle], windows: &[WindowResult],
+) -> f64 {
+    let mut total = 0.0;
+    for w in windows {
+        let (s, e) = w.oos_range;
+        if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN { continue; }
+        total += backtest_pnl(cfg, &candles[s..e]);
+    }
+    total
+}
+
+/// Aday `(varyant, skor)` listesinden en iyiyi seç; ancak `current` (mevcut seçim,
+/// varsa) skorunu `margin` ile AŞIYORSA değiştir — aksi halde mevcut korunur
+/// (flip-flop/instabilite koruması). `current` yoksa salt en iyi. Boş → None.
+pub(crate) fn pick_best_with_margin<T: Clone + PartialEq>(
+    scored: &[(T, f64)], current: Option<&T>, margin: f64,
+) -> Option<T> {
+    let best = scored.iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+    match current {
+        Some(cur) => {
+            let cur_score = scored.iter().find(|(t, _)| t == cur)
+                .map(|(_, s)| *s).unwrap_or(f64::NEG_INFINITY);
+            if best.1 > cur_score + margin { Some(best.0.clone()) } else { Some(cur.clone()) }
+        }
+        None => Some(best.0.clone()),
+    }
+}
+
 /// Per-rejim YÖN DİSİPLİNİ A/B'si (otonom `RegimePolicy.regime_directional` girdisi).
 /// Her rejimin OOS pencerelerinde aynı strateji/param ile LongOnly vs RegimeDirectional
 /// backtest koşar, rejim başına toplam PnL'i kıyaslar. Dönen map: regime → disiplin
@@ -288,15 +335,16 @@ where
         let (start, end) = w.oos_range;
         if end > candles.len() || start >= end { continue; }
         let slice = &candles[start..end];
-        if slice.len() < 30 { continue; } // anlamlı backtest için min derinlik
+        if slice.len() < MIN_EVAL_WINDOW_LEN { continue; }
         let regime = classify(slice);
-        let run = |dir: DirectionMode| -> f64 {
+        // Ortak skorlama atomu (backtest_pnl) — yalnız direction override edilir.
+        let score = |dir: DirectionMode| -> f64 {
             let mut c = base.clone();
             c.direction = dir;
-            Backtester::new(c).run(slice).map(|r| r.total_pnl).unwrap_or(0.0)
+            backtest_pnl(&c, slice)
         };
-        let lp = run(DirectionMode::LongOnly);
-        let rp = run(DirectionMode::RegimeDirectional);
+        let lp = score(DirectionMode::LongOnly);
+        let rp = score(DirectionMode::RegimeDirectional);
         let e = acc.entry(regime).or_insert((0.0, 0.0, 0));
         e.0 += lp; e.1 += rp; e.2 += 1;
     }
@@ -363,6 +411,40 @@ mod tests {
             commission_pct: 0.0004, breakeven_at_rr: Some(1.0), atr_trail_mult: Some(2.0),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn score_config_over_windows_sums_and_skips_short() {
+        // 2 geçerli pencere (≥MIN_EVAL_WINDOW_LEN) + 1 kısa (atlanır). Düşüş serisinde
+        // long-only ~zarar; toplam sonlu ve kısa pencere toplama girmez (idempotent).
+        let candles: Vec<Candle> = (0..120).map(|i| {
+            let c = 200.0 - 0.1 * i as f64;
+            Candle { open: c, high: c * 1.004, low: c * 0.996, close: c,
+                     volume: 1000.0, symbol: "T".into(), interval: "1h".into(),
+                     ..Default::default() }
+        }).collect();
+        let windows = vec![wnd(0, 50, 4.0, 2.0), wnd(50, 100, 4.0, 2.0), wnd(100, 110, 4.0, 2.0)];
+        let s_all = score_config_over_windows(&dir_base_cfg(), &candles, &windows);
+        // Kısa pencereyi tek başına vermek toplama 0 katkı verir (skip guard).
+        let only_short = score_config_over_windows(&dir_base_cfg(), &candles, &[wnd(100, 110, 4.0, 2.0)]);
+        assert_eq!(only_short, 0.0, "kısa pencere (<30) atlanmalı");
+        assert!(s_all.is_finite());
+    }
+
+    #[test]
+    fn pick_best_with_margin_respects_current_and_margin() {
+        let scored = vec![("a", 10.0), ("b", 12.0), ("c", 8.0)];
+        // current yok → salt en iyi (b).
+        assert_eq!(pick_best_with_margin(&scored, None, 0.0), Some("b"));
+        // current=a, b (12) > a (10) + margin 1.0 → değiş (b).
+        assert_eq!(pick_best_with_margin(&scored, Some(&"a"), 1.0), Some("b"));
+        // current=a, margin 3.0 → b (12) > a (10)+3=13 DEĞİL → a korunur (flip-flop yok).
+        assert_eq!(pick_best_with_margin(&scored, Some(&"a"), 3.0), Some("a"));
+        // current listede yok → en iyiye geç (b).
+        assert_eq!(pick_best_with_margin(&scored, Some(&"z"), 1.0), Some("b"));
+        // boş → None.
+        let empty: Vec<(&str, f64)> = vec![];
+        assert_eq!(pick_best_with_margin(&empty, None, 0.0), None);
     }
 
     #[test]
