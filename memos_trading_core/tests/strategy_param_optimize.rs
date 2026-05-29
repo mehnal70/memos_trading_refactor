@@ -38,6 +38,7 @@ fn cfg(strategy: &str) -> BacktestConfig {
         position_profile: None, security_profile: None, use_htf: false,
         edge_min_score: None, orderbook_sim: None,
         regime_gate: Default::default(),
+        direction: Default::default(),
     }
 }
 

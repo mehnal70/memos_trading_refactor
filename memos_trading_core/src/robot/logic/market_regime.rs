@@ -246,6 +246,20 @@ pub fn classify_market_regime(candles: &[Candle]) -> crate::evolution::MarketReg
     classify_market_regime_with_score(candles, None)
 }
 
+/// Rejim yönü verilen işlem yönünü teyit ediyor mu? long → non-downtrend, short →
+/// non-uptrend. Yön-belirsiz rejimler (Ranging/HighVolatility/LowVolatility/Unknown)
+/// her iki yönü de teyit eder — filtre yalnız AÇIK ters-trend girişini eler, nötr/yatay
+/// rejimde stratejinin kararına güvenir. Tek-kaynak: backtest `RegimeDirectional` modu
+/// ve canlı `regime_directional` kapısı bunu kullanır. [[project_adaptive_regime]].
+pub fn regime_confirms_direction(regime: crate::evolution::MarketRegime, is_long: bool) -> bool {
+    use crate::evolution::MarketRegime as R;
+    if is_long {
+        !matches!(regime, R::StrongDowntrend | R::WeakDowntrend)
+    } else {
+        !matches!(regime, R::StrongUptrend | R::WeakUptrend)
+    }
+}
+
 /// Rejim başına etkin strateji setlerini döndürür.
 pub fn strategies_for_adx_regime(regime: AdxRegime) -> &'static [&'static str] {
     match regime {
@@ -342,6 +356,21 @@ mod regime_classify_tests {
         assert!(thr.atr_volatile_pct > 0.0);
         // ADX bandları değişmez (sabit kalır).
         assert_eq!((thr.adx_ranging, thr.adx_trending), (20.0, 25.0));
+    }
+
+    #[test]
+    fn regime_direction_confirmation() {
+        use crate::evolution::MarketRegime as R;
+        // long: downtrend'de RED, diğerlerinde OK.
+        assert!(!regime_confirms_direction(R::StrongDowntrend, true));
+        assert!(!regime_confirms_direction(R::WeakDowntrend, true));
+        assert!(regime_confirms_direction(R::StrongUptrend, true));
+        assert!(regime_confirms_direction(R::Ranging, true), "nötr rejim long'u teyit eder");
+        // short: uptrend'de RED, diğerlerinde OK.
+        assert!(!regime_confirms_direction(R::StrongUptrend, false));
+        assert!(!regime_confirms_direction(R::WeakUptrend, false));
+        assert!(regime_confirms_direction(R::StrongDowntrend, false));
+        assert!(regime_confirms_direction(R::HighVolatility, false), "nötr rejim short'u teyit eder");
     }
 
     #[test]

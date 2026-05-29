@@ -442,6 +442,21 @@ impl Engine {
             match (signal, pos_dir) {
                 // Pozisyon yokken: yalnız yüksek edge'de açılış denenir.
                 (crate::core::types::Signal::Buy, None) | (crate::core::types::Signal::Sell, None) => {
+                    // 🧭 Rejim-yön kapısı (opt-in): canlı motor Sell→short açıyor (Both modu);
+                    // bu kapı ters-trend girişini eler (A/B: Both -661 → RegimeDirectional +980).
+                    // Tek-kaynak `regime_confirms_direction`; default kapalı → davranış değişmez.
+                    if tuning.regime_directional
+                        && !crate::robot::logic::market_regime::regime_confirms_direction(
+                            regime, matches!(signal, crate::core::types::Signal::Buy))
+                    {
+                        if log_throttle_should_emit(symbol, "regime_dir_block", 60) {
+                            push_state_log(state, format!(
+                                "🧭 {} {} ⇒ REDDEDİLDİ (rejim-yön teyidi yok, rejim={})",
+                                symbol, signal_label, regime.as_str(),
+                            ));
+                        }
+                        return;
+                    }
                     if edge < edge_threshold {
                         // Spam'i kısmak için sadece eşiğe yakın aday sinyalleri logla.
                         if edge >= edge_log_floor {

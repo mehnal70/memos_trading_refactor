@@ -15,7 +15,7 @@
 // DB yolu env `MEMOS_AB_DB` ile ezilebilir; yoksa aday yollar denenir.
 
 use memos_trading_core::persistence::reader::read_candles;
-use memos_trading_core::robot::backtester::{BacktestConfig, Backtester, RegimeGate};
+use memos_trading_core::robot::backtester::{BacktestConfig, Backtester, DirectionMode, RegimeGate};
 
 /// İlk var olan aday DB yolu (CWD = crate kökü `memos_trading_core/`).
 fn resolve_db() -> Option<String> {
@@ -68,7 +68,7 @@ impl Agg {
     }
 }
 
-fn cfg_for(symbol: &str, strat: &str, ref_price: f64, gate: RegimeGate) -> BacktestConfig {
+fn cfg_for(symbol: &str, strat: &str, ref_price: f64, gate: RegimeGate, dir: DirectionMode) -> BacktestConfig {
     let initial = 10_000.0;
     BacktestConfig {
         symbol: symbol.to_string(),
@@ -83,6 +83,7 @@ fn cfg_for(symbol: &str, strat: &str, ref_price: f64, gate: RegimeGate) -> Backt
         breakeven_at_rr: Some(1.0),
         atr_trail_mult: Some(2.0),
         regime_gate: gate,
+        direction: dir,
         ..Default::default()
     }
 }
@@ -117,7 +118,7 @@ fn regime_volatile_gate_ab() {
         used_symbols += 1;
         let ref_price = candles.iter().map(|c| c.close).sum::<f64>() / candles.len() as f64;
         for strat in strategies {
-            let run = |gate| Backtester::new(cfg_for(sym, strat, ref_price, gate)).run(&candles);
+            let run = |gate| Backtester::new(cfg_for(sym, strat, ref_price, gate, DirectionMode::LongOnly)).run(&candles);
             if let Ok(r) = run(RegimeGate::Off) { off.add(&r); }
             if let Ok(r) = run(RegimeGate::Absolute) { abs_.add(&r); }
             if let Ok(r) = run(RegimeGate::Adaptive { pctl: 0.80 }) { ad80.add(&r); }
@@ -134,4 +135,57 @@ fn regime_volatile_gate_ab() {
     eprintln!("artırıyorsa benimse; aksi halde sabit eşik (Off/Absolute) kalsın.\n");
 
     assert!(used_symbols > 0, "hiç sembol işlenemedi — DB içeriğini kontrol et");
+}
+
+#[test]
+#[ignore = "veri-bağımlı; elle: cargo test --test regime_gate_ab direction_ab -- --ignored --nocapture"]
+fn direction_ab() {
+    // Yapısal kaldıraç: canlı sistem long-only; stratejiler Signal::Sell de üretiyor ve
+    // hesap futures → short bacağı ölçülür. Adaptif Volatile-kapısı (Adaptive90, #1'de
+    // benimsendi) sabit tutulur; YALNIZ yön modu değişir → "shorting kâra geçirir mi?".
+    //   LongOnly        : yalnız Buy→long (mevcut canlı davranış, baseline)
+    //   BothDirections  : Sell→short (strateji ne derse, simetrik)
+    //   RegimeDirectional: + rejim yönü teyidi (ters-trend giriş elenir)
+    let Some(db) = resolve_db() else {
+        eprintln!("⏭  DB bulunamadı — yön A/B atlandı.");
+        return;
+    };
+    eprintln!("📂 DB: {db}");
+
+    let symbols = [
+        "BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT",
+        "XRPUSDT", "TRXUSDT", "DOGEUSDT", "ZECUSDT",
+    ];
+    let strategies = ["SUPERTREND", "EMA_CROSSOVER", "MACD", "RSI", "BB"];
+    let limit = 6000;
+    let gate = RegimeGate::Adaptive { pctl: 0.90 }; // #1 kazananı sabit
+
+    let mut long_only = Agg::default();
+    let mut both = Agg::default();
+    let mut regime_dir = Agg::default();
+
+    let mut used_symbols = 0;
+    for sym in symbols {
+        let candles = match read_candles(&db, sym, "1h", limit) {
+            Ok(c) if c.len() >= 200 => c,
+            _ => continue,
+        };
+        used_symbols += 1;
+        let ref_price = candles.iter().map(|c| c.close).sum::<f64>() / candles.len() as f64;
+        for strat in strategies {
+            let run = |d| Backtester::new(cfg_for(sym, strat, ref_price, gate, d)).run(&candles);
+            if let Ok(r) = run(DirectionMode::LongOnly) { long_only.add(&r); }
+            if let Ok(r) = run(DirectionMode::BothDirections) { both.add(&r); }
+            if let Ok(r) = run(DirectionMode::RegimeDirectional) { regime_dir.add(&r); }
+        }
+    }
+
+    eprintln!("\n=== Yön A/B (Adaptive90 gate sabit · {used_symbols} sembol × {} strateji, 1h, {limit} mum) ===", strategies.len());
+    long_only.report("LongOnly");
+    both.report("Both");
+    regime_dir.report("RegimeDir");
+    eprintln!("\nKarar: Both/RegimeDir, LongOnly'nin Σpnl%/kazanma%/PF'ini artırıyorsa");
+    eprintln!("yapısal kaldıraç gerçek → canlıya opt-in bağla; aksi halde long-only kalsın.\n");
+
+    assert!(used_symbols > 0);
 }

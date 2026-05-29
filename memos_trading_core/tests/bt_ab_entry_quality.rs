@@ -52,6 +52,7 @@ fn cfg(symbol: &str, interval: &str, edge_min: Option<f64>) -> BacktestConfig {
         edge_min_score: edge_min,      // ← TEK değişken
         orderbook_sim: None,
         regime_gate: Default::default(),
+        direction: Default::default(),
     }
 }
 

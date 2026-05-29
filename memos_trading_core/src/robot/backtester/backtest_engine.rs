@@ -63,6 +63,30 @@ pub struct BacktestConfig {
     /// [[project_autonomy_backlog]] #1.
     #[serde(default)]
     pub regime_gate: RegimeGate,
+    /// İşlem yönü modu (A/B kaldıracı): canlı sistem long-only; bu sembolün futures
+    /// olduğu ve stratejilerin `Signal::Sell` ürettiği gerçeğini kullanarak short
+    /// bacağını ölçer. `LongOnly` (default) → yalnız `Buy`→long (mevcut davranış).
+    /// `BothDirections` → `Sell`→short (strateji simetrik). `RegimeDirectional` →
+    /// ek olarak rejim yönü teyit etmeli (downtrend'de long, uptrend'de short yok).
+    /// [[project_autonomy_backlog]].
+    #[serde(default)]
+    pub direction: DirectionMode,
+}
+
+/// İşlem yönü modu — long-only yapısal kusurunu kapatma kaldıracı (A/B kolu).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum DirectionMode {
+    /// Yalnız `Signal::Buy` → long (legacy, canlı sistemin mevcut davranışı).
+    LongOnly,
+    /// `Buy`→long, `Sell`→short. Strateji ne derse (simetrik iki yön).
+    BothDirections,
+    /// `BothDirections` + rejim-yön teyidi: long yalnız non-downtrend rejimde,
+    /// short yalnız non-uptrend rejimde açılır (ters-trend girişini eler).
+    RegimeDirectional,
+}
+
+impl Default for DirectionMode {
+    fn default() -> Self { Self::LongOnly }
 }
 
 /// Backtest rejim Volatile-kapısı modu — canlı IDLE-in-volatile aynası, A/B kolu.
@@ -133,6 +157,14 @@ struct BacktestPos {
     trailing_sl: Option<f64>,
     breakeven_triggered: bool,
     partial_tp_triggered: bool,
+    /// true → long, false → short. Yön-farkında TP/SL/trailing/breakeven/PnL için.
+    is_long: bool,
+}
+
+impl BacktestPos {
+    /// Yön işareti: long +1, short -1. TP/SL/PnL hesabını tek formülde birleştirir.
+    #[inline]
+    fn sign(&self) -> f64 { if self.is_long { 1.0 } else { -1.0 } }
 }
 
 pub struct Backtester {
@@ -190,35 +222,52 @@ impl Backtester {
             let mut trade_net = 0.0;
 
             if let Some(ref mut p) = pos {
-                // B2: Trailing Stop Güncelleme
+                // Yön işareti: long +1, short -1. TP/SL/trailing/breakeven/PnL bunu kullanır
+                // → tek formül iki yönü de kapsar (long-only davranış s=+1'de birebir korunur).
+                let s = p.sign();
+                // Çıkış emri yönü: long kapanır → SELL; short kapanır → BUY (is_buy = !is_long).
+                let exit_is_buy = !p.is_long;
+
+                // B2: Trailing Stop Güncelleme (yön-farkında ratchet)
                 if let Some(trail_pct) = p.trailing_pct {
-                    p.best_price = p.best_price.max(candle.close);
-                    let new_trail = p.best_price * (1.0 - trail_pct / 100.0);
-                    p.trailing_sl = Some(p.trailing_sl.unwrap_or(0.0).max(new_trail));
+                    // best_price = lehte uç (long: en yüksek, short: en düşük).
+                    p.best_price = if p.is_long { p.best_price.max(candle.close) }
+                                   else { p.best_price.min(candle.close) };
+                    let new_trail = p.best_price * (1.0 - s * trail_pct / 100.0);
+                    // Trail SL lehe doğru kayar (long: yükselir, short: düşer).
+                    p.trailing_sl = Some(match p.trailing_sl {
+                        Some(t) if p.is_long => t.max(new_trail),
+                        Some(t)              => t.min(new_trail),
+                        None                 => new_trail,
+                    });
                 }
 
-                let eff_sl = p.trailing_sl.unwrap_or(p.sl_price).max(p.sl_price);
+                // Etkin SL: long → en yüksek taban (max), short → en düşük tavan (min).
+                let eff_sl = match p.trailing_sl {
+                    Some(t) if p.is_long => t.max(p.sl_price),
+                    Some(t)              => t.min(p.sl_price),
+                    None                 => p.sl_price,
+                };
 
-                // B1: Breakeven (Başabaş) Kontrolü
+                // B1: Breakeven — lehte hareket be_rr×risk'i aşınca SL'i girişe çek.
                 if !p.breakeven_triggered {
                     if let Some(be_rr) = self.config.breakeven_at_rr {
-                        if candle.close - p.entry_price >= be_rr * p.risk_distance {
+                        if s * (candle.close - p.entry_price) >= be_rr * p.risk_distance {
                             p.sl_price = p.entry_price;
                             p.breakeven_triggered = true;
                         }
                     }
                 }
 
-                // B3: Kısmi Kar Al (Partial TP)
+                // B3: Kısmi Kar Al (Partial TP) — yön-farkında eşik.
                 if !p.partial_tp_triggered {
                     if let Some(ratio) = self.config.partial_tp_ratio {
                         let partial_threshold = p.entry_price + (p.tp_price - p.entry_price) * 0.5;
-                        if candle.close >= partial_threshold {
+                        if s * (candle.close - partial_threshold) >= 0.0 {
                             let p_qty = p.qty * ratio;
-                            // Çıkış = market SELL → orderbook açıksa slippage'li avg fill.
-                            let exit_fill = self.sim_fill_price(false, candle.close, p_qty);
+                            let exit_fill = self.sim_fill_price(exit_is_buy, candle.close, p_qty);
                             let fee = p_qty * (p.entry_price + exit_fill) * self.config.commission_pct;
-                            let net = (exit_fill - p.entry_price) * p_qty - fee;
+                            let net = s * (exit_fill - p.entry_price) * p_qty - fee;
 
                             self.trades.push(self.create_sim_trade(p, candle, exit_fill, p_qty, net));
                             balance += net;
@@ -228,12 +277,14 @@ impl Backtester {
                     }
                 }
 
-                // Tam Çıkış Kontrolü (SL veya TP)
-                if candle.close >= p.tp_price || candle.close <= eff_sl {
-                    // Tetik candle.close'da; gerçekleşen çıkış market SELL fill'i (slippage).
-                    let exit_fill = self.sim_fill_price(false, candle.close, p.qty);
+                // Tam Çıkış Kontrolü (SL veya TP) — yön-farkında:
+                // TP isabet: s*(close-tp) >= 0 · SL isabet: s*(close-eff_sl) <= 0.
+                let tp_hit = s * (candle.close - p.tp_price) >= 0.0;
+                let sl_hit = s * (candle.close - eff_sl) <= 0.0;
+                if tp_hit || sl_hit {
+                    let exit_fill = self.sim_fill_price(exit_is_buy, candle.close, p.qty);
                     let fee = p.qty * (p.entry_price + exit_fill) * self.config.commission_pct;
-                    trade_net = (exit_fill - p.entry_price) * p.qty - fee;
+                    trade_net = s * (exit_fill - p.entry_price) * p.qty - fee;
                     self.trades.push(self.create_sim_trade(p, candle, exit_fill, p.qty, trade_net));
                     close_signal = true;
                 }
@@ -244,37 +295,41 @@ impl Backtester {
                 pos = None;
             }
 
-            // Stratejik Giriş Kontrolü
-            if pos.is_none()
-                && !self.regime_blocks_entry(&sorted, idx)
-                && Self::entry_long_signal(
-                    entry_strat.as_ref(), &entry_params, &sorted, idx, &htf_full, htf_bucket_secs,
-                    self.config.edge_min_score,
-                ) {
-                // Giriş = market BUY → orderbook açıksa slippage'li avg fill (yoksa close).
-                let entry = self.sim_fill_price(true, candle.close, self.config.max_position_size);
-                let sl = entry * (1.0 - self.config.stop_loss_pct / 100.0);
+            // Stratejik Giriş Kontrolü — yön-farkında (Some(true)=long, Some(false)=short).
+            let dir = if pos.is_none() && !self.regime_blocks_entry(&sorted, idx) {
+                self.entry_signal(entry_strat.as_ref(), &entry_params, &sorted, idx, &htf_full, htf_bucket_secs)
+            } else {
+                None
+            };
+            if let Some(is_long) = dir {
+                let s = if is_long { 1.0 } else { -1.0 };
+                // Giriş emri yönü: long → BUY, short → SELL (slippage doğru tarafta).
+                let entry = self.sim_fill_price(is_long, candle.close, self.config.max_position_size);
+                // SL girişin ters tarafında, TP lehte (yön-farkında).
+                let sl = entry * (1.0 - s * self.config.stop_loss_pct / 100.0);
+                let tp = entry * (1.0 + s * self.config.take_profit_pct / 100.0);
                 let trail_pct = self.config.atr_trail_mult.map(|m| Self::calc_atr_pct(&sorted[..=idx]) * m);
-                
+
                 pos = Some(BacktestPos {
                     entry_price: entry,
                     entry_idx: idx,
                     entry_ts: candle.timestamp,
                     qty: self.config.max_position_size,
                     sl_price: sl,
-                    tp_price: entry * (1.0 + self.config.take_profit_pct / 100.0),
+                    tp_price: tp,
                     risk_distance: (entry - sl).abs().max(f64::EPSILON),
                     best_price: entry,
                     trailing_pct: trail_pct,
                     trailing_sl: None,
                     breakeven_triggered: false,
                     partial_tp_triggered: false,
+                    is_long,
                 });
             }
 
-            // Risk & Bakiye Takibi
+            // Risk & Bakiye Takibi — gerçekleşmemiş PnL yön-farkında (short'ta ters işaret).
             max_balance = max_balance.max(balance);
-            let current_val = balance + pos.as_ref().map_or(0.0, |p| (candle.close - p.entry_price) * p.qty);
+            let current_val = balance + pos.as_ref().map_or(0.0, |p| p.sign() * (candle.close - p.entry_price) * p.qty);
             max_drawdown = max_drawdown.max((max_balance - current_val) / max_balance * 100.0);
             self.balance_history.push((candle.timestamp, balance));
         }
@@ -359,24 +414,11 @@ impl Backtester {
 
     // --- 3. TEKNİK ANALİZ VE STRATEJİ MATRİSİ ---
 
-    /// Gerçek strateji sinyali (canlı motorla tek-kaynak): `Signal::Buy` → long aç.
-    /// Backtester long-only olduğundan Sell/Hold → giriş yok. `params` =
-    /// cfg.strategy_params (param_spec araması bunu doldurur) → indikatör periyot/
-    /// eşikleri artık backtest'i GERÇEKTEN etkiler.
-    ///
-    /// Pencere son `W` bara sınırlanır: stratejilerin azami lookback'i (ICT_COMPOSITE
-    /// ~66 bar) çok altında kalır, böylece per-bar maliyet O(W) sabit → derin seride
-    /// (BACKTEST_CANDLE_LIMIT yüksek) bile backtest O(n·W), O(n²) değil.
-    ///
-    /// `edge_min` (#4 giriş kalitesi): `Some(t)` ise Buy sinyali ek olarak edge skoru
-    /// eşiğini geçmeli — canlı `process_symbol_cycle`'daki `edge < edge_threshold ⇒
-    /// REDDEDİLDİ` kapısının BİREBİR aynısı (`compute_edge_score_with`, ml_confidence=0
-    /// çünkü harness'te GBT yok, ters-momentum cezası 0.4 = canlı default). Böylece
-    /// param araması zayıf/ters-momentum girişlerini canlıyla aynı şekilde eler.
     /// Rejim Volatile-kapısı: canlı `Volatile → IDLE_PROTECT`'in backtest aynası.
     /// `Off` → asla blokla (legacy). `Absolute`/`Adaptive` → o anki bara kadarki
     /// pencerede (look-ahead'siz) rejim Volatile ise girişi engelle. Pencere
-    /// `entry_long_signal` ile aynı (W=200) → tek-kaynak görünüm.
+    /// `entry_signal` ile aynı (W=200) → tek-kaynak görünüm. Yöne bakmaz: Volatile/kaos
+    /// rejiminde hem long hem short bastırılır.
     fn regime_blocks_entry(&self, candles: &[Candle], idx: usize) -> bool {
         use crate::robot::logic::market_regime::{
             detect_adx_regime_with, adaptive_thresholds, AdxRegime, RegimeThresholds,
@@ -394,18 +436,21 @@ impl Backtester {
         matches!(detect_adx_regime_with(&candles[start..=idx], &thr), AdxRegime::Volatile)
     }
 
-    /// `None` → filtre yok (legacy).
-    fn entry_long_signal(
+    /// Yön-farkında giriş kararı: `Some(true)`=long, `Some(false)`=short, `None`=giriş yok.
+    /// `DirectionMode`'a göre stratejinin `Buy`/`Sell` sinyalini yöne çevirir; edge hunisi
+    /// (#4) ilgili yönün `Signal`'ı ile uygulanır (tek-kaynak `compute_edge_score_with`).
+    /// `RegimeDirectional`'da ayrıca rejim yönü teyit etmeli (ters-trend girişi elenir).
+    fn entry_signal(
+        &self,
         strat: &dyn Strategy,
         params: &StrategyParams,
         candles: &[Candle],
         idx: usize,
         htf_full: &[Candle],
         htf_bucket_secs: i64,
-        edge_min: Option<f64>,
-    ) -> bool {
+    ) -> Option<bool> {
         const W: usize = 200;
-        if idx < 20 { return false; }
+        if idx < 20 { return None; }
         let start = (idx + 1).saturating_sub(W);
         let window = &candles[start..=idx];
         // HTF dilimi: yalnız o anki bara göre TAMAMLANMIŞ bucket'lar (forming hariç →
@@ -418,19 +463,30 @@ impl Backtester {
         } else {
             None
         };
-        if !matches!(strat.generate_signal(window, params, None, htf), Ok(Signal::Buy)) {
-            return false;
-        }
-        // Giriş kalitesi kapısı: canlı motorla tek-kaynak edge hunisi.
-        match edge_min {
-            Some(t) => {
-                let edge = crate::robot::engines::Engine::compute_edge_score_with(
-                    window, &Signal::Buy, 0.0, 0.4,
-                );
-                edge >= t
+
+        // 1) Strateji sinyali → ham yön niyeti (modlara göre).
+        let want_long = match strat.generate_signal(window, params, None, htf) {
+            Ok(Signal::Buy) => true,
+            Ok(Signal::Sell) if self.config.direction != DirectionMode::LongOnly => false,
+            _ => return None, // Hold/err ya da LongOnly'de Sell → giriş yok
+        };
+
+        // 2) RegimeDirectional: rejim yönü niyeti teyit etmeli (ters-trend ele).
+        //    Tek-kaynak helper → canlı `regime_directional` kapısıyla aynı kural.
+        if self.config.direction == DirectionMode::RegimeDirectional {
+            let regime = crate::robot::logic::market_regime::classify_market_regime(window);
+            if !crate::robot::logic::market_regime::regime_confirms_direction(regime, want_long) {
+                return None;
             }
-            None => true,
         }
+
+        // 3) Giriş kalitesi kapısı (#4): canlı motorla tek-kaynak edge hunisi, yöne göre.
+        if let Some(t) = self.config.edge_min_score {
+            let sig = if want_long { Signal::Buy } else { Signal::Sell };
+            let edge = crate::robot::engines::Engine::compute_edge_score_with(window, &sig, 0.0, 0.4);
+            if edge < t { return None; }
+        }
+        Some(want_long)
     }
 
     fn calc_atr_pct(candles: &[Candle]) -> f64 {
@@ -486,11 +542,53 @@ mod edge_filter_tests {
             edge_min_score: edge_min,
             orderbook_sim: None,
             regime_gate: RegimeGate::Off,
+            direction: DirectionMode::LongOnly,
         }
     }
 
     fn n_trades(edge_min: Option<f64>, candles: &[Candle]) -> usize {
         Backtester::new(cfg(edge_min)).run(candles).unwrap().total_trades
+    }
+
+    /// İstikrarlı düşüş — trend stratejisi Sell üretir; short bacağı bunu kâra çevirmeli.
+    fn synthetic_downtrend(n: usize) -> Vec<Candle> {
+        (0..n).map(|i| {
+            let f = i as f64;
+            let close = 200.0 - 0.10 * f + 4.0 * (f * 0.3).sin();
+            Candle {
+                timestamp: Utc.timestamp_opt(1_700_000_000 + (i as i64) * 3600, 0).unwrap(),
+                open: close, high: close * 1.004, low: close * 0.996, close,
+                volume: 1_000.0, symbol: "TEST".into(), interval: "1h".into(),
+            }
+        }).collect()
+    }
+
+    #[test]
+    fn long_only_parity_unchanged_at_default() {
+        // DirectionMode::LongOnly (default) → uptrend davranışı eski long-only ile birebir
+        // (sign=+1 yolu). Trade üretmeli, regresyon olmamalı.
+        let up = synthetic_uptrend(300);
+        let r = Backtester::new(cfg(None)).run(&up).unwrap();
+        assert!(r.total_trades > 0, "uptrend long-only işlem üretmeli");
+    }
+
+    #[test]
+    fn both_directions_profits_from_downtrend() {
+        // Yapısal kaldıraç testi: düşüş piyasasında LongOnly ya hiç işlem açmaz ya da
+        // zarar eder; BothDirections short ile düşüşü yakalar → kesinlikle daha kârlı.
+        let down = synthetic_downtrend(400);
+        let mut long_cfg = cfg(None);
+        long_cfg.strategy_name = "EMA_CROSSOVER".into();
+        let mut both_cfg = long_cfg.clone();
+        both_cfg.direction = DirectionMode::BothDirections;
+
+        let long_res = Backtester::new(long_cfg).run(&down).unwrap();
+        let both_res = Backtester::new(both_cfg).run(&down).unwrap();
+
+        assert!(both_res.total_trades > 0, "BothDirections düşüşte short açmalı");
+        assert!(both_res.total_pnl > long_res.total_pnl,
+            "short bacağı düşüşü kâra çevirmeli: both={:.2} > long={:.2}",
+            both_res.total_pnl, long_res.total_pnl);
     }
 
     #[test]

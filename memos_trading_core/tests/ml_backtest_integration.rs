@@ -34,6 +34,7 @@ fn base_cfg(strategy: &str) -> BacktestConfig {
         breakeven_at_rr: None, atr_trail_mult: None, partial_tp_ratio: None,
         use_htf: false, edge_min_score: None, orderbook_sim: None,
         regime_gate: Default::default(),
+        direction: Default::default(),
     }
 }
 

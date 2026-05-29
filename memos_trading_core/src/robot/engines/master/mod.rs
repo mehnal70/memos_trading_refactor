@@ -282,6 +282,13 @@ pub struct RuntimeTuning {
     /// Env `REGIME_ADAPTIVE_PCTL` (örn. 0.90); (0,1) dışı/geçersiz → None. ADX bandları
     /// her durumda sabit kalır. [[project_autonomy_backlog]] #1.
     pub regime_adaptive_pctl: Option<f64>,
+    /// 🧭 Rejim-yön teyidi: true → canlı açılış sinyali rejim yönüyle hizalı olmalı
+    /// (long yalnız non-downtrend, short yalnız non-uptrend). Canlı motor zaten Sell→short
+    /// açıyor (Both modu); bu kapı ters-trend girişlerini eler. Backtest A/B (1h, 8×5):
+    /// LongOnly Σpnl% -441, Both -661 (DAHA KÖTÜ), RegimeDirectional +980 (PF 1.51) →
+    /// teyit shorting'i kâra çeviren bileşen. Default false (opt-in; WF+slippage doğrulaması
+    /// önce). Env `REGIME_DIRECTIONAL`. [[project_autonomy_backlog]] [[project_adaptive_regime]].
+    pub regime_directional: bool,
 }
 
 impl Default for RuntimeTuning {
@@ -314,6 +321,7 @@ impl Default for RuntimeTuning {
             stale_feed_max_age_secs: 3600,
             reentry_cooldown_secs: 0,
             regime_adaptive_pctl: None,
+            regime_directional: false,
         }
     }
 }
@@ -376,6 +384,7 @@ impl RuntimeTuning {
             regime_adaptive_pctl: std::env::var("REGIME_ADAPTIVE_PCTL").ok()
                 .and_then(|s| s.parse::<f64>().ok())
                 .filter(|p| p.is_finite() && *p > 0.0 && *p < 1.0),
+            regime_directional: env_truthy("REGIME_DIRECTIONAL"),
         }
     }
 

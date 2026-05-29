@@ -43,6 +43,7 @@ fn cfg(symbol: &str, interval: &str, ob: Option<&str>) -> BacktestConfig {
         edge_min_score: None,
         orderbook_sim: ob.map(|s| s.to_string()), // ← TEK değişken
         regime_gate: Default::default(),
+        direction: Default::default(),
     }
 }
 
