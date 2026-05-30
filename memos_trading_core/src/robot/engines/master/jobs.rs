@@ -32,8 +32,7 @@ impl Engine {
         // Drift-tetikli retrain cooldown: sürekli yüksek drift'te her tick'te
         // yeni trigger basılmasın diye ML_DRIFT_COOLDOWN_SECS (default 600)
         // boyunca bekle. Cooldown=0 → her tick fire (testing modu).
-        let ml_drift_cooldown: u64 = std::env::var("ML_DRIFT_COOLDOWN_SECS").ok()
-            .and_then(|s| s.parse::<u64>().ok()).unwrap_or(600);
+        let ml_drift_cooldown: u64 = env_parse("ML_DRIFT_COOLDOWN_SECS", 600);
         let mut should_retrain = false;
         let mut armed = true;
         let mut drift_score = 0.0;
@@ -129,8 +128,7 @@ impl Engine {
         }
 
         // Cooldown denetimi: bir önceki ML trigger'dan beri yeterli süre geçti mi?
-        let cooldown_secs = std::env::var("ANOMALY_ML_TRIGGER_COOLDOWN_SECS")
-            .ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(300);
+        let cooldown_secs: u64 = env_parse("ANOMALY_ML_TRIGGER_COOLDOWN_SECS", 300);
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let last_fired = ANOMALY_ML_LAST_TRIGGER_EPOCH.load(Ordering::Relaxed);
@@ -310,10 +308,8 @@ impl Engine {
         //     hedef alır; gbt_grid_search hyperparam'i seçer; final model
         //     `IntelligenceHub.gbt`'ye yazılır. Yetersiz veri/eğitim
         //     başarısızlığı sessiz fallback: statik ml_confidence yolunda kalınır.
-        let gbt_window_bars: usize = std::env::var("GBT_WINDOW_BARS").ok()
-            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(50);
-        let gbt_forward_bars: usize = std::env::var("GBT_FORWARD_BARS").ok()
-            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(5);
+        let gbt_window_bars: usize = env_parse("GBT_WINDOW_BARS", 50);
+        let gbt_forward_bars: usize = env_parse("GBT_FORWARD_BARS", 5);
 
         // 🌐 HEDEF MİMARİ: GBT regime AI'ı GENİŞ TF'de (4h/1d) çalışmalı → modeli de
         // HTF mumlarıyla eğit (regime_for_cycle skoru aynı TF'den besler, train/infer
@@ -446,18 +442,14 @@ impl Engine {
         };
 
         // 2) Env override'ları.
-        let top_n: usize = std::env::var("SCREENER_TOP_N").ok()
-            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(8);
-        let limit: usize = std::env::var("SCREENER_CANDLE_LIMIT").ok()
-            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(500);
-        let min_volume: f64 = std::env::var("SCREENER_MIN_VOLUME").ok()
-            .and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let top_n: usize = env_parse("SCREENER_TOP_N", 8);
+        let limit: usize = env_parse("SCREENER_CANDLE_LIMIT", 500);
+        let min_volume: f64 = env_parse("SCREENER_MIN_VOLUME", 0.0);
         let extras: Vec<String> = std::env::var("SCREENER_EXTRA_SYMBOLS").ok()
             .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
             .unwrap_or_default();
         // HTF bias delta — 0 veya multi_tf kapalıysa HTF yüklemeden saf tek-TF sıralama.
-        let htf_bias_delta: f64 = std::env::var("SCREENER_HTF_BIAS").ok()
-            .and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.2);
+        let htf_bias_delta: f64 = env_parse("SCREENER_HTF_BIAS", 0.2);
         let htf_aware = multi_tf_enabled && htf_bias_delta > 0.0;
 
         // 3) Aday havuzu — config.market + config.interval'a uyan SQLite sembolleri
@@ -623,12 +615,9 @@ impl Engine {
         // Walk-Forward konfigürasyonu — env'den override edilebilir.
         // Varsayılan IS=200 / OOS=50 / step=50. Daha derin veride IS/OOS'u TF'e
         // ölçeklemek için WALK_FORWARD_* env'leri kullanılır (örn. 1m'de IS≥1000).
-        let wf_is   = std::env::var("WALK_FORWARD_IS_BARS").ok()
-            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(200);
-        let wf_oos  = std::env::var("WALK_FORWARD_OOS_BARS").ok()
-            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(50);
-        let wf_step = std::env::var("WALK_FORWARD_STEP_BARS").ok()
-            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(50);
+        let wf_is:   usize = env_parse("WALK_FORWARD_IS_BARS", 200);
+        let wf_oos:  usize = env_parse("WALK_FORWARD_OOS_BARS", 50);
+        let wf_step: usize = env_parse("WALK_FORWARD_STEP_BARS", 50);
         let wf_min  = wf_is + wf_oos;
 
         let candles = crate::persistence::reader::read_candles(&db_path, &symbol, &interval, candle_limit)
@@ -724,8 +713,7 @@ impl Engine {
             if specs.is_empty() {
                 None
             } else {
-                let n_iters: usize = std::env::var("BACKTEST_STRATEGY_PARAM_ITERS").ok()
-                    .and_then(|s| s.parse().ok()).unwrap_or(40);
+                let n_iters: usize = env_parse("BACKTEST_STRATEGY_PARAM_ITERS", 40);
                 let bt_cfg = crate::robot::backtester::BacktestConfig {
                     symbol: symbol.clone(),
                     interval: interval.clone(),
@@ -763,8 +751,7 @@ impl Engine {
         // Sonuç ParameterStore.regime_overrides'a yazılır → engine cycle
         // rejime özgü TradeRiskParams ile çalışır (Faz 2 c4 + Faz 3 patch
         // kanalı). REGIME_MIN_SAMPLES env ile override edilebilir, default 2.
-        let regime_min_samples: usize = std::env::var("REGIME_MIN_SAMPLES").ok()
-            .and_then(|s| s.parse::<usize>().ok()).unwrap_or(2);
+        let regime_min_samples: usize = env_parse("REGIME_MIN_SAMPLES", 2);
         let regime_agg = crate::robot::backtester::walk_forward::aggregate_windows_by_regime(
             &candles,
             &best_wf_res.windows,

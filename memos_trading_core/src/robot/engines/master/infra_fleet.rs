@@ -19,8 +19,7 @@ impl Engine {
         if !snapshot_disabled {
             let snapshot_path = std::env::var("MISSION_CONTROL_SNAPSHOT_PATH")
                 .unwrap_or_else(|_| "data/mission_control.json".to_string());
-            let snapshot_secs: u64 = std::env::var("MISSION_CONTROL_SNAPSHOT_SECS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(5).max(1);
+            let snapshot_secs: u64 = env_parse("MISSION_CONTROL_SNAPSHOT_SECS", 5u64).max(1);
             crate::robot::infra::snapshot_writer::spawn_snapshot_writer(
                 Arc::clone(&state), snapshot_path, snapshot_secs,
             );
@@ -38,8 +37,7 @@ impl Engine {
         if !heartbeat_disabled {
             let heartbeat_path = std::env::var("HEARTBEAT_PATH")
                 .unwrap_or_else(|_| "logs/heartbeat.jsonl".to_string());
-            let heartbeat_secs: u64 = std::env::var("HEARTBEAT_SECS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(60).max(1);
+            let heartbeat_secs: u64 = env_parse("HEARTBEAT_SECS", 60u64).max(1);
             crate::robot::infra::heartbeat_writer::spawn_heartbeat_writer(
                 Arc::clone(&state), heartbeat_path, heartbeat_secs,
             );
@@ -862,8 +860,7 @@ impl Engine {
                 push_state_log(&state, "🎚️ ScalpSwing tuner: DISABLE=1, task pasif".into());
                 return;
             }
-            let every_secs: u64 = std::env::var("SCALP_SWING_TUNE_EVERY_SECS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+            let every_secs: u64 = env_parse("SCALP_SWING_TUNE_EVERY_SECS", 300);
 
             // Tuner devrede olduğunu boot'ta operatöre bildir — aksi halde
             // "tuner çalışmadı mı?" şüphesi oluşuyordu (summary boş olunca
@@ -1117,13 +1114,10 @@ impl Engine {
     /// Eşik altına döner dönmez sayaç sıfırlanır.
     pub(crate) fn spawn_balance_sync(state: Arc<Mutex<AppState>>) {
         tokio::spawn(async move {
-            let interval_secs: u64 = std::env::var("BALANCE_SYNC_EVERY_SECS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(300);
-            let mismatch_pct_threshold: f64 = std::env::var("BALANCE_MISMATCH_PCT")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let interval_secs: u64 = env_parse("BALANCE_SYNC_EVERY_SECS", 300);
+            let mismatch_pct_threshold: f64 = env_parse("BALANCE_MISMATCH_PCT", 1.0);
             // Otomatik onarım için ardışık gözlem eşiği. 0 → autofix kapalı.
-            let autofix_after_n: u32 = std::env::var("BALANCE_AUTOFIX_AFTER_N_OBS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+            let autofix_after_n: u32 = env_parse("BALANCE_AUTOFIX_AFTER_N_OBS", 3);
             let autofix_enabled: bool = std::env::var("BALANCE_AUTOFIX_ENABLED")
                 .map(|v| v != "false" && v != "0").unwrap_or(true);
 
