@@ -12,13 +12,13 @@ use tokio::time::{sleep, Duration};
 /// ML trigger spam'i kapanır (default 300sn, `ANOMALY_ML_TRIGGER_COOLDOWN_SECS`).
 static ANOMALY_ML_LAST_TRIGGER_EPOCH: AtomicU64 = AtomicU64::new(0);
 
-/// Sembol bazlı log throttle: (symbol, kind) → son emit epoch. Aynı sembol için
-/// "DataIngest empty" log'u her cycle (500ms) tekrarlanmasın diye 300sn pencere
-/// (env `LOG_DATAINGEST_COOLDOWN_SECS`). HashMap büyümesi sınırlı — sembol sayısı
-/// orchestrator'la beraber tipik <100.
-static LOG_THROTTLE_MAP: std::sync::OnceLock<std::sync::Mutex<
-    std::collections::HashMap<(String, &'static str), u64>
->> = std::sync::OnceLock::new();
+/// Sembol bazlı log throttle: `symbol|kind` → son emit epoch. Aynı sembol için
+/// "DataIngest empty" log'u her cycle (500ms) tekrarlanmasın diye throttle'lanır
+/// (örn. 300sn, env `LOG_DATAINGEST_COOLDOWN_SECS`). Map büyümesi sınırlı —
+/// sembol sayısı orchestrator'la beraber tipik <100. Algoritma logger ile ortak
+/// ([`crate::robot::infra::throttle::Throttle`]); burası process-global tek instance.
+static LOG_THROTTLE: std::sync::OnceLock<crate::robot::infra::throttle::Throttle>
+    = std::sync::OnceLock::new();
 
 /// Phase C: TRAILING_STOP kapanışları sonrası 60sn olgunluk gözlem kuyruğu.
 /// close_paper_position TrailingStop branch'ı buraya enqueue eder; periyodik
@@ -143,21 +143,8 @@ pub fn enqueue_trail_observation(obs: crate::robot::parameters::PendingTrailObse
 }
 
 pub fn log_throttle_should_emit(symbol: &str, kind: &'static str, cooldown_secs: u64) -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let map = LOG_THROTTLE_MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let mut guard = match map.lock() {
-        Ok(g) => g,
-        Err(_) => return true, // poisoned ise log'a izin ver
-    };
-    let key = (symbol.to_string(), kind);
-    if let Some(last) = guard.get(&key) {
-        if now.saturating_sub(*last) < cooldown_secs {
-            return false;
-        }
-    }
-    guard.insert(key, now);
-    true
+    let throttle = LOG_THROTTLE.get_or_init(crate::robot::infra::throttle::Throttle::new);
+    throttle.should_emit(&format!("{}|{}", symbol, kind), cooldown_secs)
 }
 
 /// `state` kilidini kısa süreliğine alıp tek bir log satırı düşürür.

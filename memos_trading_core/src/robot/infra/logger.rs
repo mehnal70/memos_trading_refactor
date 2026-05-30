@@ -1,14 +1,12 @@
 // robot/logger.rs - Trade logging sistemi (dosya + JSON)
 
-use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
 use chrono::Utc;
 use serde::{Serialize, Deserialize};
 use crate::core::types::{Signal, Trade};
+use crate::robot::infra::throttle::Throttle;
 use crate::MemosTradingError;
 
 /// SIGNAL throttle: aynı (symbol, signal) için bu süre içinde gelen tekrar
@@ -160,11 +158,12 @@ impl TradeEvent {
 pub struct TradingLogger {
     log_file: String,
     json_file: String,
-    /// SIGNAL idempotency cache: (symbol, signal_label) → son yazılan an.
-    /// Aynı kombinasyon throttle_window içinde tekrar gelirse atılır.
-    last_signal: Mutex<HashMap<(String, String), Instant>>,
-    /// Throttle penceresi; 0 ise throttle kapalı.
-    signal_throttle: Duration,
+    /// SIGNAL/RISK_BLOCK idempotency: ortak [`Throttle`] çekirdeği, anahtar
+    /// `event_type|symbol|signal`. Her logger kendi instance'ını tutar →
+    /// sink'ler ve testler birbirinden izole.
+    throttle: Throttle,
+    /// Throttle penceresi (sn); 0 ise throttle kapalı.
+    throttle_secs: u64,
 }
 
 impl TradingLogger {
@@ -197,8 +196,8 @@ impl TradingLogger {
         Ok(Self {
             log_file: log_file.to_string(),
             json_file: json_file.to_string(),
-            last_signal: Mutex::new(HashMap::new()),
-            signal_throttle: Duration::from_secs(throttle_secs),
+            throttle: Throttle::new(),
+            throttle_secs,
         })
     }
 
@@ -207,25 +206,10 @@ impl TradingLogger {
     /// SIGNAL ve RISK_BLOCK için kullanılır; TRADE_OPEN/TRADE_CLOSE/ERROR
     /// throttle dışıdır (zaten seyrek olaylardır).
     fn should_throttle(&self, event_type: &str, symbol: &str, signal_label: &str) -> bool {
-        if self.signal_throttle.is_zero() {
-            return false;
-        }
-        let key = (
-            format!("{}|{}", event_type, symbol),
-            signal_label.to_string(),
-        );
-        let now = Instant::now();
-        let mut map = match self.last_signal.lock() {
-            Ok(g) => g,
-            Err(_) => return false, // poisoned ise log'a izin ver
-        };
-        if let Some(prev) = map.get(&key) {
-            if now.duration_since(*prev) < self.signal_throttle {
-                return true;
-            }
-        }
-        map.insert(key, now);
-        false
+        // Ortak çekirdek emit-edilmeli mi? döner; "throttle?" onun tersi.
+        // cooldown=0 → should_emit daima true → throttle daima false (kapalı).
+        let key = format!("{}|{}|{}", event_type, symbol, signal_label);
+        !self.throttle.should_emit(&key, self.throttle_secs)
     }
 
     /// Trade eventini logla (hem text hem JSON)
