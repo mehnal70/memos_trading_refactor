@@ -11,6 +11,12 @@ pub struct BinanceFetcher {
     client: reqwest::Client,
 }
 
+impl Default for BinanceFetcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BinanceFetcher {
     pub fn new() -> Self {
         Self {
@@ -44,7 +50,7 @@ impl MarketFetcher for BinanceFetcher {
         
         for k in resp {
             // 1. Zaman Damgası Kontrolü (i64 ms)
-            let ts_ms = match k.get(0).and_then(|v| v.as_i64()) {
+            let ts_ms = match k.first().and_then(|v| v.as_i64()) {
                 Some(ts) if ts > 0 => ts,
                 _ => continue,
             };

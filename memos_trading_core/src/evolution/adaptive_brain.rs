@@ -117,7 +117,7 @@ impl AdaptiveBrain {
         self.reward_history.push_back(reward);
         if self.reward_history.len() > 1000 { self.reward_history.pop_front(); }
         self.total_learning_steps += 1;
-        if self.total_learning_steps % 100 == 0 { self.exploration_rate = (self.exploration_rate * 0.99).max(0.05); }
+        if self.total_learning_steps.is_multiple_of(100) { self.exploration_rate = (self.exploration_rate * 0.99).max(0.05); }
     }
 
     pub fn get_summary(&self) -> String {

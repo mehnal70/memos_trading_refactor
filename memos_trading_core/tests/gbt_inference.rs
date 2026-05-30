@@ -47,8 +47,8 @@ fn full_pipeline_trains_and_predicts_on_uptrend() {
     assert!((conf_buy + conf_sell - 1.0).abs() < 1e-9);
     assert!((conf_hold - 0.5).abs() < 1e-9);
     // Aralık
-    assert!(conf_buy >= 0.0 && conf_buy <= 1.0);
-    assert!(conf_sell >= 0.0 && conf_sell <= 1.0);
+    assert!((0.0..=1.0).contains(&conf_buy));
+    assert!((0.0..=1.0).contains(&conf_sell));
 }
 
 #[test]

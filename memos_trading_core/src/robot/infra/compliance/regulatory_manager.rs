@@ -33,6 +33,12 @@ pub struct SimpleRegulatoryManager {
     pub events: HashMap<String, ComplianceEvent>,
 }
 
+impl Default for SimpleRegulatoryManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleRegulatoryManager {
     pub fn new() -> Self {
         Self {

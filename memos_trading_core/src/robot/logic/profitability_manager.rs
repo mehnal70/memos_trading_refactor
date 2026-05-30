@@ -27,6 +27,12 @@ pub struct SimpleProfitabilityManager {
     cached_cost: f64,
 }
 
+impl Default for SimpleProfitabilityManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleProfitabilityManager {
     pub fn new() -> Self {
         Self {

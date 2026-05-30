@@ -6,9 +6,10 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StepStatus { Idle, Running, Done, Failed, Skipped }
+#[derive(Default)]
+pub enum StepStatus { #[default]
+Idle, Running, Done, Failed, Skipped }
 
-impl Default for StepStatus { fn default() -> Self { StepStatus::Idle } }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PipelineStepRuntime {
@@ -19,14 +20,16 @@ pub struct PipelineStepRuntime {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AnomalySeverity { Info, Warning, Critical }
+#[derive(Default)]
+pub enum AnomalySeverity { #[default]
+Info, Warning, Critical }
 
-impl Default for AnomalySeverity { fn default() -> Self { AnomalySeverity::Info } }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AnomalyKind { DataStall, ApiError, Drift, RiskBreach, Custom }
+#[derive(Default)]
+pub enum AnomalyKind { DataStall, ApiError, Drift, RiskBreach, #[default]
+Custom }
 
-impl Default for AnomalyKind { fn default() -> Self { AnomalyKind::Custom } }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PipelineAnomalyRuntime {

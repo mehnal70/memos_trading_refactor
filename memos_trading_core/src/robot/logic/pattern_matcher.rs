@@ -162,7 +162,7 @@ mod tests {
     use chrono::Utc;
 
     fn make_candles(closes: &[f64]) -> Vec<Candle> {
-        closes.iter().enumerate().map(|(_i, &c)| Candle {
+        closes.iter().map(|&c| Candle {
             timestamp: Utc::now(),
             open: c, high: c * 1.01, low: c * 0.99, close: c,
             volume: 1.0,

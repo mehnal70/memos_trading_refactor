@@ -132,7 +132,7 @@ impl StrategyScorer {
 
     /// Değerlendirme periyodu (EVAL_EVERY) geldi mi?
     pub fn should_evaluate(&self) -> bool {
-        self.total_n > 0 && self.total_n % EVAL_EVERY == 0
+        self.total_n > 0 && self.total_n.is_multiple_of(EVAL_EVERY)
     }
 
     /// Özerk Karar Mekanizması: İstatistiksel olarak başarısız kolları budar.

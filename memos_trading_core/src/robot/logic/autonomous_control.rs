@@ -195,7 +195,7 @@ impl AutonomousController {
     pub fn should_evolve(&self) -> bool {
         const MIN_GENOME_TRADES: usize = 10;
         if !self.evolution_enabled { return false; }
-        if self.cycle_id == 0 || self.cycle_id % self.evolve_every_n_cycles != 0 { return false; }
+        if self.cycle_id == 0 || !self.cycle_id.is_multiple_of(self.evolve_every_n_cycles) { return false; }
         // Yeterli işlem görülmeden evrimleşme — fitness güvenilir değil
         let genome_trades = self.current_strategy_genome.as_ref()
             .map(|g| g.trade_count)

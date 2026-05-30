@@ -177,7 +177,7 @@ impl AutonomousAuditLogger {
             .filter_map(|e| {
                 e.ok().and_then(|entry| {
                     let path = entry.path();
-                    if path.extension().map_or(false, |ext| ext == "json") {
+                    if path.extension().is_some_and(|ext| ext == "json") {
                         let modified = entry.metadata()
                             .ok()?
                             .modified()
@@ -210,7 +210,7 @@ impl AutonomousAuditLogger {
             let entry = entry.map_err(|e| format!("Entry hatasız: {}", e))?;
             let path = entry.path();
             
-            if path.extension().map_or(false, |ext| ext == "json") {
+            if path.extension().is_some_and(|ext| ext == "json") {
                 if let Ok(content) = fs::read_to_string(&path) {
                     if let Ok(cycle) = serde_json::from_str::<CycleRecord>(&content) {
                         cycles.push(cycle);

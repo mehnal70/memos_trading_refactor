@@ -142,7 +142,7 @@ impl PipelineSupervisor {
     /// Anomali Tespiti: Real-time (Slicing ile kopyalamasız kontrol)
     pub fn detect_realtime_anomaly(&self, symbol: &str, recent_returns: &[f64], recent_volumes: &[f64], _api_latency_ms: u64) {
         // Ani PnL Değişimi
-        if recent_returns.last().map_or(false, |&r| r.abs() > 0.05) {
+        if recent_returns.last().is_some_and(|&r| r.abs() > 0.05) {
             Self::log_error_to_file("Anomali: %5+ PnL değişimi!", symbol);
         }
 
@@ -150,7 +150,7 @@ impl PipelineSupervisor {
         let v_len = recent_volumes.len();
         if v_len > 5 {
             let avg_vol = recent_volumes[..v_len-1].iter().sum::<f64>() / (v_len - 1) as f64;
-            if recent_volumes.last().map_or(false, |&last| last > avg_vol * 2.0) {
+            if recent_volumes.last().is_some_and(|&last| last > avg_vol * 2.0) {
                 Self::log_error_to_file("Anomali: Hacim patlaması!", symbol);
             }
         }

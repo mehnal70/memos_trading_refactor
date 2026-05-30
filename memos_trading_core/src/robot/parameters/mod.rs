@@ -622,7 +622,7 @@ impl ParameterStore {
         let base = self.target_trail_pct_for_strategy(strategy_name);
         let fb = self.trail_feedback
             .entry((symbol.to_string(), strategy_name.to_string()))
-            .or_insert_with(TrailFeedback::new);
+            .or_default();
         fb.record_outcome(was_early, base)
     }
 
@@ -695,7 +695,7 @@ impl ParameterStore {
     /// Döner: tighten gerçekten uygulandı mı (true) / koşul oluşmadı (false).
     pub fn apply_trade_feedback(&mut self, regime: &str, pnl_pct: f64) -> bool {
         let fb = self.regime_feedback.entry(regime.to_string())
-            .or_insert_with(RegimeFeedback::default);
+            .or_default();
         fb.record(pnl_pct);
 
         // Sıkılaştırma için yeterli veri yoksa çık.

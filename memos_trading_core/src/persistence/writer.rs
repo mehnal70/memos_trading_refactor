@@ -320,7 +320,7 @@ pub fn parse_binance_kline(
     // 1. Ham milisaniye zaman damgasını oku ve Chrono nesnesine matrisle
     let raw_ms = raw_kline[0].as_i64()?;
     let dt = chrono::DateTime::<Utc>::from_timestamp_millis(raw_ms)
-        .unwrap_or_else(|| Utc::now());
+        .unwrap_or_else(Utc::now);
 
     // 2. String tabanlı finansal verileri f64 rasyolarına güvenle dönüştür (Fail-Safe)
     let open: f64  = raw_kline[1].as_str()?.parse().ok()?;

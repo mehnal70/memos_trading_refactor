@@ -170,7 +170,7 @@ mod integration_tests {
         assert_eq!(json_data.total_trades, 1);
         assert_eq!(json_data.winning_trades, 1);
         assert!(json_data.last_trade_symbol.is_some());
-        assert!(json_data.updated_at.len() > 0);
+        assert!(!json_data.updated_at.is_empty());
     }
 
     /// End-to-end: WebSocket → Execution → Safety → Dashboard
@@ -200,7 +200,7 @@ mod integration_tests {
         }
         
         // Final check
-        assert!(dashboard.trade_history().len() > 0);
+        assert!(!dashboard.trade_history().is_empty());
         assert!(dashboard.metrics().total_pnl > 0.0);
         assert!(safety.can_trade());
     }
@@ -221,7 +221,7 @@ mod integration_tests {
             }
         }
         
-        assert!(dashboard.trade_history().len() > 0);
+        assert!(!dashboard.trade_history().is_empty());
         let metrics = dashboard.metrics();
         assert!(metrics.total_trades > 0);
         println!("Stress test: {} trades, P&L: {:.2}%", 

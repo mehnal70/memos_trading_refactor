@@ -82,7 +82,7 @@ impl BinanceLiveAdapter {
 
     /// Tekil bir kline verisini Srivastava ATP standartlarında doğrular ve mühürler.
     fn parse_single_kline(&self, k: Vec<serde_json::Value>, symbol: &str, interval: &str) -> Option<Candle> {
-        let ts_ms = k.get(0)?.as_i64()?;
+        let ts_ms = k.first()?.as_i64()?;
         
         let parse_f64 = |idx: usize| {
             k.get(idx)?.as_str()?.parse::<f64>().ok()

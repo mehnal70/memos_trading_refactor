@@ -145,7 +145,7 @@ impl PopulationManager {
                 let mut best: Option<&StrategyGenome> = None;
                 for _ in 0..*size {
                     let candidate = &self.current_population[rng.gen_range(0..pop_len)];
-                    if best.map_or(true, |b| candidate.fitness > b.fitness) { best = Some(candidate); }
+                    if best.is_none_or(|b| candidate.fitness > b.fitness) { best = Some(candidate); }
                 }
                 best.unwrap_or(&self.current_population[0])
             }

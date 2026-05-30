@@ -352,7 +352,7 @@ impl BinanceFuturesExecutor {
 
     pub async fn close_position(&self, symbol: &str) -> Result<Value> {
         let pos = self.get_positions(symbol).await?;
-        let qty = pos.get(0).and_then(|p| p["positionAmt"].as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let qty = pos.first().and_then(|p| p["positionAmt"].as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
         if qty.abs() < f64::EPSILON { return Err(MemosTradingError::Api("Pozisyon kapalı".to_owned())); }
         self.place_market_order(symbol, if qty > 0.0 { "SELL" } else { "BUY" }, qty.abs()).await
     }

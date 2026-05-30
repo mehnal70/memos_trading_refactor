@@ -218,7 +218,7 @@ pub fn write_summary_to_file(summary: &TradeSummary, dir: &Path, period: ReportP
     let target = dir.join(&file_name);
     let tmp = dir.join(format!("{}.tmp", &file_name));
     let json = serde_json::to_string_pretty(summary)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, &target)?;
     Ok(target)

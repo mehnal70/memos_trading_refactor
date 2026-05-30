@@ -33,6 +33,12 @@ pub struct SimpleMaintenanceManager {
     pub events: HashMap<String, MaintenanceEvent>,
 }
 
+impl Default for SimpleMaintenanceManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleMaintenanceManager {
     pub fn new() -> Self {
         Self {

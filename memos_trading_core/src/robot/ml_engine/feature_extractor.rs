@@ -60,7 +60,7 @@ impl FeatureVector {
             bb_pct_b: self.bb_pct_b.clamp(0.0, 1.0),
             roc_10: ((self.roc_10 / 10.0 + 1.0) / 2.0).clamp(0.0, 1.0),
             vol_sma_ratio: (self.vol_sma_ratio / 4.0).clamp(0.0, 1.0),
-            signal: self.signal.clone(), pnl: self.pnl,
+            signal: self.signal, pnl: self.pnl,
         }
     }
 }

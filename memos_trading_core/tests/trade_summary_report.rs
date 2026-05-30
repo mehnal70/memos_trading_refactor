@@ -208,7 +208,7 @@ fn current_week_window_starts_monday() {
 fn write_summary_to_file_creates_json() {
     let (start, end) = day_window(2026, 5, 19);
     let s = TradeSummary::aggregate(
-        &vec![trade("BTC", 1.0, "TP", "2026-05-19T10:00:00Z")],
+        &[trade("BTC", 1.0, "TP", "2026-05-19T10:00:00Z")],
         ReportPeriod::Daily, start, end,
     );
     let dir = std::env::temp_dir().join(format!("memos_summary_test_{}", std::process::id()));
@@ -226,7 +226,7 @@ fn file_write_is_idempotent_overwrite() {
     let (start, _end) = day_window(2026, 5, 19);
     let s1 = TradeSummary::aggregate(&[], ReportPeriod::Daily, start, start);
     let s2 = TradeSummary::aggregate(
-        &vec![trade("BTC", 1.0, "TP", "2026-05-19T10:00:00Z")],
+        &[trade("BTC", 1.0, "TP", "2026-05-19T10:00:00Z")],
         ReportPeriod::Daily, start, start + chrono::Duration::days(1),
     );
     let dir = std::env::temp_dir().join(format!("memos_summary_idem_{}", std::process::id()));

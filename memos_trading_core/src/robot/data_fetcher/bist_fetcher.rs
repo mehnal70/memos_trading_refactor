@@ -16,6 +16,12 @@ pub struct BistFetcher {
     client: Client,
 }
 
+impl Default for BistFetcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BistFetcher {
     pub fn new() -> Self {
         Self {

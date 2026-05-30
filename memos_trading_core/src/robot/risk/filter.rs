@@ -43,13 +43,11 @@ pub trait RiskFilter: Send + Sync {
 // 1) RiskGateFilter — DD / günlük zarar / notional / ML güveni baraj kontrolleri
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[derive(Default)]
 pub struct RiskGateFilter {
     pub gate: RiskGate,
 }
 
-impl Default for RiskGateFilter {
-    fn default() -> Self { Self { gate: RiskGate::default() } }
-}
 
 impl RiskGateFilter {
     pub fn new(policy: RiskGatePolicy) -> Self { Self { gate: RiskGate::new(policy) } }
@@ -280,7 +278,7 @@ mod tests {
         let f = KellyEdgeFilter::default();
         // 3 küçük kazanım vs 7 büyük zarar → ham f* negatif
         let mut pnls = vec![10.0, 10.0, 10.0];
-        pnls.extend(std::iter::repeat(-50.0).take(7));
+        pnls.extend(std::iter::repeat_n(-50.0, 7));
         match f.evaluate_pnls(&pnls) {
             RiskDecision::Deny { reasons, enter_safe_mode, halt } => {
                 assert!(enter_safe_mode);
@@ -296,7 +294,7 @@ mod tests {
         let f = KellyEdgeFilter::default();
         // 7 büyük kazanım vs 3 küçük zarar → ham f* pozitif
         let mut pnls = vec![50.0; 7];
-        pnls.extend(std::iter::repeat(-10.0).take(3));
+        pnls.extend(std::iter::repeat_n(-10.0, 3));
         assert!(matches!(f.evaluate_pnls(&pnls), RiskDecision::Allow));
     }
 
@@ -314,7 +312,7 @@ mod tests {
         let f = VarFilter::default(); // max_daily_var_pct = 5.0
         // 15 küçük + 5 büyük negatif return; %95 güvende tail %20'lik return'a düşer.
         let mut returns = vec![0.005f64; 15];
-        returns.extend(std::iter::repeat(-0.20).take(5));
+        returns.extend(std::iter::repeat_n(-0.20, 5));
         match f.evaluate_returns(&returns, 10_000.0) {
             RiskDecision::Deny { reasons, .. } => {
                 assert!(reasons[0].contains("VaR"), "{:?}", reasons);

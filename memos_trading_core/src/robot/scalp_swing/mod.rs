@@ -27,9 +27,10 @@ use serde::{Deserialize, Serialize};
 // --- 1. TEMEL TİPLER VE ENUMLAR ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum TradeType { Regular, Scalp, Swing }
+#[derive(Default)]
+pub enum TradeType { #[default]
+Regular, Scalp, Swing }
 
-impl Default for TradeType { fn default() -> Self { Self::Regular } }
 
 impl TradeType {
     pub fn label(&self) -> &'static str {

@@ -102,7 +102,7 @@ impl OrderValidator {
             .rev()
             // &&Trade karmaşasını çözmek için dereference yapıyoruz veya doğrudan erişiyoruz
             // 'realized_pnl' yerine 'pnl' alanını kullanıyoruz (types.rs ile uyumlu)
-            .take_while(|t| t.pnl.map_or(false, |p| p < 0.0))
+            .take_while(|t| t.pnl.is_some_and(|p| p < 0.0))
             .count();
         
         if consecutive_losses >= self.rules.max_consecutive_losses {

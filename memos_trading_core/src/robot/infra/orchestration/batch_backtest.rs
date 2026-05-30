@@ -52,7 +52,7 @@ pub async fn run_batch_backtest(cfg: BacktestConfig) -> Vec<BacktestResult> {
                             // Backtest'te gerçek sleep sistemi yavaşlatır.
 
                             match signal {
-                                Signal::Buy => portfolio.open_position(symbol, exec_price, 1.0, Signal::Buy, &strat.name()),
+                                Signal::Buy => portfolio.open_position(symbol, exec_price, 1.0, Signal::Buy, strat.name()),
                                 Signal::Sell => { portfolio.close_position(symbol, exec_price); },
                                 _ => {}
                             }
@@ -64,7 +64,7 @@ pub async fn run_batch_backtest(cfg: BacktestConfig) -> Vec<BacktestResult> {
                     symbol_results.push(BacktestResult {
                         symbol: symbol.clone(),
                         strategy: strat.name().to_string(),
-                        params: params.clone(),
+                        params: *params,
                         total_pnl: metrics.total_pnl,
                         win_rate: metrics.win_rate,
                         trade_count: metrics.trade_count,

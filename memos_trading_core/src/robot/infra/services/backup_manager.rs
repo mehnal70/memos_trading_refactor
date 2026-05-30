@@ -31,6 +31,12 @@ pub struct SimpleBackupManager {
     pub backups: HashMap<String, BackupRecord>,
 }
 
+impl Default for SimpleBackupManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleBackupManager {
     pub fn new() -> Self {
         Self {

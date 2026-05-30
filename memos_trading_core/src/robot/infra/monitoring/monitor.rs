@@ -47,7 +47,8 @@ impl Monitor {
         self.state.last_metrics = Some(metrics.clone());
 
         // Hiyerarşik Karar Mekanizması (if/else yerine Match-Guard)
-        let action = match () {
+        
+        match () {
             // 1. Kritik Hata Freni (En yüksek öncelik)
             _ if self.state.error_count > self.config.critical_error_limit => MonitorAction::Stop,
 
@@ -63,8 +64,7 @@ impl Monitor {
             },
 
             _ => MonitorAction::Continue,
-        };
-        action
+        }
     }
 
     /// WASM uyumlu hafif denetim

@@ -272,7 +272,7 @@ impl HyperOptimizer {
                 best_params = params;
             }
         }
-        best_params.clone()
+        *best_params
     }
 
     pub fn simulate_score<S: Strategy>(strategy: &S, candles: &[Candle], params: &StrategyParams) -> f64 {
@@ -401,7 +401,7 @@ impl AdvancedOptimizer {
         // Gerçek uygulamada: Gaussian Process, acquisition function, vs.
         // Dummy: param_space'in ilkini döndür
         HyperOptResult {
-            best_params:   _param_space[0].clone(),
+            best_params:   _param_space[0],
             best_score:    0.0,
             best_win_rate: 0.0,
             best_pnl_pct:  0.0,

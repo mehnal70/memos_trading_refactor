@@ -266,7 +266,7 @@ pub fn simulate_backtest(
         max_drawdown_pct: max_drawdown,
         profit_factor,
         net_pnl: total_pnl,
-        params: params.clone(),
+        params: *params,
         timestamp: Utc::now(),
     })
 }

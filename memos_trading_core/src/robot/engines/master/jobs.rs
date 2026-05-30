@@ -141,7 +141,7 @@ impl Engine {
         // Daha önce her cycle (500ms) "ML retrain tetiklendi" log basıyordu ama cooldown
         // gerçek tetiği bastırıyordu → mesaj yanıltıcı + olay günlüğü doluyor.
         if armed {
-            st.fleet.triggers.get("ml").map(|t| t.store(true, Ordering::Relaxed));
+            if let Some(t) = st.fleet.triggers.get("ml") { t.store(true, Ordering::Relaxed) }
             ANOMALY_ML_LAST_TRIGGER_EPOCH.store(now_secs, Ordering::Relaxed);
 
             st.push_log(format!(

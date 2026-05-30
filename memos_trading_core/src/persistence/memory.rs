@@ -136,7 +136,7 @@ impl Database for MemoryDatabase {
     async fn get_trades(&self, symbol: Option<&str>, limit: usize) -> Result<Vec<Trade>> {
         let lock = self.trades.read().map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(lock.iter()
-            .filter(|t| symbol.is_none() || symbol.map_or(false, |s| t.symbol == s))
+            .filter(|t| symbol.is_none() || symbol.is_some_and(|s| t.symbol == s))
             .rev()
             .take(limit)
             .cloned()

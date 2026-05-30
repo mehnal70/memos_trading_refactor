@@ -95,6 +95,12 @@ impl Clone for SymbolManager {
     }
 }
 
+impl Default for SymbolManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SymbolManager {
     pub fn new() -> Self {
         Self {

@@ -394,7 +394,7 @@ impl RuntimeTuning {
         use crate::core::types::Exchange;
         let mut out: Vec<Exchange> = std::env::var("FORCE_LIVE_EXCHANGES")
             .unwrap_or_default()
-            .split(|c| c == ',' || c == ' ' || c == ';')
+            .split([',', ' ', ';'])
             .filter_map(Exchange::from_token)
             .collect();
         if env_truthy("ALLOW_BIST") && !out.contains(&Exchange::Bist) {

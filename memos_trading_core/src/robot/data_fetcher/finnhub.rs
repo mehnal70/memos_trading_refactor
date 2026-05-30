@@ -83,7 +83,7 @@ impl MarketFetcher for FinnhubFetcher {
 
             let timestamp = Utc.timestamp_opt(ts_sec, 0)
                     .single()
-                    .unwrap_or_else(|| Utc::now()); // || operatörü bir fonksiyon tanımlar
+                    .unwrap_or_else(Utc::now); // || operatörü bir fonksiyon tanımlar
 
             candles.push(Candle {
                 timestamp,

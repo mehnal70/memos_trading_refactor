@@ -79,8 +79,8 @@ impl TradePatternClassifier {
 
         match (wins.is_empty(), losses.is_empty()) {
             (false, false) => {
-                let win_data: Vec<_> = wins.into_iter().map(|(x, _)| x.clone()).collect();
-                let loss_data: Vec<_> = losses.into_iter().map(|(x, _)| x.clone()).collect();
+                let win_data: Vec<_> = wins.into_iter().map(|(x, _)| x).collect();
+                let loss_data: Vec<_> = losses.into_iter().map(|(x, _)| x).collect();
 
                 self.win_stats = Self::compute_stats(&win_data);
                 self.loss_stats = Self::compute_stats(&loss_data);
@@ -151,7 +151,7 @@ impl TradePatternClassifier {
 
     pub fn record_and_maybe_retrain(&mut self, buf: &mut Vec<([f64; N_FEAT], f64)>, inp: &ClassifierInput, pnl: f64) {
         buf.push((Self::to_features(inp), if pnl > 0.0 { 1.0 } else { 0.0 }));
-        if buf.len() >= MIN_TRAIN && buf.len() % 10 == 0 { self.train(buf); }
+        if buf.len() >= MIN_TRAIN && buf.len().is_multiple_of(10) { self.train(buf); }
     }
 
     pub fn save_snapshot(cls: &Self, buf: &[([f64; N_FEAT], f64)], path: &str) {

@@ -34,6 +34,12 @@ pub struct SimpleDecisionCommunicator {
     pub notifications: Vec<NotificationLog>,
 }
 
+impl Default for SimpleDecisionCommunicator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleDecisionCommunicator {
     pub fn new() -> Self {
         Self {

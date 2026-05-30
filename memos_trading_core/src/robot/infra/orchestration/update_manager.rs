@@ -43,6 +43,12 @@ pub struct SimpleUpdateManager {
     pub updates: Vec<UpdateInfo>,
 }
 
+impl Default for SimpleUpdateManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleUpdateManager {
     pub fn new() -> Self {
         Self {

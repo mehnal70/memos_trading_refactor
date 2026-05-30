@@ -112,14 +112,14 @@ impl OpenPosition {
         match self.is_long {
             true => {
                 if p >= s { return Some("take_profit"); }
-                if !self.tp1_triggered && self.tp1_price.map_or(false, |price| p >= price) { return Some("tp1"); }
-                if t.map_or(false, |stop| p <= stop) { return Some("trailing_sl"); }
+                if !self.tp1_triggered && self.tp1_price.is_some_and(|price| p >= price) { return Some("tp1"); }
+                if t.is_some_and(|stop| p <= stop) { return Some("trailing_sl"); }
                 if p <= sl { return Some("static_sl"); }
             },
             false => {
                 if p <= s { return Some("take_profit"); }
-                if !self.tp1_triggered && self.tp1_price.map_or(false, |price| p <= price) { return Some("tp1"); }
-                if t.map_or(false, |stop| p >= stop) { return Some("trailing_sl"); }
+                if !self.tp1_triggered && self.tp1_price.is_some_and(|price| p <= price) { return Some("tp1"); }
+                if t.is_some_and(|stop| p >= stop) { return Some("trailing_sl"); }
                 if p >= sl { return Some("static_sl"); }
             }
         }

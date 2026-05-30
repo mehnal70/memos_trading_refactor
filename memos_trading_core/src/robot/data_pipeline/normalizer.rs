@@ -15,7 +15,7 @@ impl DataNormalizer {
         if candles.is_empty() { return candles; }
 
         // 1. Sıralama ve Tekilleştirme
-        candles.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        candles.sort_by_key(|a| a.timestamp);
         candles.dedup_by(|a, b| a.timestamp == b.timestamp);
 
         let mut cleaned: Vec<crate::core::types::Candle> = Vec::with_capacity(candles.len());

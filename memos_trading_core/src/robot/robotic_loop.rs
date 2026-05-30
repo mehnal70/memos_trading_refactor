@@ -502,7 +502,7 @@ impl AppState {
 
         // 3. Otonom Karar: "Tetiklemeli miyim?"
         if self.brain.ml_confidence * risk_multiplier > self.guardian.dynamic_safety_barrier() {
-             self.fleet.triggers.get("execution").map(|t| t.store(true, Ordering::Relaxed));
+             if let Some(t) = self.fleet.triggers.get("execution") { t.store(true, Ordering::Relaxed) }
              self.push_log("🚀 Otonom Karar: Koşullar optimal, harekât başlatıldı.".into());
         }
     }

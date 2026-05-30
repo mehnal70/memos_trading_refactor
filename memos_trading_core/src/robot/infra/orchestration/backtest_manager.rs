@@ -29,6 +29,12 @@ pub struct SimpleBacktestManager {
     pub results: HashMap<String, BacktestResult>,
 }
 
+impl Default for SimpleBacktestManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleBacktestManager {
     pub fn new() -> Self {
         Self {

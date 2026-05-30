@@ -48,6 +48,12 @@ pub struct SimpleNotificationLogger {
     // Kritik logları hızlı filtrelemek için bir sayaç veya index eklenebilir
 }
 
+impl Default for SimpleNotificationLogger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleNotificationLogger {
     pub fn new() -> Self {
         Self {

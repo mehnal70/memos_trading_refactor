@@ -81,7 +81,7 @@ impl<'a> RoboticTradeExecutor<'a> {
         symbols
             .iter()
             .map(|sym| match self.policy_decision(&signal, sym, amount, basket_size) {
-                ExecutionDecision::Allow => self.executor.execute(signal.clone(), sym, amount),
+                ExecutionDecision::Allow => self.executor.execute(signal, sym, amount),
                 ExecutionDecision::Skip { reason } => {
                     Err(format!("ExecutionPolicy skip [{sym}]: {reason}").into())
                 }

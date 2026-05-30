@@ -213,6 +213,34 @@ pub fn build_training_set(
     out
 }
 
+pub fn gbt_grid_search(data: &[([f64; N_FEATURES], f64)]) -> Option<GbtTuneResult> {
+    if data.len() < 20 { return None; }
+    let split = (data.len() as f64 * 0.70) as usize;
+    let (train, test) = (&data[..split], &data[split..]);
+    if test.is_empty() { return None; }
+
+    let n_est_opts = &[3, 5, 8];
+    let lr_opts = &[0.05, 0.10, 0.15];
+    let depth_opts = &[2, 3];
+    let mut best: Option<GbtTuneResult> = None;
+
+    for &n_est in n_est_opts {
+        for &lr in lr_opts {
+            for &depth in depth_opts {
+                let mut gbt = GradientBoostedTrees::new(n_est, lr, depth);
+                gbt.train(train);
+                if !gbt.is_ready() { continue; }
+                let correct = test.iter().filter(|(x, t)| (gbt.predict_raw(x) > 0.0) == (*t > 0.0)).count();
+                let acc = correct as f64 / test.len() as f64 * 100.0;
+                if best.as_ref().is_none_or(|b| acc > b.oos_accuracy) {
+                    best = Some(GbtTuneResult { n_estimators: n_est, learning_rate: lr, max_depth: depth, oos_accuracy: acc });
+                }
+            }
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod build_set_tests {
     use super::*;
@@ -261,32 +289,4 @@ mod build_set_tests {
         let ds = build_training_set(&c, 20, 5);
         assert_eq!(ds.len(), 35);
     }
-}
-
-pub fn gbt_grid_search(data: &[([f64; N_FEATURES], f64)]) -> Option<GbtTuneResult> {
-    if data.len() < 20 { return None; }
-    let split = (data.len() as f64 * 0.70) as usize;
-    let (train, test) = (&data[..split], &data[split..]);
-    if test.is_empty() { return None; }
-
-    let n_est_opts = &[3, 5, 8];
-    let lr_opts = &[0.05, 0.10, 0.15];
-    let depth_opts = &[2, 3];
-    let mut best: Option<GbtTuneResult> = None;
-
-    for &n_est in n_est_opts {
-        for &lr in lr_opts {
-            for &depth in depth_opts {
-                let mut gbt = GradientBoostedTrees::new(n_est, lr, depth);
-                gbt.train(train);
-                if !gbt.is_ready() { continue; }
-                let correct = test.iter().filter(|(x, t)| (gbt.predict_raw(x) > 0.0) == (*t > 0.0)).count();
-                let acc = correct as f64 / test.len() as f64 * 100.0;
-                if best.as_ref().map_or(true, |b| acc > b.oos_accuracy) {
-                    best = Some(GbtTuneResult { n_estimators: n_est, learning_rate: lr, max_depth: depth, oos_accuracy: acc });
-                }
-            }
-        }
-    }
-    best
 }

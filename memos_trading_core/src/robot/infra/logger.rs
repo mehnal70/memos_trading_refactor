@@ -186,11 +186,11 @@ impl TradingLogger {
     ) -> Result<Self, MemosTradingError> {
         if let Some(parent) = Path::new(log_file).parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| MemosTradingError::Io(e))?;
+                .map_err(MemosTradingError::Io)?;
         }
         if let Some(parent) = Path::new(json_file).parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| MemosTradingError::Io(e))?;
+                .map_err(MemosTradingError::Io)?;
         }
 
         Ok(Self {
@@ -238,7 +238,7 @@ impl TradingLogger {
             .create(true)
             .append(true)
             .open(&self.log_file)
-            .map_err(|e| MemosTradingError::Io(e))?;
+            .map_err(MemosTradingError::Io)?;
 
         let log_line = format!(
             "[{}] {:10} {:8} {} - {}\n",
@@ -250,7 +250,7 @@ impl TradingLogger {
         );
 
         file.write_all(log_line.as_bytes())
-            .map_err(|e| MemosTradingError::Io(e))?;
+            .map_err(MemosTradingError::Io)?;
 
         Ok(())
     }
@@ -261,13 +261,13 @@ impl TradingLogger {
             .create(true)
             .append(true)
             .open(&self.json_file)
-            .map_err(|e| MemosTradingError::Io(e))?;
+            .map_err(MemosTradingError::Io)?;
 
         let json_line = serde_json::to_string(event)
-            .map_err(|e| MemosTradingError::Serde(e))?;
+            .map_err(MemosTradingError::Serde)?;
 
         writeln!(file, "{}", json_line)
-            .map_err(|e| MemosTradingError::Io(e))?;
+            .map_err(MemosTradingError::Io)?;
 
         Ok(())
     }
@@ -277,20 +277,20 @@ impl TradingLogger {
         // Log dosyasını sil
         if Path::new(&self.log_file).exists() {
             std::fs::remove_file(&self.log_file)
-                .map_err(|e| MemosTradingError::Io(e))?;
+                .map_err(MemosTradingError::Io)?;
         }
 
         // JSON dosyasını sil
         if Path::new(&self.json_file).exists() {
             std::fs::remove_file(&self.json_file)
-                .map_err(|e| MemosTradingError::Io(e))?;
+                .map_err(MemosTradingError::Io)?;
         }
 
         // Boş dosyaları yeniden oluştur ki monitoring script'i dosya bulunamadı demesin
         File::create(&self.log_file)
-            .map_err(|e| MemosTradingError::Io(e))?;
+            .map_err(MemosTradingError::Io)?;
         File::create(&self.json_file)
-            .map_err(|e| MemosTradingError::Io(e))?;
+            .map_err(MemosTradingError::Io)?;
 
         Ok(())
     }

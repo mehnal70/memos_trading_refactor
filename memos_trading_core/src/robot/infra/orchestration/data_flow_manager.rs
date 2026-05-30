@@ -31,6 +31,12 @@ pub struct SimpleDataFlowManager {
     pub sources: HashMap<String, DataSource>,
 }
 
+impl Default for SimpleDataFlowManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleDataFlowManager {
     pub fn new() -> Self {
         Self {

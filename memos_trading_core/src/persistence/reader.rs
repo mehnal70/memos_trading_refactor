@@ -135,10 +135,8 @@ pub fn read_paper_trading_results(db_path: &str, limit: Option<usize>) -> Result
     }).map_err(|e| crate::MemosTradingError::Database(format!("Veri Okuma Hatası: {}", e)))?;
 
     let mut results = Vec::new();
-    for row in rows {
-        if let Ok(res) = row {
-            results.push(res);
-        }
+    for res in rows.flatten() {
+        results.push(res);
     }
 
     Ok(results)
@@ -158,10 +156,8 @@ pub fn list_available_tables(db_path: &str) -> Result<Vec<String>, crate::MemosT
         .map_err(|e| crate::MemosTradingError::Database(format!("Tablo listesi okuma hatası: {}", e)))?;
 
     let mut tables = Vec::new();
-    for row in rows {
-        if let Ok(table) = row {
-            tables.push(table);
-        }
+    for table in rows.flatten() {
+        tables.push(table);
     }
     Ok(tables)
 }
@@ -218,10 +214,8 @@ pub fn list_symbols_for_market(
         .map_err(|e| crate::MemosTradingError::Database(format!("Sembol listesi okuma hatası: {}", e)))?;
 
     let mut symbols = Vec::new();
-    for row in rows {
-        if let Ok(sym) = row {
-            symbols.push(sym);
-        }
+    for sym in rows.flatten() {
+        symbols.push(sym);
     }
     Ok(symbols)
 }

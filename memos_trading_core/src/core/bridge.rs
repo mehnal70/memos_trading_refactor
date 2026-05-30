@@ -213,7 +213,7 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
         drift_score: hub_drift,
         mc_ruin_prob: 0.01,
         is_evolution_active: hub_evolution_active,
-        next_evolution_secs: 300_u64.saturating_sub((hub_cycle % 300) as u64),
+        next_evolution_secs: 300_u64.saturating_sub(hub_cycle % 300),
         live_strategy: live_strategy_name,
         controller_state: hub_state,
         controller_cycle: hub_cycle,

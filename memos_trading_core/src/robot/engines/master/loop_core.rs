@@ -78,7 +78,7 @@ impl Engine {
             // BLESSUSDT ApiError gibi) active sayımdan düş. Eşik default 1800sn
             // (30 dk); env `ANOMALY_MAX_AGE_SECS` ile ayarlanır. Critical hiç
             // silinmez. Her 60 tick (~30sn) bir kontrol yeter.
-            if tick_count % 60 == 0 {
+            if tick_count.is_multiple_of(60) {
                 let max_age: u64 = env_parse("ANOMALY_MAX_AGE_SECS", 1800);
                 let now_secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -96,7 +96,7 @@ impl Engine {
             Self::perform_anomaly_recovery(&state, &snap);
 
             // 4a. Equity tarihçesi: her 5 turda bir (≈2.5 sn) push edilir; sparkline ve drawdown.
-            if tick_count % 5 == 0 {
+            if tick_count.is_multiple_of(5) {
                 if let Ok(mut st) = state.lock() {
                     let equity = st.finance.equity;
                     if equity > st.finance.peak_equity { st.finance.peak_equity = equity; }
@@ -111,14 +111,14 @@ impl Engine {
             //  - FeatureVector çıkar → DriftDetector.update
             //  - should_retrain ise ml trigger pulse'u
             //  - tick_evolution (controller içinde N cycle'da bir gerçek evrim)
-            if tick_count % 20 == 0 {
+            if tick_count.is_multiple_of(20) {
                 Self::tick_intelligence_hub(&state).await;
             }
 
             // 4. Periyodik canlılık logu: HEARTBEAT_UI_LOG_TICKS (default 600 = 5 dk).
             // İlk turu da yakala (sistem ayakta işareti). disable=true ise hiç basma.
             if !heartbeat_log_disabled
-                && (tick_count == 1 || tick_count % heartbeat_log_ticks == 0)
+                && (tick_count == 1 || tick_count.is_multiple_of(heartbeat_log_ticks))
             {
                 if let Ok(mut st) = state.lock() {
                     let n_open = st.finance.live_positions.read().map(|p| p.len()).unwrap_or(0);

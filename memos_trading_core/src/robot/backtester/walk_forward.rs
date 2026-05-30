@@ -254,7 +254,7 @@ where
         sls.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median = |xs: &[f64]| -> f64 {
             let m = xs.len() / 2;
-            if xs.len() % 2 == 0 { (xs[m - 1] + xs[m]) / 2.0 } else { xs[m] }
+            if xs.len().is_multiple_of(2) { (xs[m - 1] + xs[m]) / 2.0 } else { xs[m] }
         };
         out.insert(regime, RegimeAggregate {
             median_tp_pct: median(&tps),

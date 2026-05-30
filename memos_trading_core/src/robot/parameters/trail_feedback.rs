@@ -62,7 +62,7 @@ impl TrailFeedback {
 
         // Adjustment penceresi tamamlandı mı?
         if self.total_count < FEEDBACK_WINDOW { return None; }
-        if self.total_count % FEEDBACK_WINDOW != 0 { return None; }
+        if !self.total_count.is_multiple_of(FEEDBACK_WINDOW) { return None; }
 
         let rate = self.early_count as f64 / self.total_count as f64;
         // Mevcut override (yoksa base'den başla).

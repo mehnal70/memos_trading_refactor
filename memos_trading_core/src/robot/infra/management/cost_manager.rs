@@ -26,6 +26,12 @@ pub struct SimpleCostManager {
     cached_total_liquidity: f64,
 }
 
+impl Default for SimpleCostManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleCostManager {
     pub fn new() -> Self {
         Self {

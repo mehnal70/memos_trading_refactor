@@ -87,7 +87,7 @@ impl StrategyRegistry {
         if let Some((first, rest)) = aliases.split_first() {
             self.register(*first, factory.clone());
             for alias in rest {
-                let key = canonical(&(*alias).to_string());
+                let key = canonical(alias);
                 // Sadece map'e koy, canonical_keys'e EKLEME.
                 self.entries.insert(key, factory.clone());
             }

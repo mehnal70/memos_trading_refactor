@@ -216,7 +216,7 @@ impl AdaptiveTradeParams {
     ) {
         // 0 = devre dışı anlamına gelir; 0 gelmişse config bozuk → fallback 20
         let every_n = if self.adjust_every_n_trades == 0 { 20 } else { self.adjust_every_n_trades };
-        if session_closed == 0 || session_closed % every_n as usize != 0 { return; }
+        if session_closed == 0 || !session_closed.is_multiple_of(every_n as usize) { return; }
 
         let win_rate = session_wins as f64 / session_closed as f64 * 100.0;
         let mut changed = false;
@@ -305,12 +305,11 @@ impl AdaptiveTradeParams {
         }
 
         // ── 6. Ardışık SHORT kaybı — htf_block zorla aç ─────────────────────
-        if short_loss_streak >= self.short_loss_streak_pause && self.short_loss_streak_pause > 0 {
-            if !self.short_htf_block {
+        if short_loss_streak >= self.short_loss_streak_pause && self.short_loss_streak_pause > 0
+            && !self.short_htf_block {
                 self.short_htf_block = true;
                 changed = true;
             }
-        }
         // SHORT streak temizlendi → htf_block geri kapat (win_rate makul ise)
         if short_loss_streak == 0 && win_rate > 40.0 && self.short_htf_block {
             self.short_htf_block = false;

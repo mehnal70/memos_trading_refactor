@@ -95,10 +95,10 @@ impl ConfigManager {
     
     pub fn validate(&self) -> Result<()> {
         if self.config.name.is_empty() {
-            return Err(crate::MemosTradingError::Config("Robot adı boş olamaz".into()).into());
+            return Err(crate::MemosTradingError::Config("Robot adı boş olamaz".into()));
         }
         if self.config.trading.capital <= 0.0 {
-            return Err(crate::MemosTradingError::Config("Sermaye pozitif olmalı".into()).into());
+            return Err(crate::MemosTradingError::Config("Sermaye pozitif olmalı".into()));
         }
         Ok(())
     }

@@ -73,9 +73,9 @@ impl HyperOpt {
 
         let entries: Vec<_> = grid.iter().filter_map(|p| {
             let mut cfg = b_cfg.clone();
-            cfg.strategy_params = Some(p.clone());
+            cfg.strategy_params = Some(*p);
             Backtester::new(cfg).run(candles).ok().map(|r| HyperOptEntry {
-                params: p.clone(),
+                params: *p,
                 score: compute_composite_score(r.sharpe_ratio, r.profit_factor, r.win_rate, r.max_drawdown_pct, r.total_trades),
                 win_rate: r.win_rate, pnl_pct: r.total_pnl_pct, sharpe: r.sharpe_ratio,
             })
@@ -116,7 +116,7 @@ impl HyperOpt {
                 fast: Some(fast),
                 slow: Some((best.slow.unwrap_or(30) as i64 + d_s).max(fast as i64 + 1) as usize),
                 period: Some((best.period.unwrap_or(14) as i64 + d_p).max(5) as usize),
-                ..best.clone()
+                ..*best
             }
         }).collect();
 

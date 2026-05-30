@@ -36,7 +36,7 @@ impl AutoML {
                 let score = Self::evaluate_score(model, data);
                 AutoMLResult {
                     best_model: model.clone(),
-                    best_params: params.clone(),
+                    best_params: *params,
                     best_score: score,
                 }
             })

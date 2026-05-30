@@ -91,8 +91,10 @@ pub struct BacktestConfig {
 
 /// İşlem yönü modu — long-only yapısal kusurunu kapatma kaldıracı (A/B kolu).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum DirectionMode {
     /// Yalnız `Signal::Buy` → long (legacy, canlı sistemin mevcut davranışı).
+    #[default]
     LongOnly,
     /// `Buy`→long, `Sell`→short. Strateji ne derse (simetrik iki yön).
     BothDirections,
@@ -101,14 +103,13 @@ pub enum DirectionMode {
     RegimeDirectional,
 }
 
-impl Default for DirectionMode {
-    fn default() -> Self { Self::LongOnly }
-}
 
 /// Backtest rejim Volatile-kapısı modu — canlı IDLE-in-volatile aynası, A/B kolu.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum RegimeGate {
     /// Kapı yok (legacy). Her uygun sinyal açılır.
+    #[default]
     Off,
     /// Sabit eşik (`RegimeThresholds::default()`, ATR%>7) → Volatile barda giriş yok.
     Absolute,
@@ -116,9 +117,6 @@ pub enum RegimeGate {
     Adaptive { pctl: f64 },
 }
 
-impl Default for RegimeGate {
-    fn default() -> Self { Self::Off }
-}
 
 fn default_commission() -> f64 { 0.001 }
 

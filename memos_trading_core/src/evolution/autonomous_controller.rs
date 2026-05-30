@@ -75,7 +75,7 @@ impl AutonomousController {
 
     /// Evrim zamanı gelmiş mi?
     pub fn should_evolve(&self) -> bool {
-        self.evolution_enabled && self.cycle_id % self.evolve_every_n_cycles == 0
+        self.evolution_enabled && self.cycle_id.is_multiple_of(self.evolve_every_n_cycles)
     }
 
     /// Nüfusu evrimleştir ve en iyi genoma geç
