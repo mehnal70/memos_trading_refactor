@@ -373,12 +373,9 @@ impl Engine {
                 }
                 Err(e) => {
                     Self::mark_pipeline_stage(state, PipelineStage::StrategyEval, StepStatus::Failed);
-                    if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
-                        let ev = crate::robot::infra::logger::TradeEvent::error(
-                            &format!("{} sinyal üretim hatası: {:?}", symbol, e),
-                        );
-                        let _ = logger.log_event(&ev);
-                    }
+                    emit_trade_event(state, || crate::robot::infra::logger::TradeEvent::error(
+                        &format!("{} sinyal üretim hatası: {:?}", symbol, e),
+                    ));
                     return;
                 }
             };
@@ -445,10 +442,7 @@ impl Engine {
                         .and_then(|m| m.get(symbol).copied()))
                     .filter(|&v| v > 0.0)
                     .unwrap_or_else(|| candles.last().map(|c| c.close).unwrap_or(0.0));
-                if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
-                    let ev = crate::robot::infra::logger::TradeEvent::signal(symbol, signal, signal_price);
-                    let _ = logger.log_event(&ev);
-                }
+                emit_trade_event(state, || crate::robot::infra::logger::TradeEvent::signal(symbol, signal, signal_price));
             }
 
             match (signal, pos_dir) {
@@ -500,12 +494,9 @@ impl Engine {
                                 symbol, signal_label, edge, mode, reasons.join(" · "),
                             ));
                         }
-                        if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
-                            let ev = crate::robot::infra::logger::TradeEvent::risk_block(
-                                &block_reason, symbol,
-                            );
-                            let _ = logger.log_event(&ev);
-                        }
+                        emit_trade_event(state, || crate::robot::infra::logger::TradeEvent::risk_block(
+                            &block_reason, symbol,
+                        ));
                         return;
                     }
                     Self::mark_pipeline_stage(state, PipelineStage::RiskGate, StepStatus::Done);
@@ -542,14 +533,11 @@ impl Engine {
                 | (crate::core::types::Signal::Sell, Some(false)) => {
                     let cooldown = tuning.risk_block_log_cooldown_secs;
                     if log_throttle_should_emit(symbol, "risk_block_pos_aligned", cooldown) {
-                        if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone()) {
-                            let dir_label = if matches!(signal, Signal::Buy) { "LONG" } else { "SHORT" };
-                            let ev = crate::robot::infra::logger::TradeEvent::risk_block(
-                                &format!("[position-aligned] {} sinyali, pozisyon zaten {}", signal_label, dir_label),
-                                symbol,
-                            );
-                            let _ = logger.log_event(&ev);
-                        }
+                        let dir_label = if matches!(signal, Signal::Buy) { "LONG" } else { "SHORT" };
+                        emit_trade_event(state, || crate::robot::infra::logger::TradeEvent::risk_block(
+                            &format!("[position-aligned] {} sinyali, pozisyon zaten {}", signal_label, dir_label),
+                            symbol,
+                        ));
                     }
                 }
                 _ => {}

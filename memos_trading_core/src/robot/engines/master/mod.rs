@@ -156,6 +156,23 @@ pub(crate) fn push_state_log(state: &Arc<Mutex<AppState>>, msg: String) {
     }
 }
 
+/// `state` kilidini kısa süreliğine alıp `trading_logger` Arc'ını clone'lar; varsa
+/// `make_event()` ile üretilen olayı yazar. Kilit yalnız clone süresince tutulur,
+/// IO (`log_event`) kilit DIŞINDA yapılır. Olay closure ile **lazy** üretilir →
+/// logger yoksa format/alloc maliyeti hiç oluşmaz. loop_core'da 4 ayrı yerde
+/// tekrarlanan `if let Some(logger) = state.lock().ok().and_then(|s| s.trading_logger.clone())`
+/// bloğunu DRY'lar. (positions.rs zaten tutulan guard'dan clone+drop ettiği için
+/// o kalıbı kasıtlı olarak bu helper'a almıyoruz — yeniden kilit gerekirdi.)
+pub(crate) fn emit_trade_event(
+    state: &Arc<Mutex<AppState>>,
+    make_event: impl FnOnce() -> crate::robot::infra::logger::TradeEvent,
+) {
+    let logger = state.lock().ok().and_then(|s| s.trading_logger.clone());
+    if let Some(logger) = logger {
+        let _ = logger.log_event(&make_event());
+    }
+}
+
 /// Env değişkenini `T`'ye parse eder; eksik/geçersizse `default`. Per-call (cache yok)
 /// → env-mutasyonlu testlerle uyumlu. `.ok().and_then(|s| s.parse().ok()).unwrap_or(d)`
 /// kalıbını tek noktaya toplar.
