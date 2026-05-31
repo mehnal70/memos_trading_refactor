@@ -556,6 +556,7 @@ mod tuning_tests {
 
 // ── Faz 1: impl Engine sorumluluk modüllerine bölündü (davranış birebir) ──
 mod loop_core;
+mod edge_regime;
 mod infra_fleet;
 mod fleet_tuners;
 mod fleet_sync;
