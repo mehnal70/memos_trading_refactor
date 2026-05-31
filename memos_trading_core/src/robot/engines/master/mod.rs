@@ -562,4 +562,73 @@ mod fleet_sync;
 mod userdata;
 mod positions;
 mod jobs;
+mod jobs_screener;
+mod jobs_backtest;
+mod jobs_download;
 mod persistence;
+
+// Edge-filter parse helper: backtest ve ML retrain job ortak kullanir (Faz 2 paylasimli tek-nokta).
+
+/// `BACKTEST_EDGE_FILTER` env'ini giriş-kalitesi edge eşiğine çözer (#4). Backtest'in
+/// canlı `process_symbol_cycle` edge hunisini aynalamasını ayarlar:
+///   - unset → `default` (job'ın kararı; canlıyı aynalamak için Some(on_value))
+///   - "0"/"false"/"off"/"none" → `None` (filtre yok, legacy: her Buy'da açılış)
+///   - "1"/"true"/"on" → `Some(on_value)` (canlı cold-start eşiği = dynamic_edge_threshold(0))
+///   - geçerli pozitif float → `Some(f)` (daha katı/gevşek elle eşik)
+///   - geçersiz metin → `default` (sessiz fallback)
+/// Serbest fonksiyon → env'siz unit-test edilebilir.
+pub(crate) fn parse_edge_filter(
+    raw: Option<String>, default: Option<f64>, on_value: f64,
+) -> Option<f64> {
+    match raw {
+        None => default,
+        Some(v) => {
+            let v = v.trim();
+            if v.eq_ignore_ascii_case("0") || v.eq_ignore_ascii_case("false")
+                || v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("none") {
+                None
+            } else if v.eq_ignore_ascii_case("1") || v.eq_ignore_ascii_case("true")
+                || v.eq_ignore_ascii_case("on") {
+                Some(on_value)
+            } else {
+                match v.parse::<f64>() {
+                    Ok(f) if f > 0.0 => Some(f),
+                    Ok(_) => None,        // ≤0 → kapalı
+                    Err(_) => default,    // çöp girdi → default
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod edge_filter_tests {
+    use super::parse_edge_filter;
+
+    #[test]
+    fn unset_uses_default() {
+        assert_eq!(parse_edge_filter(None, Some(0.20), 0.20), Some(0.20));
+        assert_eq!(parse_edge_filter(None, None, 0.20), None);
+    }
+
+    #[test]
+    fn off_tokens_disable() {
+        for t in ["0", "false", "FALSE", "off", "none", "  off  "] {
+            assert_eq!(parse_edge_filter(Some(t.into()), Some(0.20), 0.20), None, "token={t}");
+        }
+    }
+
+    #[test]
+    fn on_tokens_use_on_value() {
+        for t in ["1", "true", "TRUE", "on"] {
+            assert_eq!(parse_edge_filter(Some(t.into()), None, 0.20), Some(0.20), "token={t}");
+        }
+    }
+
+    #[test]
+    fn float_override() {
+        assert_eq!(parse_edge_filter(Some("0.35".into()), None, 0.20), Some(0.35));
+        assert_eq!(parse_edge_filter(Some("-1".into()), Some(0.20), 0.20), None); // ≤0 → kapalı
+        assert_eq!(parse_edge_filter(Some("çöp".into()), Some(0.20), 0.20), Some(0.20)); // fallback
+    }
+}
