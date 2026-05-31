@@ -561,6 +561,7 @@ mod fleet_tuners;
 mod fleet_sync;
 mod userdata;
 mod positions;
+mod positions_close;
 mod jobs;
 mod jobs_screener;
 mod jobs_backtest;
