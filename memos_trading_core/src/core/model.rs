@@ -192,19 +192,18 @@ impl RoboticLoopConfig {
             TradingMode::Paper
         };
         let d = Self::default();
-        let capital = std::env::var("STARTING_CAPITAL").ok()
-            .and_then(|s| s.parse::<f64>().ok())
+        let capital = crate::core::env::env_parse::<f64>("STARTING_CAPITAL")
             .filter(|v| v.is_finite() && *v > 0.0)
             .unwrap_or(d.capital);
         Self {
-            symbol:   std::env::var("TRADE_SYMBOL").unwrap_or_else(|_| "BTCUSDT".to_owned()),
-            market:   std::env::var("TRADE_MARKET").unwrap_or_else(|_| "spot".to_owned()),
-            interval: std::env::var("TRADE_INTERVAL").unwrap_or_else(|_| "1m".to_owned()),
-            db_path:  std::env::var("DB_PATH").unwrap_or_else(|_| "data/trader.db".to_owned()),
+            symbol:   crate::core::env::env_or("TRADE_SYMBOL", "BTCUSDT"),
+            market:   crate::core::env::env_or("TRADE_MARKET", "spot"),
+            interval: crate::core::env::env_or("TRADE_INTERVAL", "1m"),
+            db_path:  crate::core::env::env_or("DB_PATH", "data/trader.db"),
             trading_mode,
             capital,
-            api_key:    std::env::var("BINANCE_API_KEY").ok(),
-            secret_key: std::env::var("BINANCE_API_SECRET").ok(),
+            api_key:    crate::core::env::env_opt("BINANCE_API_KEY"),
+            secret_key: crate::core::env::env_opt("BINANCE_API_SECRET"),
             ..d
         }
     }
@@ -223,14 +222,14 @@ impl RoboticLoopConfig {
     pub fn get_api_key(&self) -> Option<String> {
         crate::core::security::secure_store::get_secret("api_key") // secure_store kütüphanenizin yoluna göre güncelleyin
             .or_else(|| self.api_key.clone())
-            .or_else(|| std::env::var("BINANCE_API_KEY").ok())
+            .or_else(|| crate::core::env::env_opt("BINANCE_API_KEY"))
     }
 
     /// Secret key'i hiyerarşik ve güvenli getirir
     pub fn get_secret_key(&self) -> Option<String> {
         crate::core::security::secure_store::get_secret("secret_key")
             .or_else(|| self.secret_key.clone())
-            .or_else(|| std::env::var("BINANCE_API_SECRET").ok())
+            .or_else(|| crate::core::env::env_opt("BINANCE_API_SECRET"))
     }
 }
 
