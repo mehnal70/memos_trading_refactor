@@ -36,16 +36,18 @@ pub fn draw(f: &mut ratatui::Frame, area: Rect, snap: &MissionControl) {
             .collect();
 
         let table = Table::new(rows, [
-            Constraint::Percentage(15), 
-            Constraint::Percentage(10), 
-            Constraint::Percentage(10), 
-            Constraint::Percentage(15), 
-            Constraint::Percentage(15), 
-            Constraint::Percentage(15), 
-            Constraint::Percentage(20), 
+            Constraint::Percentage(13), // Sembol
+            Constraint::Percentage(11), // Strateji
+            Constraint::Percentage(8),  // Yön
+            Constraint::Percentage(8),  // Tür (spot/vadeli)
+            Constraint::Percentage(8),  // Kald.
+            Constraint::Percentage(12), // Giriş
+            Constraint::Percentage(12), // Fiyat
+            Constraint::Percentage(14), // PnL
+            Constraint::Percentage(14), // ROE%
         ])
         .header(
-            Row::new(vec!["Sembol", "Strateji", "Yön", "Giriş", "Fiyat", "PnL", "ROE%"])
+            Row::new(vec!["Sembol", "Strateji", "Yön", "Tür", "Kald.", "Giriş", "Fiyat", "PnL", "ROE%"])
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         )
         .block(

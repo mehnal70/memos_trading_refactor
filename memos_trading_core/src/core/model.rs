@@ -292,6 +292,9 @@ pub struct LiveOrderRefs {
     pub placed_at: String,
 }
 
+/// PositionModel.market serde default — eski snapshot'larda alan yoksa "spot".
+fn default_position_market() -> String { "spot".to_string() }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionModel {
     /// Pozisyonun tekil kimliği. IntelligenceHub.track_trade ↔ learn_from_exit eşlemesi için.
@@ -303,6 +306,11 @@ pub struct PositionModel {
     pub current_price: f64,
     pub qty: f64,
     pub leverage: f64,
+    /// Pozisyonun açıldığı pazar: "spot" / "futures" (TUI'de "Tür" kolonu + leverage
+    /// ile gösterilir). Açılışta engine config.market'ından doldurulur. Eski serialize'lı
+    /// pozisyonlar (serde default) → "spot" (geriye uyum: recovery snapshot'ları).
+    #[serde(default = "default_position_market")]
+    pub market: String,
     pub is_long: bool,
     pub trade_type: String,
     pub opened_at: String,

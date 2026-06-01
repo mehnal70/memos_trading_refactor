@@ -388,6 +388,7 @@ impl Engine {
                 symbol: symbol.to_string(),
                 entry_price: entry, current_price: entry,
                 qty: qty_val, leverage: leverage_resolved,
+                market: st.config.market.clone(),
                 // trade_type artık stratejik etiket (önceki "LONG"/"SHORT" zaten
                 // is_long ile aynı bilgiyi tekrar ediyordu); UI "Strateji" sütununda
                 // hangi karar mekanizmasının açtığını göstersin.

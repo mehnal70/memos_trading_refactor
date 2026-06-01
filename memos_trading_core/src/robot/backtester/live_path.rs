@@ -195,6 +195,7 @@ pub fn run(candles_1m: &[Candle], cfg: &LivePathConfig) -> LivePathResult {
                                 current_price: entry,
                                 qty,
                                 leverage: 1.0,
+                                market: "spot".into(),
                                 is_long,
                                 trade_type: "harness".into(),
                                 opened_at: candles_1m[i].timestamp.to_rfc3339(),

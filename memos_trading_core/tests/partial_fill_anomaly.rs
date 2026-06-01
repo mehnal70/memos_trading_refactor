@@ -43,7 +43,7 @@ fn open_position(
         entry_price: entry,
         current_price: current.unwrap_or(entry),
         qty,
-        leverage: 1.0,
+        leverage: 1.0, market: "spot".into(),
         is_long,
         trade_type: if is_long { "LONG".into() } else { "SHORT".into() },
         opened_at: "2026-05-20T00:00:00Z".into(),

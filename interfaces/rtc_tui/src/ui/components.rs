@@ -78,10 +78,24 @@ pub fn render_position_row(p: &PositionModel) -> Row<'static> {
     let pnl_pct = p.roe(); 
     let color = if pnl >= 0.0 { Color::LightGreen } else { Color::LightRed };
 
+    // Pazar türü: "futures"/"coinm"/"perp" → Vadeli (sarı, kaldıraç riski),
+    // diğer → Spot (gri). Boş/eski snapshot → "spot" (serde default).
+    let m = p.market.to_lowercase();
+    let is_futures = m.contains("fut") || m.contains("coinm") || m.contains("perp");
+    let (market_label, market_color) = if is_futures {
+        ("Vadeli", Color::Yellow)
+    } else {
+        ("Spot", Color::Gray)
+    };
+    // Kaldıraç: 1.0 → spot davranışı (gri), >1 → kaldıraçlı (cyan vurgu).
+    let lev_color = if p.leverage > 1.0 { Color::Cyan } else { Color::DarkGray };
+
     Row::new(vec![
         Cell::from(p.symbol.clone()).style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from(p.trade_type.clone()),
         Cell::from(if p.is_long { "▲ LONG" } else { "▼ SHORT" }).style(Style::default().fg(color)),
+        Cell::from(market_label).style(Style::default().fg(market_color)),
+        Cell::from(format!("{:.1}x", p.leverage)).style(Style::default().fg(lev_color)),
         Cell::from(format!("{:.4}", p.entry_price)),
         Cell::from(format!("{:.4}", p.current_price)),
         Cell::from(format!("{:+.2} USDT", pnl)).style(Style::default().fg(color)),

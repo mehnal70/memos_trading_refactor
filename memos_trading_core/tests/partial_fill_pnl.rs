@@ -32,7 +32,7 @@ fn open_position(
         symbol: symbol.into(),
         entry_price: entry, current_price: entry,
         qty,
-        leverage: 1.0, is_long,
+        leverage: 1.0, market: "spot".into(), is_long,
         trade_type: if is_long { "LONG".into() } else { "SHORT".into() },
         opened_at: "2026-05-18T00:00:00Z".into(),
         stop_loss: 0.0, take_profit: 0.0, trailing_stop: 0.0,
