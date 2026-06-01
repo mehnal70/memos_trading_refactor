@@ -192,7 +192,10 @@ impl Engine {
         // [açık(yön) + uçuştaki rezervasyon] sayılır; tavan dolu → kısa-devre, değilse
         // rezervasyon +1 ve RAII guard çıkışta -1. Emir/yan-etki ÖNCESİ → canlı modda
         // orphan emir yok. cap=0 → sınırsız (eski davranış). Tek choke-point (scalp+strateji).
-        let cap_check: Result<Option<OpenSlotGuard>, (u32, u32)> = {
+        // Err payload: (total, cap, log_cooldown_secs). Tavan-dolu logu her cycle
+        // tekrar ettiğinden RISK_BLOCK kardeşiyle (loop_core position-aligned) aynı
+        // operatör-knob'una bağlanır: risk_block_log_cooldown_secs (env, default 60).
+        let cap_check: Result<Option<OpenSlotGuard>, (u32, u32, u64)> = {
             let st = match state.lock() { Ok(s) => s, Err(_) => return };
             let cap = if is_long { st.tuning.max_concurrent_longs } else { st.tuning.max_concurrent_shorts };
             if cap == 0 {
@@ -204,7 +207,7 @@ impl Engine {
                     .unwrap_or(0);
                 let pending = counter.load(std::sync::atomic::Ordering::Relaxed);
                 if concurrency_cap_reached(open_dir, pending, cap) {
-                    Err((open_dir + pending, cap))
+                    Err((open_dir + pending, cap, st.tuning.risk_block_log_cooldown_secs))
                 } else {
                     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     Ok(Some(OpenSlotGuard(std::sync::Arc::clone(counter))))
@@ -213,8 +216,8 @@ impl Engine {
         };
         let _open_slot = match cap_check {
             Ok(slot) => slot,
-            Err((total, cap)) => {
-                if log_throttle_should_emit(symbol, "concurrency_cap", 30) {
+            Err((total, cap, log_cooldown)) => {
+                if log_throttle_should_emit(symbol, "concurrency_cap", log_cooldown) {
                     push_state_log(state, format!(
                         "🔢 {} {} açılış atlandı: eş-zamanlı tavan dolu ({}/{})",
                         symbol, if is_long { "LONG" } else { "SHORT" }, total, cap,
