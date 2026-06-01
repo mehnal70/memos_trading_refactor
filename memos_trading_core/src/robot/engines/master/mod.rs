@@ -174,16 +174,17 @@ pub(crate) fn emit_trade_event(
 }
 
 /// Env değişkenini `T`'ye parse eder; eksik/geçersizse `default`. Per-call (cache yok)
-/// → env-mutasyonlu testlerle uyumlu. `.ok().and_then(|s| s.parse().ok()).unwrap_or(d)`
-/// kalıbını tek noktaya toplar.
+/// → env-mutasyonlu testlerle uyumlu. Kanonik `core::env::env_parse_or`'a delege eder
+/// (üst-katman ergonomik adı korunur; mantık tek-nokta).
 pub(crate) fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    crate::core::env::env_parse_or(key, default)
 }
 
 /// "Açık mı?" tarzı bayrak: yalnızca "1" / "true" (case-insensitive) → true; aksi
 /// halde false. ALLOW_BIST, *_DISABLE, *_ENABLED gibi default-false toggle'lar için.
+/// Kanonik `core::env::env_truthy`'ye delege eder.
 pub(crate) fn env_truthy(key: &str) -> bool {
-    std::env::var(key).map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
+    crate::core::env::env_truthy(key)
 }
 
 /// Boot'ta env'den BİR KEZ okunan runtime ayar paketi. `AppState.tuning` alanında

@@ -27,19 +27,15 @@ pub use symbol_stats::{SymbolStats, compute_symbol_stats};
 pub use trail_feedback::{TrailFeedback, PendingTrailObservation};
 
 fn parse_env_f64(key: &str) -> Option<f64> {
-    std::env::var(key).ok().and_then(|v| v.parse().ok())
+    crate::core::env::env_parse::<f64>(key)
 }
 
 /// Bool env okuyucu — kabul edilen değerler: "1"/"0", "true"/"false",
 /// "yes"/"no", "on"/"off" (case-insensitive). Tanımsız veya tanınmayan
 /// değerlerde None döner → çağıran default değeri korur.
+/// Kanonik `core::env::env_bool`'a delege eder.
 fn parse_env_bool(key: &str) -> Option<bool> {
-    let v = std::env::var(key).ok()?;
-    match v.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on"  => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
+    crate::core::env::env_bool(key)
 }
 
 /// Sistemden epoch saniyesini okur; SystemTime hatasında 0 döner (cooldown
