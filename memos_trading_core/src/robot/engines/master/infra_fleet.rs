@@ -140,7 +140,19 @@ impl Engine {
                 // gerçek fiyatla kapanır → sahte PnL döngüsü (BTCUSDC 24h
                 // auditte 86 trade ile $3500+ sahte kâr basmıştı).
                 // Eşik default 300sn = 5dk × interval; 1m bar için 5 tane mum.
-                let max_candle_age: i64 = env_parse("PRICE_POLL_MAX_CANDLE_AGE_SECS", 300);
+                //
+                // ⚠️ interval-FARKINDA olmalı: fetch_latest forming (oluşmakta olan) mumu
+                // döndürür → timestamp bar AÇILIŞ zamanı, yaşı sağlıklı durumda bile
+                // [0, interval) arası. Sabit 300s eşiği interval≥5m'de (5m/15m/1h/4h)
+                // forming barı haksız yere 'stale' sayıp live_price'ı donduruyordu →
+                // TUI market gözetiminde fiyat ancak yeni bar açılınca geliyordu (1h'te
+                // saatte bir). Floor = max(env, 2×interval): 1m'de 300 KORUNUR (>120 →
+                // BTCUSDC phantom koruması aynen), uzun interval'de feed gerçekten
+                // durmadıkça (>2 bar) atlamaz. env<=0 ise gate kapalı (escape korunur).
+                let interval_secs =
+                    crate::robot::data_pipeline::DataNormalizer::parse_interval(&interval) as i64;
+                let base_max_age: i64 = env_parse("PRICE_POLL_MAX_CANDLE_AGE_SECS", 300);
+                let max_candle_age: i64 = effective_max_candle_age(base_max_age, interval_secs);
                 let mut stale_skipped: Vec<String> = Vec::new();
                 for sym in &symbols {
                     if sym.is_empty() { continue; }
@@ -845,4 +857,31 @@ impl Engine {
         Self::spawn_scalp_swing_tuner(Arc::clone(&state));
     }
 
+}
+
+/// Price-poll stale-candle eşiği — interval-farkında floor.
+///
+/// `fetch_latest` forming (oluşmakta olan) mumu döndürür → yaşı sağlıklı durumda
+/// bile `[0, interval)` arası. Sabit eşik (örn. 300s) interval≥5m'de forming barı
+/// haksız 'stale' sayıp `live_price`'ı dondurur. Floor = `max(base, 2×interval)`:
+/// 1m'de base(300) korunur, uzun interval'de feed gerçekten durmadıkça atlamaz.
+/// `base <= 0` → gate kapalı (operatör escape hatch'i korunur).
+fn effective_max_candle_age(base: i64, interval_secs: i64) -> i64 {
+    if base <= 0 { base } else { base.max(interval_secs * 2) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_max_candle_age;
+
+    #[test]
+    fn max_candle_age_is_interval_aware() {
+        assert_eq!(effective_max_candle_age(300, 60), 300, "1m: base 300 korunur (>120)");
+        assert_eq!(effective_max_candle_age(300, 300), 600, "5m: 2×300");
+        assert_eq!(effective_max_candle_age(300, 900), 1800, "15m: 2×900");
+        assert_eq!(effective_max_candle_age(300, 3600), 7200, "1h: forming bar artık atlanmaz");
+        assert_eq!(effective_max_candle_age(99_999, 3600), 99_999, "operatör daha lenient → korunur");
+        assert_eq!(effective_max_candle_age(0, 3600), 0, "0 → gate kapalı (escape)");
+        assert_eq!(effective_max_candle_age(-1, 3600), -1, "negatif → kapalı");
+    }
 }
