@@ -273,9 +273,15 @@ pub struct RuntimeTuning {
     /// 🧊 Stale-feed kapısı: en yeni mum bu süreden (sn) eskiyse sembolde YENİ açılış
     /// yapılmaz — donuk/ölü feed'de phantom giriş koruması (BTCUSDC: mum günlerce eski,
     /// live_price donuk → sahte SL/TP + churn). Açık pozisyon yönetimi etkilenmez.
-    /// 0 → kapalı. Default 3600 (1 saat). Yüksek interval'da (4h/1d) yükselt.
-    /// Env STALE_FEED_MAX_AGE_SECS.
+    /// `-1` (default) → AUTO: interval-farkında `2×interval` (forming bar yaşı
+    /// [0,interval) olduğundan sabit eşik kısa interval'i gevşek/uzun interval'i sıkı
+    /// bırakıyordu). `0` → kapalı. `>0` → operatör sabit override (sn). Env STALE_FEED_MAX_AGE_SECS.
     pub stale_feed_max_age_secs: i64,
+    /// 🔢 Eş-zamanlı açık LONG pozisyon tavanı (0 → sınırsız). Env MAX_CONCURRENT_LONGS.
+    /// open_paper_position'da uçuş-rezervasyonuyla atomik uygulanır (paralel açılış race'i).
+    pub max_concurrent_longs: u32,
+    /// 🔢 Eş-zamanlı açık SHORT pozisyon tavanı (0 → sınırsız). Env MAX_CONCURRENT_SHORTS.
+    pub max_concurrent_shorts: u32,
     /// ⏳ Re-entry cooldown (sn): bir sembolde pozisyon kapandıktan sonra bu süre
     /// içinde YENİ açılış engellenir — churn/flip-flop (aç→kapa→hemen aç) koruması.
     /// 0 → kapalı (default, sıfır regresyon). Önerilen ~60. Env REENTRY_COOLDOWN_SECS.
@@ -323,7 +329,9 @@ impl Default for RuntimeTuning {
             kelly_stats_window: 50,
             fallback_tp_pct: 3.0,
             fallback_sl_pct: 1.5,
-            stale_feed_max_age_secs: 3600,
+            stale_feed_max_age_secs: -1, // -1 = auto (interval-farkında: 2×interval). 0=kapalı, >0=sabit override.
+            max_concurrent_longs: 5,   // dokümante edilen niyet (adaptive_params); 0=sınırsız
+            max_concurrent_shorts: 2,
             reentry_cooldown_secs: 0,
             regime_adaptive_pctl: None,
             regime_directional: false,
@@ -384,6 +392,8 @@ impl RuntimeTuning {
                 if v.is_finite() && v > 0.0 { v } else { d.fallback_sl_pct }
             },
             stale_feed_max_age_secs: env_parse("STALE_FEED_MAX_AGE_SECS", d.stale_feed_max_age_secs),
+            max_concurrent_longs:  env_parse("MAX_CONCURRENT_LONGS", d.max_concurrent_longs),
+            max_concurrent_shorts: env_parse("MAX_CONCURRENT_SHORTS", d.max_concurrent_shorts),
             reentry_cooldown_secs: env_parse("REENTRY_COOLDOWN_SECS", d.reentry_cooldown_secs),
             // (0,1) aralığında geçerli persentil → Some; aksi (set edilmemiş/0/1/NaN) → None (sabit eşik).
             regime_adaptive_pctl: std::env::var("REGIME_ADAPTIVE_PCTL").ok()

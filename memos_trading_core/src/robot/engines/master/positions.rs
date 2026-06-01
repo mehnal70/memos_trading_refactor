@@ -184,6 +184,46 @@ impl Engine {
         }
 
         let is_long = matches!(signal, Signal::Buy);
+
+        // 🔢 Eş-zamanlı açık pozisyon tavanı (max_concurrent_longs/shorts) — ATOMİK
+        // uçuş-rezervasyonu. execute_trade_cycle sembolleri PARALEL (tokio::spawn)
+        // açtığından yalnız live_positions saymak race'li: N task aynı anda "0 açık"
+        // görüp hepsi açar (kullanıcı: 6 short aynı anda). State-lock altında
+        // [açık(yön) + uçuştaki rezervasyon] sayılır; tavan dolu → kısa-devre, değilse
+        // rezervasyon +1 ve RAII guard çıkışta -1. Emir/yan-etki ÖNCESİ → canlı modda
+        // orphan emir yok. cap=0 → sınırsız (eski davranış). Tek choke-point (scalp+strateji).
+        let cap_check: Result<Option<OpenSlotGuard>, (u32, u32)> = {
+            let st = match state.lock() { Ok(s) => s, Err(_) => return };
+            let cap = if is_long { st.tuning.max_concurrent_longs } else { st.tuning.max_concurrent_shorts };
+            if cap == 0 {
+                Ok(None)
+            } else {
+                let counter = if is_long { &st.finance.pending_open_long } else { &st.finance.pending_open_short };
+                let open_dir = st.finance.live_positions.read()
+                    .map(|m| m.values().filter(|p| p.is_long == is_long).count() as u32)
+                    .unwrap_or(0);
+                let pending = counter.load(std::sync::atomic::Ordering::Relaxed);
+                if concurrency_cap_reached(open_dir, pending, cap) {
+                    Err((open_dir + pending, cap))
+                } else {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok(Some(OpenSlotGuard(std::sync::Arc::clone(counter))))
+                }
+            }
+        };
+        let _open_slot = match cap_check {
+            Ok(slot) => slot,
+            Err((total, cap)) => {
+                if log_throttle_should_emit(symbol, "concurrency_cap", 30) {
+                    push_state_log(state, format!(
+                        "🔢 {} {} açılış atlandı: eş-zamanlı tavan dolu ({}/{})",
+                        symbol, if is_long { "LONG" } else { "SHORT" }, total, cap,
+                    ));
+                }
+                return;
+            }
+        };
+
         // Entry fiyatı: önce st.fleet.live_price (price_poll 5sn REST snapshot),
         // yoksa candles.last().close (DB son mum). Sadece candle close kullanılınca
         // DB 15dk eski olduğunda gerçek market ile uçurum açıldı → pozisyon eski
@@ -708,5 +748,50 @@ impl Engine {
         state.lock().ok().map(|st| {
             st.config.blocked_symbols.iter().any(|b| b.eq_ignore_ascii_case(symbol))
         }).unwrap_or(false)
+    }
+}
+
+/// Eş-zamanlı pozisyon tavanı dolu mu? `cap == 0` → sınırsız (her zaman false).
+/// `open_count` = o yönde halihazırda açık, `pending` = uçuştaki rezervasyon.
+fn concurrency_cap_reached(open_count: u32, pending: u32, cap: u32) -> bool {
+    cap > 0 && open_count + pending >= cap
+}
+
+/// Uçuş-rezervasyonu RAII guard'ı: `open_paper_position`'ın TÜM çıkış yollarında
+/// (erken-return dahil) pending sayacı otomatik düşürür → eş-zamanlı tavan paralel
+/// açılışta da tutar (rezervasyon insert'ten sonra fn dönene dek +1 kalır = konservatif).
+struct OpenSlotGuard(std::sync::Arc<std::sync::atomic::AtomicU32>);
+impl Drop for OpenSlotGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{concurrency_cap_reached, OpenSlotGuard};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn cap_reached_logic() {
+        assert!(!concurrency_cap_reached(0, 0, 0), "cap=0 → sınırsız");
+        assert!(!concurrency_cap_reached(9, 9, 0), "cap=0 → her zaman false");
+        assert!(!concurrency_cap_reached(1, 0, 2), "1 açık < 2");
+        assert!(concurrency_cap_reached(2, 0, 2), "2 açık = cap → dolu");
+        assert!(concurrency_cap_reached(1, 1, 2), "1 açık + 1 uçuşta = cap → dolu");
+        assert!(concurrency_cap_reached(3, 0, 2), "tavan aşılmışsa dolu");
+    }
+
+    #[test]
+    fn guard_releases_reservation_on_drop() {
+        let counter = Arc::new(AtomicU32::new(0));
+        counter.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+        {
+            let _g = OpenSlotGuard(Arc::clone(&counter));
+            assert_eq!(counter.load(Ordering::Relaxed), 1, "guard içindeyken rezervasyon durur");
+        }
+        assert_eq!(counter.load(Ordering::Relaxed), 0, "drop → rezervasyon serbest");
     }
 }

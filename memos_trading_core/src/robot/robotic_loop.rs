@@ -54,6 +54,13 @@ pub struct FinanceVault {
     /// yazar, open_paper_position okur: REENTRY_COOLDOWN_SECS içinde yeniden açılış
     /// engellenir (churn/flip-flop koruması). Monotonik Instant; persist edilmez.
     pub last_close_at: Arc<RwLock<HashMap<String, std::time::Instant>>>,
+    /// 🔢 Uçuşta (in-flight) açılış rezervasyonu — eş-zamanlı pozisyon limiti
+    /// (max_concurrent_longs/shorts) için. execute_trade_cycle sembolleri PARALEL
+    /// (tokio::spawn) açtığından yalnız `live_positions` saymak race'li: 6 task aynı
+    /// anda "0 açık" görüp hepsi açar. open_paper_position rezervasyonu state-lock
+    /// altında atomik artırır; RAII guard çıkışta düşürür → limit paralelde de tutar.
+    pub pending_open_long:  Arc<std::sync::atomic::AtomicU32>,
+    pub pending_open_short: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl FinanceVault {
@@ -259,6 +266,8 @@ impl AppState {
             live_orders: Arc::new(RwLock::new(HashMap::new())),
             closed_trades_total: Arc::new(AtomicUsize::new(0)),
             last_close_at: Arc::new(RwLock::new(HashMap::new())),
+            pending_open_long:  Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            pending_open_short: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
 
         let intelligence_hub = crate::robot::ml_engine::intelligence_hub::IntelligenceHub::new(

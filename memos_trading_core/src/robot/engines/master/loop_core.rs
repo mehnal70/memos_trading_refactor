@@ -248,14 +248,22 @@ impl Engine {
             // donuk fiyat üzerinden phantom giriş/çıkış, sahte SL/TP ve komisyon erozyonu.
             // Açık pozisyon yönetimi (1.5) etkilenmez; yalnız yeni açılış kısa-devre.
             // Eşik RuntimeTuning'den (STALE_FEED_MAX_AGE_SECS); 0 → kapalı.
-            if tuning.stale_feed_max_age_secs > 0 {
+            // Eşik INTERVAL-FARKINDA: candle.timestamp bar AÇILIŞ zamanı → forming bar
+            // yaşı sağlıklı durumda bile [0,interval). Sabit eşik (eski 3600) 1m'i fazla
+            // gevşek (60 bar bayata izin), 4h'i fazla sıkı (3600<14400 → taze forming bar
+            // 'stale' sanılır) bırakıyordu. effective_stale_feed_age: auto(<0)→2×interval
+            // ("feed canlı = son bar < 2 bar eski"), >0 operatör sabit override, 0 kapalı.
+            let interval_secs =
+                crate::robot::data_pipeline::DataNormalizer::parse_interval(interval) as i64;
+            let stale_bound = effective_stale_feed_age(tuning.stale_feed_max_age_secs, interval_secs);
+            if stale_bound > 0 {
                 if let Some(last) = candles.last() {
-                    if !candle_is_fresh_within(&last.timestamp, tuning.stale_feed_max_age_secs) {
+                    if !candle_is_fresh_within(&last.timestamp, stale_bound) {
                         let age = (chrono::Utc::now() - last.timestamp).num_seconds();
                         if log_throttle_should_emit(symbol, "stale_feed_skip", tuning.log_dataingest_cooldown_secs) {
                             push_state_log(state, format!(
                                 "🧊 {} açılış atlandı: feed bayat (son mum {}sn eski > {}sn) — phantom giriş koruması",
-                                symbol, age, tuning.stale_feed_max_age_secs,
+                                symbol, age, stale_bound,
                             ));
                         }
                         return;
@@ -629,5 +637,38 @@ impl Engine {
             return true;
         }
         false
+    }
+}
+
+/// Stale-feed kapısı eşiği — interval-farkında (yeni açılış koruması).
+///
+/// `candle.timestamp` bar AÇILIŞ zamanı olduğundan forming bar yaşı `[0, interval)`
+/// arasında; sabit eşik kısa interval'i fazla gevşek, uzun interval'i fazla sıkı
+/// bırakır. `configured`: `<0` → auto = `2×interval` (feed canlı = son bar < 2 bar
+/// eski; sub-1m için 60s taban), `0` → kapalı, `>0` → operatör sabit override.
+fn effective_stale_feed_age(configured: i64, interval_secs: i64) -> i64 {
+    match configured {
+        0 => 0,
+        n if n < 0 => (interval_secs * 2).max(60),
+        n => n,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_stale_feed_age;
+
+    #[test]
+    fn stale_feed_age_is_interval_aware() {
+        // auto (-1): 2×interval, sub-1m 60s taban
+        assert_eq!(effective_stale_feed_age(-1, 60), 120, "1m: 2 bar (eski 3600 → 60 bar gevşekti)");
+        assert_eq!(effective_stale_feed_age(-1, 900), 1800, "15m: 2 bar");
+        assert_eq!(effective_stale_feed_age(-1, 3600), 7200, "1h: 2 bar");
+        assert_eq!(effective_stale_feed_age(-1, 14400), 28800, "4h: 2 bar (eski 3600 forming barı bloklardı)");
+        assert_eq!(effective_stale_feed_age(-1, 10), 60, "sub-1m: 60s taban");
+        // 0 → kapalı
+        assert_eq!(effective_stale_feed_age(0, 3600), 0, "0 → gate kapalı");
+        // >0 → operatör sabit override (interval'den bağımsız)
+        assert_eq!(effective_stale_feed_age(300, 3600), 300, "operatör 300s zorlar");
     }
 }
