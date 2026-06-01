@@ -205,39 +205,63 @@ impl Engine {
             }
         }
 
-        // 🔢 Eş-zamanlı açık pozisyon tavanı (max_concurrent_longs/shorts) — ATOMİK
-        // uçuş-rezervasyonu. execute_trade_cycle sembolleri PARALEL (tokio::spawn)
-        // açtığından yalnız live_positions saymak race'li: N task aynı anda "0 açık"
-        // görüp hepsi açar (kullanıcı: 6 short aynı anda). State-lock altında
-        // [açık(yön) + uçuştaki rezervasyon] sayılır; tavan dolu → kısa-devre, değilse
-        // rezervasyon +1 ve RAII guard çıkışta -1. Emir/yan-etki ÖNCESİ → canlı modda
-        // orphan emir yok. cap=0 → sınırsız (eski davranış). Tek choke-point (scalp+strateji).
-        // Err payload: (total, cap, log_cooldown_secs). Tavan-dolu logu her cycle
-        // tekrar ettiğinden RISK_BLOCK kardeşiyle (loop_core position-aligned) aynı
-        // operatör-knob'una bağlanır: risk_block_log_cooldown_secs (env, default 60).
-        let cap_check: Result<Option<OpenSlotGuard>, (u32, u32, u64)> = {
+        // 🔒 Sembol-tekliği + eş-zamanlı tavan — TEK lock skopu (atomik), yan-etki ÖNCESİ.
+        // (1) AlreadyOpen: aynı sembolde zaten açık pozisyon varsa açma. live_positions
+        //     sembol-anahtarlı (HashMap<String,_>) → ikinci insert eskisini SESSİZCE ezerdi
+        //     (orphan pozisyon + PnL/closed_trades muhasebe kaybı). Gerçek bug deseni: Regular
+        //     strateji pozisyonu açıkken scalp/swing aynı sembolü açıyordu — SlotGuard kind=None'ı
+        //     saymadığı için engellemiyordu (AAVE: SUPERTREND→SCP, BCH: SUPERTREND→SCP→SWG).
+        //     Guard choke-point'te → her iki açılış yolunu da kapatır. Kapanış sembolü
+        //     live_positions'tan sildiği için meşru "kapat→yeniden aç" akışı bozulmaz.
+        // (2) CapFull: eş-zamanlı açık pozisyon tavanı (max_concurrent_longs/shorts) — uçuş
+        //     rezervasyonu. execute_trade_cycle sembolleri PARALEL açtığından yalnız
+        //     live_positions saymak race'li; state-lock altında [açık(yön)+uçuştaki] sayılır,
+        //     dolu → kısa-devre, değilse rezervasyon +1 ve RAII guard çıkışta -1. cap=0 →
+        //     sınırsız. Log cooldown'ı RISK_BLOCK kardeşiyle aynı knob (risk_block_log_cooldown_secs).
+        enum OpenGate {
+            Ready(Option<OpenSlotGuard>),
+            AlreadyOpen(u64),
+            CapFull(u32, u32, u64),
+        }
+        let gate = {
             let st = match state.lock() { Ok(s) => s, Err(_) => return };
-            let cap = if is_long { st.tuning.max_concurrent_longs } else { st.tuning.max_concurrent_shorts };
-            if cap == 0 {
-                Ok(None)
+            let log_cd = st.tuning.risk_block_log_cooldown_secs;
+            let already_open = st.finance.live_positions.read()
+                .map(|m| m.contains_key(symbol)).unwrap_or(false);
+            if already_open {
+                OpenGate::AlreadyOpen(log_cd)
             } else {
-                let counter = if is_long { &st.finance.pending_open_long } else { &st.finance.pending_open_short };
-                let open_dir = st.finance.live_positions.read()
-                    .map(|m| m.values().filter(|p| p.is_long == is_long).count() as u32)
-                    .unwrap_or(0);
-                let pending = counter.load(std::sync::atomic::Ordering::Relaxed);
-                if concurrency_cap_reached(open_dir, pending, cap) {
-                    Err((open_dir + pending, cap, st.tuning.risk_block_log_cooldown_secs))
+                let cap = if is_long { st.tuning.max_concurrent_longs } else { st.tuning.max_concurrent_shorts };
+                if cap == 0 {
+                    OpenGate::Ready(None)
                 } else {
-                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    Ok(Some(OpenSlotGuard(std::sync::Arc::clone(counter))))
+                    let counter = if is_long { &st.finance.pending_open_long } else { &st.finance.pending_open_short };
+                    let open_dir = st.finance.live_positions.read()
+                        .map(|m| m.values().filter(|p| p.is_long == is_long).count() as u32)
+                        .unwrap_or(0);
+                    let pending = counter.load(std::sync::atomic::Ordering::Relaxed);
+                    if concurrency_cap_reached(open_dir, pending, cap) {
+                        OpenGate::CapFull(open_dir + pending, cap, log_cd)
+                    } else {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        OpenGate::Ready(Some(OpenSlotGuard(std::sync::Arc::clone(counter))))
+                    }
                 }
             }
         };
-        let _open_slot = match cap_check {
-            Ok(slot) => slot,
-            Err((total, cap, log_cooldown)) => {
-                if log_throttle_should_emit(symbol, "concurrency_cap", log_cooldown) {
+        let _open_slot = match gate {
+            OpenGate::Ready(slot) => slot,
+            OpenGate::AlreadyOpen(log_cd) => {
+                if log_throttle_should_emit(symbol, "symbol_already_open", log_cd) {
+                    push_state_log(state, format!(
+                        "↩️ {} açılış atlandı: sembolde zaten açık pozisyon var (sembol başına tek)",
+                        symbol,
+                    ));
+                }
+                return;
+            }
+            OpenGate::CapFull(total, cap, log_cd) => {
+                if log_throttle_should_emit(symbol, "concurrency_cap", log_cd) {
                     push_state_log(state, format!(
                         "🔢 {} {} açılış atlandı: eş-zamanlı tavan dolu ({}/{})",
                         symbol, if is_long { "LONG" } else { "SHORT" }, total, cap,
