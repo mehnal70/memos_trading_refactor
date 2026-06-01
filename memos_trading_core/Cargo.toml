@@ -42,3 +42,7 @@ enterprise = [] # HSM, Prometheus vb. buraya taşınacak
 [[bench]]
 name = "indicators"
 harness = false
+
+[[bench]]
+name = "backtest"
+harness = false
