@@ -65,7 +65,7 @@ pub struct DatabaseDataSource { pub connection_string: String }
 #[async_trait]
 impl DataSource for DatabaseDataSource {
     async fn fetch(&self, params: &FetchParams) -> Result<Vec<Candle>> {
-        let conn = Connection::open(&self.connection_string)?;
+        let conn = crate::persistence::open_db(&self.connection_string)?;
         let limit = params.limit.unwrap_or(500);
         let mut stmt = conn.prepare("SELECT timestamp, open, high, low, close, volume FROM candles WHERE symbol = ?1 AND interval = ?2 ORDER BY timestamp DESC LIMIT ?3")?;
         let mut candles: Vec<Candle> = stmt.query_map([&params.symbol, &params.interval, &limit.to_string()], |row| {

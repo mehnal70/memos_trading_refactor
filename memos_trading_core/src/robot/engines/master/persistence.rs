@@ -32,7 +32,7 @@ impl Engine {
             Ok(st) => st.config.db_path.clone(),
             Err(_) => return,
         };
-        let conn = match rusqlite::Connection::open(&db_path) {
+        let conn = match crate::persistence::open_db(&db_path) {
             Ok(c) => c,
             Err(e) => {
                 push_state_log(state, format!("⚠️ ensure_db_schema: DB açılamadı ({}) — devam ediliyor", e));
@@ -188,7 +188,7 @@ impl Engine {
         // Adım 5.5: yazım arka planda (detached) + serileştirilmiş → cycle bloklanmaz.
         spawn_db_write(move || {
             let _guard = DB_PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+            if let Ok(conn) = crate::persistence::open_db(&db_path) {
                 let _ = crate::persistence::writer::save_open_positions_snapshot(&conn, &positions);
             }
         });
@@ -369,7 +369,7 @@ impl Engine {
         // Adım 5.5: yazım arka planda (detached) + serileştirilmiş → cycle bloklanmaz.
         spawn_db_write(move || {
             let _guard = DB_PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+            if let Ok(conn) = crate::persistence::open_db(&db_path) {
                 let _ = crate::persistence::writer::save_account_state(
                     &conn, equity, peak, starting, closed_count,
                 );

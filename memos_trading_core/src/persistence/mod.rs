@@ -29,3 +29,24 @@ pub use memory::{DatabaseError, DatabaseEngine, MemoryDatabase};
 pub use crate::core::model::PositionModel as PortfolioPosition;
 pub use crate::core::model::{SymbolInfo, PaperTradingResult};
 pub use writer::DBWriter;
+
+/// Kanonik SQLite bağlantı açıcı — TÜM açılışlar buradan geçmeli (tek-nokta).
+///
+/// `Connection::open` üstüne iki ayar uygular:
+/// - **WAL** (`journal_mode=WAL`): okuyucu yazıcıyı, yazıcı okuyucuyu BLOKLAMAZ →
+///   download yazımı sırasında cycle okuması artık "database is locked" almaz
+///   (eskiden `read_candles` çıplak `Connection::open` ile açıp kilitleniyordu).
+/// - **busy_timeout (5s)**: yazıcı-yazıcı çakışmasında (snapshot + download eşzamanlı)
+///   anlık `SQLITE_BUSY` yerine bekler. Eskiden yalnız BAZI sitelerde elle vardı.
+///
+/// Pragma'lar best-effort (başarısızsa bağlantı yine döner); yalnız `open`'ın
+/// kendisi hata verirse `Err`. WAL kalıcı (DB dosyası moduna yazılır) ama her
+/// açılışta yeniden set etmek idempotent ve ucuz.
+pub fn open_db(path: &str) -> rusqlite::Result<rusqlite::Connection> {
+    let conn = rusqlite::Connection::open(path)?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    // WAL + NORMAL senkron: eşzamanlı okuma/yazma + makul dayanıklılık (WAL best-practice).
+    let _ = conn.pragma_update(None, "journal_mode", "WAL");
+    let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+    Ok(conn)
+}

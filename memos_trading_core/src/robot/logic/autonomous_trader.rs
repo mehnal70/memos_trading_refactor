@@ -175,7 +175,7 @@ impl AutonomousTrader {
 
         let binance_fetcher = BinanceFetcher;
         let bist_fetcher = BistFetcher;
-        let conn = rusqlite::Connection::open(&self.config.db_path)?;
+        let conn = crate::persistence::open_db(&self.config.db_path)?;
 
         let completed = Self::load_completed_symbols();
 

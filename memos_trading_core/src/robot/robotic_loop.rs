@@ -357,7 +357,7 @@ impl AppState {
             diag_alerts: VecDeque::with_capacity(20),
             risk_gate: RiskGate::default(),
             anomaly_count: 0,
-            db_conn: Connection::open(&config.db_path).ok(),
+            db_conn: crate::persistence::open_db(&config.db_path).ok(),
             live_pipeline: Arc::new(RwLock::new(PipelineStatus::new())),
             repair_log: VecDeque::with_capacity(100),
         };

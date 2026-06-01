@@ -27,7 +27,7 @@ pub fn load_config_with_fallback<T: serde::de::DeserializeOwned + Default>(path:
 /// Veritabanından en son 'Adli Durum Snapshot'ını canlandırır.
 /// Bu fonksiyon robotun 'ben kimim?' sorusuna yanıtıdır.
 pub fn recover_open_positions(db_path: &str) -> Result<Vec<PositionModel>, String> {
-    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    let conn = crate::persistence::open_db(db_path).map_err(|e| e.to_string())?;
 
     let json_str: Option<String> = conn.query_row(
         "SELECT positions FROM open_positions_snapshot WHERE id = 1",
@@ -56,7 +56,7 @@ pub struct AccountStateRecord {
 /// - Tablo yoksa veya kayıt yoksa: `Ok(None)` (cold-start).
 /// - DB açılamaz/parse hatası: `Err(String)`; çağıran cold-start'a düşer.
 pub fn load_account_state(db_path: &str) -> Result<Option<AccountStateRecord>, String> {
-    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    let conn = crate::persistence::open_db(db_path).map_err(|e| e.to_string())?;
     let row = conn.query_row(
         "SELECT equity, peak_equity, starting_capital, closed_trades_count, updated_at \
          FROM account_state WHERE id = 1",
@@ -103,7 +103,7 @@ pub fn get_top_performing_symbols(db_path: &str, limit: usize) -> Vec<(String, f
 /// 🔬 ADLİ VERİ HASADI: Veritabanından en taze sanal işlem/backtest sonuçlarını okur
 pub fn read_paper_trading_results(db_path: &str, limit: Option<usize>) -> Result<Vec<PaperTradingResult>, crate::MemosTradingError> {
     // 1. Veritabanı Bağlantısı Aç
-    let conn = Connection::open(db_path)
+    let conn = crate::persistence::open_db(db_path)
         .map_err(|e| crate::MemosTradingError::Database(format!("DB Açılamadı: {}", e)))?;
 
     let max_rows = limit.unwrap_or(50);
@@ -146,7 +146,7 @@ pub fn read_paper_trading_results(db_path: &str, limit: Option<usize>) -> Result
 /// 🔍 VERİTABANI KEŞFİ: SQLite içindeki tüm mevcut tabloların listesini döndürür.
 /// Sistem teşhisi ve otomatik şema doğrulaması için hayati önem taşır.
 pub fn list_available_tables(db_path: &str) -> Result<Vec<String>, crate::MemosTradingError> {
-    let conn = Connection::open(db_path)
+    let conn = crate::persistence::open_db(db_path)
         .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
 
     let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table'")
@@ -190,7 +190,7 @@ pub fn list_symbols_for_market(
     market: Option<&str>,
     interval: Option<&str>,
 ) -> Result<Vec<String>, crate::MemosTradingError> {
-    let conn = Connection::open(db_path)
+    let conn = crate::persistence::open_db(db_path)
         .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
 
     let mut where_clauses: Vec<&str> = Vec::new();
@@ -235,7 +235,7 @@ pub fn read_candles(
     use chrono::{DateTime, TimeZone, Utc};
     use rusqlite::types::ValueRef;
 
-    let conn = Connection::open(db_path)
+    let conn = crate::persistence::open_db(db_path)
         .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
 
     let query = "SELECT timestamp, open, high, low, close, volume, symbol, interval \
@@ -291,7 +291,7 @@ pub fn read_candles(
 /// döner (ilk çalıştırmada refresh job doldurana kadar). Dönen (symbol, status) listesi
 /// `set_symbol_statuses` ile cache'e yüklenir.
 pub fn load_symbol_statuses(db_path: &str) -> crate::Result<Vec<(String, String)>> {
-    let conn = Connection::open(db_path)
+    let conn = crate::persistence::open_db(db_path)
         .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
     let mut stmt = match conn.prepare("SELECT symbol, status FROM symbol_status") {
         Ok(s) => s,

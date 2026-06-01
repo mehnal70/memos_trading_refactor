@@ -93,7 +93,7 @@ impl Engine {
                     // Yazımı gerçekten say + ilk hatayı yüzeye çıkar (eskiden `let _ =` ile
                     // yutuluyordu → şema uyumsuzluğunda sahte "✓ N mum yazıldı" basılıyordu).
                     let write_result = tokio::task::spawn_blocking(move || -> std::result::Result<(usize, Option<String>), String> {
-                        let conn = rusqlite::Connection::open(&db_path_clone)
+                        let conn = crate::persistence::open_db(&db_path_clone)
                             .map_err(|e| format!("db open: {}", e))?;
                         // WAL olsa da yazıcı-yazıcı çakışmasında anlık SQLITE_BUSY olabiliyor
                         // (snapshot/engine eşzamanlı yazımı) → busy_timeout ile bekle, "database
@@ -156,7 +156,7 @@ impl Engine {
                                         let db2 = db_path.clone();
                                         let htf_clone = htf_candles.clone();
                                         let _ = tokio::task::spawn_blocking(move || {
-                                            if let Ok(conn) = rusqlite::Connection::open(&db2) {
+                                            if let Ok(conn) = crate::persistence::open_db(&db2) {
                                                 let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
                                                 for c in &htf_clone {
                                                     let _ = crate::persistence::writer::save_candle(&conn, "binance", "spot", c);
@@ -213,7 +213,7 @@ impl Engine {
                             let db2 = db_path.clone();
                             let cc = c.clone();
                             let _ = tokio::task::spawn_blocking(move || {
-                                if let Ok(conn) = rusqlite::Connection::open(&db2) {
+                                if let Ok(conn) = crate::persistence::open_db(&db2) {
                                     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
                                     for k in &cc {
                                         let _ = crate::persistence::writer::save_candle(&conn, "binance", "spot", k);

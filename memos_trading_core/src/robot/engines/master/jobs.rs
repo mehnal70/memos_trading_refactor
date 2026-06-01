@@ -204,7 +204,7 @@ impl Engine {
         let db_clone = db_path.clone();
         let entries_clone = entries.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            if let Ok(conn) = rusqlite::Connection::open(&db_clone) {
+            if let Ok(conn) = crate::persistence::open_db(&db_clone) {
                 let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
                 if let Err(e) = crate::persistence::writer::save_symbol_statuses(&conn, &entries_clone) {
                     log::warn!("symbol_status persist: {:?}", e);
