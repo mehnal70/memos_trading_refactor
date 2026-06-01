@@ -187,4 +187,44 @@ impl Market {
             Self::Coinm => "coinm",
         }
     }
+
+    /// config.market gibi serbest etiket string'inden Market'e (case-insensitive).
+    /// Tanınmayan → Spot (en kısıtlı/güvenli varsayım). String karşılaştırmasını
+    /// koda serpmek yerine tek-nokta.
+    pub fn from_label(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "futures" | "fut" | "perp" => Self::Futures,
+            "coinm" | "coin-m" => Self::Coinm,
+            _ => Self::Spot,
+        }
+    }
+
+    /// Bu piyasada short (açığa satış) mekanik olarak mümkün mü? Spot'ta borrow
+    /// yoktur → long-only. Futures/coinm türevdir → short serbest.
+    pub fn allows_short(&self) -> bool {
+        !matches!(self, Self::Spot)
+    }
+}
+
+#[cfg(test)]
+mod market_tests {
+    use super::Market;
+
+    #[test]
+    fn from_label_case_insensitive() {
+        assert_eq!(Market::from_label("futures"), Market::Futures);
+        assert_eq!(Market::from_label("  FUTURES "), Market::Futures);
+        assert_eq!(Market::from_label("coinm"), Market::Coinm);
+        assert_eq!(Market::from_label("spot"), Market::Spot);
+        // Tanınmayan/boş → en güvenli (long-only) varsayım.
+        assert_eq!(Market::from_label("garip"), Market::Spot);
+        assert_eq!(Market::from_label(""), Market::Spot);
+    }
+
+    #[test]
+    fn only_spot_blocks_short() {
+        assert!(!Market::Spot.allows_short(), "spot = long-only");
+        assert!(Market::Futures.allows_short());
+        assert!(Market::Coinm.allows_short());
+    }
 }

@@ -185,6 +185,26 @@ impl Engine {
 
         let is_long = matches!(signal, Signal::Buy);
 
+        // 🛡️ Spot = long-only: spot piyasada short (Sell) mekanik olarak imkânsız
+        // (borrow yok) → canlıda emir reddedilir, paper'da gerçeği yanlış modeller.
+        // Tek choke-point (scalp+strateji) → yanlış config'e (TRADE_MARKET=spot iken
+        // REGIME_DIRECTIONAL Sell üretmesi) karşı da korur. Futures/coinm'de serbest.
+        // Market sınıflandırması Market::from_label tek-kaynağından (string serpme yok).
+        if !is_long {
+            let block = state.lock().ok().map(|st| (
+                !crate::core::types::Market::from_label(&st.config.market).allows_short(),
+                st.tuning.risk_block_log_cooldown_secs,
+            ));
+            if let Some((true, cooldown)) = block {
+                if log_throttle_should_emit(symbol, "spot_short_block", cooldown) {
+                    push_state_log(state, format!(
+                        "🚫 {} SHORT açılış atlandı: spot piyasa long-only (borrow yok)", symbol,
+                    ));
+                }
+                return;
+            }
+        }
+
         // 🔢 Eş-zamanlı açık pozisyon tavanı (max_concurrent_longs/shorts) — ATOMİK
         // uçuş-rezervasyonu. execute_trade_cycle sembolleri PARALEL (tokio::spawn)
         // açtığından yalnız live_positions saymak race'li: N task aynı anda "0 açık"
