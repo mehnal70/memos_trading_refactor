@@ -12,6 +12,8 @@ use memos_trading_core::core::model::{RoboticLoopConfig, TradingMode};
 use memos_trading_core::robot::engines::master::Engine;
 use memos_trading_core::robot::robotic_loop::AppState;
 
+mod common;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn paper_mode_keeps_protection_sync_dormant() {
     // Paper'da live_executor None → psync task hiçbir HTTP çağrısı yapmamalı,
@@ -33,12 +35,13 @@ async fn paper_mode_keeps_protection_sync_dormant() {
     let engine_state = Arc::clone(&state);
     let h = tokio::spawn(async move { Engine::run_autonomous_loop(engine_state).await; });
 
-    // Birkaç ana döngü turu — sync 30s'lik döngü, ilk turda çalışmıyor olmalı
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    // Engine hâlâ ayakta + last_tick artmış
-    let last_tick = state.lock().unwrap().fleet.last_loop_tick.load(Ordering::Relaxed);
-    assert!(last_tick > 0, "ana döngü tick atmadı");
+    // Ana döngünün ilk turunu bekle (sınırlı poll, contention-dayanıklı). Sync 30s'lik
+    // döngü → ilk tick'te çalışmamış olmalı; poll'un erken dönmesi negatif kontrolü
+    // ZAYIFLATMAZ, aksine daha az süre = sync'in yanlışlıkla tetiklenme ihtimali daha az.
+    let ticked = common::poll_until(Duration::from_secs(15), || {
+        state.lock().unwrap().fleet.last_loop_tick.load(Ordering::Relaxed) > 0
+    }).await;
+    assert!(ticked, "ana döngü 15s içinde tick atmadı");
 
     // Paper'da psync logu olmamalı
     let saw_psync_action = state.lock().unwrap().guardian.log.iter()

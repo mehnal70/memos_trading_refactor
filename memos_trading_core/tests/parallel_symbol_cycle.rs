@@ -16,6 +16,8 @@ use memos_trading_core::core::model::RoboticLoopConfig;
 use memos_trading_core::robot::engines::master::Engine;
 use memos_trading_core::robot::robotic_loop::AppState;
 
+mod common;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn parallel_cycle_handles_many_symbols_without_panic() {
     let tmp_db = format!("/tmp/memos_parallel_test_{}.db", std::process::id());
@@ -42,21 +44,19 @@ async fn parallel_cycle_handles_many_symbols_without_panic() {
     let engine_state = Arc::clone(&state);
     let h = tokio::spawn(async move { Engine::run_autonomous_loop(engine_state).await; });
 
-    // Birkaç ana döngü turu boyunca çalıştır
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Ana döngünün dönüp tick attığını + ilk Devriye logunu düşürdüğünü bekle.
+    // Sabit sleep yerine sınırlı poll → ağır paralel test yükünde (CPU contention)
+    // ana döngü aç kalsa bile ceiling'e kadar bekler, kapsama kaybı yok.
+    let progressed = common::poll_until(Duration::from_secs(15), || {
+        let st = state.lock().unwrap();
+        st.fleet.last_loop_tick.load(Ordering::Relaxed) > 0
+            && st.guardian.log.iter().any(|l| l.contains("Devriye"))
+    }).await;
+    assert!(progressed, "ana döngü 15s içinde tick atmadı / Devriye logu düşmedi (paralel iş thread'leri kilitlemiş olabilir)");
 
-    // Hâlâ yaşıyor mu (panik atmadı mı)
+    // Hâlâ yaşıyor mu (panik atıp kendini durdurmadı mı)
     let alive = !state.lock().unwrap().app_stop_signal.load(Ordering::Relaxed);
     assert!(alive, "engine bir noktada kendini durdurdu");
-
-    // En az birkaç tur dönmüş olmalı (last_loop_tick > 0)
-    let last_tick = state.lock().unwrap().fleet.last_loop_tick.load(Ordering::Relaxed);
-    assert!(last_tick > 0, "ana döngü hiç tick atmadı (paralel iş thread'leri kilitlemiş olabilir)");
-
-    // Heartbeat de aktif olmalı (Devriye #1 logu en geç ilk turda düşer)
-    let saw_devriye = state.lock().unwrap().guardian.log.iter()
-        .any(|l| l.contains("Devriye"));
-    assert!(saw_devriye, "Devriye logu bulunamadı — ana döngü dönmedi");
 
     state.lock().unwrap().app_stop_signal.store(true, Ordering::SeqCst);
     let _ = tokio::time::timeout(Duration::from_secs(3), h).await;
@@ -83,16 +83,18 @@ async fn process_symbol_cycle_isolates_failures_across_symbols() {
     let engine_state = Arc::clone(&state);
     let h = tokio::spawn(async move { Engine::run_autonomous_loop(engine_state).await; });
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Ana döngünün en az bir tur dönüp sembolleri işlediğini bekle (sınırlı poll) →
+    // sonra "veri yokken pozisyon açılmadı"yı kontrol et. Sabit sleep'ten daha GÜÇLÜ:
+    // turun fiilen koştuğunu garanti eder, contention'da da düşmez.
+    let ticked = common::poll_until(Duration::from_secs(15), || {
+        state.lock().unwrap().fleet.last_loop_tick.load(Ordering::Relaxed) > 0
+    }).await;
+    assert!(ticked, "ana döngü 15s içinde tick atmadı");
 
-    // Hâlâ pozisyon yok (veri yok → sinyal yok → açılış yok)
+    // Döngü döndü ama veri yok → hâlâ pozisyon yok (sinyal yok → açılış yok)
     let n_pos = state.lock().unwrap().finance.live_positions.read()
         .map(|p| p.len()).unwrap_or(99);
     assert_eq!(n_pos, 0, "veri olmadığı halde pozisyon açılmış: {}", n_pos);
-
-    // Hâlâ ayakta
-    let last_tick = state.lock().unwrap().fleet.last_loop_tick.load(Ordering::Relaxed);
-    assert!(last_tick > 0, "ana döngü tick atmadı");
 
     state.lock().unwrap().app_stop_signal.store(true, Ordering::SeqCst);
     let _ = tokio::time::timeout(Duration::from_secs(3), h).await;

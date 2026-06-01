@@ -12,6 +12,8 @@ use memos_trading_core::core::model::RoboticLoopConfig;
 use memos_trading_core::robot::engines::master::Engine;
 use memos_trading_core::robot::robotic_loop::AppState;
 
+mod common;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn trigger_ml_pulse_flows_through_to_pipeline() {
     let config = RoboticLoopConfig {
@@ -41,25 +43,19 @@ async fn trigger_ml_pulse_flows_through_to_pipeline() {
             .store(true, Ordering::Relaxed);
     }
 
-    // 2) Handler tetiklensin, run_ml_retrain_job spawn_blocking ile başlasın,
-    //    pipeline'a "trigger:ml" Running/Done/Failed adımı yazılsın.
-    tokio::time::sleep(Duration::from_millis(2500)).await;
-
-    // 3) Pipeline'da "trigger:ml" adımının kaydedildiğini doğrula
-    let saw_trigger = {
+    // 2/3/4) Handler tetiklensin, run_ml_retrain_job çalışsın, pipeline'a "trigger:ml"
+    //   adımı yazılsın VE trigger AtomicBool tüketilsin (swap→false). Sabit sleep yerine
+    //   sınırlı poll → contention-dayanıklı. İki koşul birlikte beklenir çünkü adım-yazımı
+    //   ile flag-tüketimi farklı sırada gerçekleşebilir (poll tek koşulda erken dönerdi).
+    let done = common::poll_until(Duration::from_secs(15), || {
         let st = state.lock().unwrap();
-        let pipe = st.guardian.live_pipeline.read().unwrap();
-        pipe.chain_steps.iter().any(|s| s.label.contains("trigger:ml"))
-    };
-    assert!(saw_trigger,
-        "ml trigger pulse'u sonrasında pipeline'da 'trigger:ml' adımı görülmedi");
-
-    // 4) Trigger AtomicBool yeniden false'a çekilmiş olmalı (swap consume)
-    {
-        let st = state.lock().unwrap();
-        let still_set = st.fleet.triggers.get("ml").unwrap().load(Ordering::Relaxed);
-        assert!(!still_set, "ml trigger flag'i handler tarafından tüketilmemiş");
-    }
+        let step_seen = st.guardian.live_pipeline.read().unwrap()
+            .chain_steps.iter().any(|s| s.label.contains("trigger:ml"));
+        let consumed = !st.fleet.triggers.get("ml").unwrap().load(Ordering::Relaxed);
+        step_seen && consumed
+    }).await;
+    assert!(done,
+        "ml trigger: pipeline'da 'trigger:ml' adımı + flag tüketimi 15s içinde gerçekleşmedi");
 
     // 5) Engine'i kapat
     {
@@ -93,13 +89,11 @@ async fn trigger_backtest_pulse_flows_through_to_pipeline() {
             .store(true, Ordering::Relaxed);
     }
 
-    tokio::time::sleep(Duration::from_millis(2500)).await;
-
-    let saw_trigger = {
+    let saw_trigger = common::poll_until(Duration::from_secs(15), || {
         let st = state.lock().unwrap();
         let pipe = st.guardian.live_pipeline.read().unwrap();
         pipe.chain_steps.iter().any(|s| s.label.contains("trigger:backtest"))
-    };
+    }).await;
     assert!(saw_trigger,
         "backtest trigger pulse'u sonrasında pipeline'da 'trigger:backtest' adımı görülmedi");
 
@@ -122,7 +116,11 @@ async fn guardian_log_collects_user_visible_messages() {
         Engine::run_autonomous_loop(engine_state).await;
     });
 
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // "💓 Devriye #1" en geç gelen log (engine-fired → fleet-dispatched → ilk
+    // heartbeat). Onu bekle (sınırlı poll); geldiğinde öncekiler de düşmüş olur.
+    common::poll_until(Duration::from_secs(15), || {
+        state.lock().unwrap().guardian.log.iter().any(|l| l.contains("💓 Devriye #1"))
+    }).await;
 
     let log_lines: Vec<String> = {
         let st = state.lock().unwrap();
@@ -162,7 +160,10 @@ async fn trigger_ml_logs_user_visible_detail() {
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     state.lock().unwrap().fleet.triggers.get("ml").unwrap().store(true, Ordering::Relaxed);
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    // "🧠 ML Retrain başladı" trigger-fired logundan sonra gelir; onu bekle (sınırlı poll).
+    common::poll_until(Duration::from_secs(15), || {
+        state.lock().unwrap().guardian.log.iter().any(|l| l.contains("🧠 ML Retrain başladı"))
+    }).await;
 
     let logs: Vec<String> = state.lock().unwrap().guardian.log.iter().cloned().collect();
     assert!(logs.iter().any(|l| l.contains("🎮 Tetik") && l.contains("⇒ ml")),
@@ -184,8 +185,12 @@ async fn equity_history_and_drawdown_populate_charts() {
     let engine_state = Arc::clone(&state);
     let h = tokio::spawn(async move { Engine::run_autonomous_loop(engine_state).await; });
 
-    // 5 tur × 500 ms = 2.5 sn; ana döngü 5. turda ilk push'u yapar
-    tokio::time::sleep(Duration::from_millis(3500)).await;
+    // Ana döngü ~5. turda (her ~500ms) ilk equity push'unu yapar. Sabit sleep yerine
+    // sınırlı poll → contention'da ceiling'e kadar bekler.
+    common::poll_until(Duration::from_secs(20), || {
+        let st = state.lock().unwrap();
+        bridge::get_snapshot(&st).charts.equity_series.len() >= 2
+    }).await;
 
     let snap = {
         let st = state.lock().unwrap();
@@ -220,8 +225,14 @@ async fn snapshot_writer_produces_json_file() {
 
     spawn_snapshot_writer(Arc::clone(&state), path.clone(), 1);
 
-    // 1.5 sn = en az 1 yazım turu (initial + 1 saniye sonra ikinci)
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // En az 1 yazım turunu bekle: dosya yazılıp geçerli JSON olana dek poll
+    // (sabit sleep yerine → contention-dayanıklı).
+    common::poll_until(Duration::from_secs(15), || {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .is_some()
+    }).await;
 
     // Dosyanın var ve JSON parse edilebilir olduğunu doğrula
     let raw = std::fs::read_to_string(&path)
@@ -252,8 +263,11 @@ async fn phase_transitions_from_booting_to_scanning() {
     let engine_state = Arc::clone(&state);
     let h = tokio::spawn(async move { Engine::run_autonomous_loop(engine_state).await; });
 
-    // Bir kaç tur geçince phase tracker tarafından Scanning yakalanır
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    // Phase tracker birkaç tur sonra Idle'dan çıkar. Sınırlı poll → contention-dayanıklı.
+    common::poll_until(Duration::from_secs(15), || {
+        let st = state.lock().unwrap();
+        bridge::get_snapshot(&st).phase != "Idle"
+    }).await;
 
     let snap = {
         let st = state.lock().unwrap();
@@ -290,9 +304,11 @@ async fn main_loop_heartbeat_writes_last_tick() {
         Engine::run_autonomous_loop(engine_state).await;
     });
 
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let progressed = common::poll_until(Duration::from_secs(15), || {
+        state.lock().unwrap().fleet.last_loop_tick.load(Ordering::Relaxed) > 0
+    }).await;
     let after = state.lock().unwrap().fleet.last_loop_tick.load(Ordering::Relaxed);
-    assert!(after > 0, "ana döngü tick yazmamış: {}", after);
+    assert!(progressed && after > 0, "ana döngü tick yazmamış: {}", after);
 
     {
         let st = state.lock().unwrap();

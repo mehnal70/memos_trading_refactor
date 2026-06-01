@@ -13,6 +13,8 @@ use memos_trading_core::core::model::RoboticLoopConfig;
 use memos_trading_core::robot::engines::master::Engine;
 use memos_trading_core::robot::robotic_loop::AppState;
 
+mod common;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scheduler_fires_warmup_download_after_30s() {
     // Geçici DB — backtest job DB'ye dokunsa da problem olmaz
@@ -35,11 +37,12 @@ async fn scheduler_fires_warmup_download_after_30s() {
     let engine_state = Arc::clone(&state);
     let h = tokio::spawn(async move { Engine::run_autonomous_loop(engine_state).await; });
 
-    // Warmup 30 sn + scheduler tick + trigger handler işlemesi → ~35 sn pencere
-    tokio::time::sleep(Duration::from_secs(35)).await;
-
+    // Warmup ~30 sn'lik timer. Sabit sleep yerine sınırlı poll (ceiling 60s) →
+    // contention'da daha uzun bekler, yüksüzde warmup loglanır loglanmaz döner.
+    let saw_warmup = common::poll_until(Duration::from_secs(60), || {
+        state.lock().unwrap().guardian.log.iter().any(|l| l.contains("⏰ Scheduler: warmup"))
+    }).await;
     let logs: Vec<String> = state.lock().unwrap().guardian.log.iter().cloned().collect();
-    let saw_warmup = logs.iter().any(|l| l.contains("⏰ Scheduler: warmup"));
     assert!(saw_warmup, "Warmup download log'u görülmedi. Logs: {:#?}", logs);
 
     state.lock().unwrap().app_stop_signal.store(true, Ordering::SeqCst);
@@ -67,9 +70,15 @@ async fn scheduler_respects_disabled_download() {
     tokio::time::sleep(Duration::from_secs(33)).await;
 
     let logs: Vec<String> = state.lock().unwrap().guardian.log.iter().cloned().collect();
-    let saw_any_sched = logs.iter().any(|l| l.contains("⏰ Scheduler"));
-    assert!(!saw_any_sched,
-        "download_enabled=false olduğu halde scheduler tetik atmış. Logs: {:#?}", logs);
+    // NOT: scheduler, ML retrain + screener tetiklerini AYRI flag'lerle atar
+    // (SCHEDULER_ML/SCREENER_ENABLED, default açık) — bunlar download_enabled'dan
+    // bağımsız ve 30s warmup'ta düşer. Bu test yalnız DOWNLOAD tetiğinin
+    // atılmadığını doğrular (testin asıl niyeti: "respects disabled download").
+    // Eskiden "⏰ Scheduler" (herhangi) aranıyordu → scheduler ML/screener'a
+    // genişleyince (241290b) yanlış-pozitif veriyordu.
+    let saw_download_sched = logs.iter().any(|l| l.contains("download tetiği"));
+    assert!(!saw_download_sched,
+        "download_enabled=false olduğu halde scheduler DOWNLOAD tetiği atmış. Logs: {:#?}", logs);
 
     state.lock().unwrap().app_stop_signal.store(true, Ordering::SeqCst);
     let _ = tokio::time::timeout(Duration::from_secs(3), h).await;

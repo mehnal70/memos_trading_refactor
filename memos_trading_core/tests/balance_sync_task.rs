@@ -13,6 +13,8 @@ use memos_trading_core::core::model::{RoboticLoopConfig, TradingMode};
 use memos_trading_core::robot::engines::master::Engine;
 use memos_trading_core::robot::robotic_loop::AppState;
 
+mod common;
+
 // LIVE_DRY_RUN ve BALANCE_SYNC_* env'leri process-global; cargo testleri default
 // paralel koşar → set/remove yarışı flaky panic'lere yol açıyordu. Bu dosyadaki
 // 4 testi tek mutex ile serileştir. Poison'a karşı bağışık (`into_inner`).
@@ -41,10 +43,10 @@ async fn paper_mode_keeps_balance_sync_dormant() {
     let engine_state = Arc::clone(&state);
     let h = tokio::spawn(async move { Engine::run_autonomous_loop(engine_state).await; });
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let saw = state.lock().unwrap().guardian.log.iter()
-        .any(|l| l.contains("Balance sync") && l.contains("Paper/DryRun"));
+    let saw = common::poll_until(Duration::from_secs(15), || {
+        state.lock().unwrap().guardian.log.iter()
+            .any(|l| l.contains("Balance sync") && l.contains("Paper/DryRun"))
+    }).await;
     assert!(saw, "Paper mode'da balance-sync pasif log'u atmalı");
 
     state.lock().unwrap().app_stop_signal.store(true, Ordering::SeqCst);
@@ -74,10 +76,10 @@ async fn live_dry_run_keeps_balance_sync_dormant() {
     let engine_state = Arc::clone(&state);
     let h = tokio::spawn(async move { Engine::run_autonomous_loop(engine_state).await; });
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let saw = state.lock().unwrap().guardian.log.iter()
-        .any(|l| l.contains("Balance sync") && l.contains("Paper/DryRun"));
+    let saw = common::poll_until(Duration::from_secs(15), || {
+        state.lock().unwrap().guardian.log.iter()
+            .any(|l| l.contains("Balance sync") && l.contains("Paper/DryRun"))
+    }).await;
     assert!(saw, "DryRun mode'da balance-sync pasif log'u atmalı");
 
     state.lock().unwrap().app_stop_signal.store(true, Ordering::SeqCst);

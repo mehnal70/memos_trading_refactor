@@ -15,6 +15,8 @@ use memos_trading_core::robot::engines::binance_executor::BinanceFuturesExecutor
 use memos_trading_core::robot::engines::master::Engine;
 use memos_trading_core::robot::robotic_loop::AppState;
 
+mod common;
+
 // LIVE_DRY_RUN process-global; aşağıdaki 2 async test set/remove ederek
 // yarışıyordu. Bu testleri dosya-içi mutex ile serileştir. URL testleri
 // (3 sync) env'e dokunmuyor, lock'a ihtiyaç duymazlar.
@@ -73,10 +75,10 @@ async fn paper_mode_keeps_ws_task_dormant() {
     let engine_state = Arc::clone(&state);
     let h = tokio::spawn(async move { Engine::run_autonomous_loop(engine_state).await; });
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let saw_pasif_msg = state.lock().unwrap().guardian.log.iter()
-        .any(|l| l.contains("WS userDataStream") && l.contains("Paper/DryRun"));
+    let saw_pasif_msg = common::poll_until(Duration::from_secs(15), || {
+        state.lock().unwrap().guardian.log.iter()
+            .any(|l| l.contains("WS userDataStream") && l.contains("Paper/DryRun"))
+    }).await;
     assert!(saw_pasif_msg,
         "Paper mode'da WS task'ı 'Paper/DryRun, pasif' log'u atmalı");
 
@@ -107,10 +109,10 @@ async fn live_dry_run_keeps_ws_task_dormant() {
     let engine_state = Arc::clone(&state);
     let h = tokio::spawn(async move { Engine::run_autonomous_loop(engine_state).await; });
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let saw_pasif_msg = state.lock().unwrap().guardian.log.iter()
-        .any(|l| l.contains("WS userDataStream") && l.contains("Paper/DryRun"));
+    let saw_pasif_msg = common::poll_until(Duration::from_secs(15), || {
+        state.lock().unwrap().guardian.log.iter()
+            .any(|l| l.contains("WS userDataStream") && l.contains("Paper/DryRun"))
+    }).await;
     assert!(saw_pasif_msg,
         "DryRun mode'da WS task pasif log'u atmalı");
 

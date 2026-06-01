@@ -16,6 +16,8 @@ use memos_trading_core::robot::engines::master::Engine;
 use memos_trading_core::robot::robotic_loop::AppState;
 use rusqlite::Connection;
 
+mod common;
+
 fn mk_pos(symbol: &str) -> PositionModel {
     PositionModel {
         pos_id: format!("rec-{}", symbol),
@@ -85,8 +87,15 @@ async fn hydrate_loads_snapshot_into_live_positions() {
         s.finance.live_positions.write().unwrap().clear();
     }
     Engine::persist_open_positions_snapshot(&state);
+    // persist_open_positions_snapshot DB yazımını spawn_blocking ile DETACHED yapar
+    // (d40719e, Adım 5.5) → yazım landikten sonra recover'la. Sabit beklemek yerine
+    // sınırlı poll (common::poll_until): recover boş dönünce hemen geç, yazım gecikse
+    // ceiling'e kadar bekle. Geçici "database locked" → Err → false → poll devam.
+    let wiped = common::poll_until(std::time::Duration::from_secs(10), || {
+        recover_open_positions(&db).map(|v| v.is_empty()).unwrap_or(false)
+    }).await;
     let after = recover_open_positions(&db).expect("recovery after wipe");
-    assert!(after.is_empty(), "kapanış sonrası snapshot boş olmalı: {:?}", after);
+    assert!(wiped && after.is_empty(), "kapanış sonrası snapshot boş olmalı: {:?}", after);
 
     let _ = std::fs::remove_file(&db);
 }
