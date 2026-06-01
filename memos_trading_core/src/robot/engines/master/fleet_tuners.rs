@@ -122,8 +122,7 @@ impl Engine {
                 if stop { break; }
 
                 // Olgun + stale ayrımı yapıp tek scope'lu queue manipülasyonu.
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let now = crate::core::time::now_epoch_secs();
                 let mature: Vec<crate::robot::parameters::PendingTrailObservation> = {
                     if let Ok(mut q) = trail_obs_queue().lock() {
                         let mut keep = std::collections::VecDeque::with_capacity(q.len());

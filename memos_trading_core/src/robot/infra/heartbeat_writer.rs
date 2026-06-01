@@ -87,8 +87,7 @@ impl HeartbeatRecord {
         // ile +1 snapshot tolerans.
         let exec_window: u64 = std::env::var("HEARTBEAT_EXEC_WINDOW_SECS")
             .ok().and_then(|s| s.parse().ok()).unwrap_or(90);
-        let now_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let now_epoch = crate::core::time::now_epoch_secs();
         let last_exec = state.fleet.last_execution_epoch.load(std::sync::atomic::Ordering::Relaxed);
         let recently_executed = last_exec > 0
             && now_epoch.saturating_sub(last_exec) <= exec_window;
@@ -283,8 +282,7 @@ mod tests {
         let cfg = RoboticLoopConfig::default();
         let st = AppState::new(cfg);
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = crate::core::time::now_epoch_secs();
 
         // Phase "Recovering" + 30sn önce trade yapıldı → snapshot "Executing" göstermeli.
         st.fleet.last_execution_epoch.store(now.saturating_sub(30), Ordering::Relaxed);

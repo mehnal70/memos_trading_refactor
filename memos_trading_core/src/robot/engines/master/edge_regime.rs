@@ -176,8 +176,7 @@ impl Engine {
             adaptive_thresholds, classify_market_regime_with,
             compute_adx_from_candles, compute_atr_pct,
         };
-        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64).unwrap_or(0);
+        let now_ms = crate::core::time::now_epoch_millis() as u64;
         let ttl_ms = ttl_secs.saturating_mul(1000);
 
         // 1) Taze cache var mı? (kısa read-lock)

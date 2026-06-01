@@ -51,10 +51,7 @@ pub fn compute_symbol_stats(candles: &[Candle]) -> Option<SymbolStats> {
     let median = ratios[median_idx];
     let p90 = ratios[p90_idx];
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = crate::core::time::now_epoch_secs();
 
     Some(SymbolStats {
         noise_floor_pct: median * 100.0,
@@ -83,10 +80,7 @@ fn atr_for_window(window: &[Candle]) -> f64 {
 
 /// Statin tazelik testi: TTL (saniye) ile karşılaştırır. None ise stale.
 pub fn is_fresh(stats: &SymbolStats, ttl_secs: u64) -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = crate::core::time::now_epoch_secs();
     now.saturating_sub(stats.last_updated) < ttl_secs
 }
 
@@ -147,8 +141,7 @@ mod tests {
             noise_floor_pct: 0.5, p90_range_pct: 0.7,
             sample_size: 100, last_updated: 0,
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = crate::core::time::now_epoch_secs();
         s.last_updated = now - 100; // 100sn önce
         assert!(is_fresh(&s, 3600), "1 saat TTL: 100sn fresh");
         s.last_updated = now - 10_000; // 10K sn önce

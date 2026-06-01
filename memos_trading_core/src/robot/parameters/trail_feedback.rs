@@ -79,10 +79,7 @@ impl TrailFeedback {
         // No-op koruması (clamp aynı değeri verirse override yazma)
         if (new_target - current).abs() < 1e-6 { return None; }
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = crate::core::time::now_epoch_secs();
         self.target_override = Some(new_target);
         self.last_adjusted = now;
         Some(new_target)
@@ -109,10 +106,7 @@ pub struct PendingTrailObservation {
 impl PendingTrailObservation {
     /// Olgunluk: exit'ten en az `min_age_secs` (default 60) geçmiş olmalı.
     pub fn is_mature(&self, min_age_secs: u64) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = crate::core::time::now_epoch_secs();
         now.saturating_sub(self.exit_epoch) >= min_age_secs
     }
 

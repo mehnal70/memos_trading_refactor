@@ -41,10 +41,7 @@ fn parse_env_bool(key: &str) -> Option<bool> {
 /// Sistemden epoch saniyesini okur; SystemTime hatasında 0 döner (cooldown
 /// kapanır → güvenli taraf: hiç drift atma değil, eski davranışla aynı).
 fn now_epoch_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::core::time::now_epoch_secs()
 }
 
 #[cfg(test)]
@@ -53,8 +50,7 @@ mod tests {
 
     /// SymbolStats fixture: belirli yaşa sahip tazeleyici. Now-offset saniye.
     fn make_stats(noise_pct: f64, sample: usize, age_secs: u64) -> SymbolStats {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = crate::core::time::now_epoch_secs();
         SymbolStats {
             noise_floor_pct: noise_pct,
             p90_range_pct:   noise_pct * 1.5,

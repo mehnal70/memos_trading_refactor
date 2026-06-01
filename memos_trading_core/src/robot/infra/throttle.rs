@@ -10,7 +10,6 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Anahtar → son emit epoch (sn). Tek başına thread-safe (içsel `Mutex`),
 /// `&self` ile çağrılır → hem instance alan hem `static` olarak kullanılabilir.
@@ -33,10 +32,7 @@ impl Throttle {
         if cooldown_secs == 0 {
             return true;
         }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = crate::core::time::now_epoch_secs();
         let mut guard = match self.last.lock() {
             Ok(g) => g,
             Err(_) => return true,

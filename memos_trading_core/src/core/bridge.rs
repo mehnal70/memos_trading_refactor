@@ -152,8 +152,7 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
     // step.last_run_secs aslında Unix epoch saniyesi (record_step çağrılarına
     // last_tick = SystemTime::now()...as_secs() geçiriliyor). UI'da "X saniye önce"
     // yaşı göstermek için şimdiyle farkı alıyoruz; 0 → henüz hiç koşulmadı.
-    let now_epoch_secs: u64 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now_epoch_secs: u64 = crate::core::time::now_epoch_secs();
     let (steps, anomalies): (Vec<PipelineStep>, Vec<AnomalyModel>) = st.guardian.live_pipeline.read().ok()
         .map(|ph| {
             let s = ph.chain_steps.iter().map(|step| PipelineStep {

@@ -346,8 +346,7 @@ impl Engine {
     /// sticky raporlaması yapar. Tek anlık phase ~500ms yaşadığı için 60sn
     /// heartbeat snapshot pencereisinde nadiren yakalanıyordu.
     pub fn mark_execution_epoch(state: &Arc<Mutex<AppState>>) {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let now_secs = crate::core::time::now_epoch_secs();
         if let Ok(st) = state.lock() {
             st.fleet.last_execution_epoch.store(now_secs, Ordering::Relaxed);
         }

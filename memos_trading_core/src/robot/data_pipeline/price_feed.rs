@@ -101,8 +101,7 @@ impl RealtimePriceFeed {
                 pd.volume     = parse(&tick.volume);
                 pd.change_pct = if open > 0.0 { (close - open) / open * 100.0 } else { 0.0 };
                 pd.ts         = chrono::Local::now().format("%H:%M:%S").to_string();
-                pd.last_updated_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis() as u64).unwrap_or(0);
+                pd.last_updated_ms = crate::core::time::now_epoch_millis() as u64;
             });
         }
     }

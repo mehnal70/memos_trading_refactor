@@ -53,9 +53,7 @@ impl Engine {
             // Çıkış kontrolü + heartbeat tick mühürlemesi (her tur)
             let is_stop = {
                 let mut st = state.lock().unwrap();
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs()).unwrap_or(0);
+                let now = crate::core::time::now_epoch_secs();
                 st.fleet.last_loop_tick.store(now, Ordering::Relaxed);
                 // Her turun başında fazı taze "Scanning"e çevir (execute_trade_cycle ve
                 // perform_anomaly_recovery aksiyon yaparsa kendi içinde Executing/Recovering yazar).
@@ -80,8 +78,7 @@ impl Engine {
             // silinmez. Her 60 tick (~30sn) bir kontrol yeter.
             if tick_count.is_multiple_of(60) {
                 let max_age: u64 = env_parse("ANOMALY_MAX_AGE_SECS", 1800);
-                let now_secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let now_secs = crate::core::time::now_epoch_secs();
                 if let Ok(st) = state.lock() {
                     if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
                         let n_purged = pipe.purge_stale_warnings(now_secs, max_age);

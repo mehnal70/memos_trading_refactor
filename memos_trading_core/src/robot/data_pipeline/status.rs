@@ -77,8 +77,7 @@ impl PipelineStatus {
         // Stderr'a düşür ki headless modda root cause analizi için görünür olsun;
         // push_log yalnız TUI panel buffer'ına gider, dosya log'una yansımaz.
         log::warn!("anomaly[{:?}/{:?}] {}", severity, kind, msg);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let now = crate::core::time::now_epoch_secs();
         self.anomalies.push(PipelineAnomalyRuntime {
             severity, kind,
             message: msg,
@@ -126,10 +125,7 @@ impl PipelineStatus {
     /// (UNIX epoch saniye) eşitlenir; bridge.rs "X saniye önce" yaşını oradan
     /// hesaplar. `status` Done/Failed/Skipped olabilir.
     pub fn mark_stage_completed(&mut self, stage: super::canon::PipelineStage, status: StepStatus) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = crate::core::time::now_epoch_secs();
         self.record_step(stage.label(), status, now, 0);
     }
 }

@@ -267,8 +267,7 @@ impl Engine {
             // Periyodik processor (spawn_trail_feedback_processor) bunu evalue eder ve
             // ParameterStore.record_trailing_outcome ile feedback uygular.
             if matches!(reason, ExitReason::TrailingStop) {
-                let now_epoch = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let now_epoch = crate::core::time::now_epoch_secs();
                 enqueue_trail_observation(crate::robot::parameters::PendingTrailObservation {
                     symbol:     symbol.to_string(),
                     strategy:   pos.trade_type.clone(),

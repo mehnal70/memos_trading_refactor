@@ -129,8 +129,7 @@ impl Engine {
 
         // Cooldown denetimi: bir önceki ML trigger'dan beri yeterli süre geçti mi?
         let cooldown_secs: u64 = env_parse("ANOMALY_ML_TRIGGER_COOLDOWN_SECS", 300);
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let now_secs = crate::core::time::now_epoch_secs();
         let last_fired = ANOMALY_ML_LAST_TRIGGER_EPOCH.load(Ordering::Relaxed);
         let armed = last_fired == 0 || now_secs.saturating_sub(last_fired) >= cooldown_secs;
 

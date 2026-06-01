@@ -50,10 +50,8 @@ impl Engine {
         let st_hb = Arc::clone(&state);
         tokio::spawn(async move {
             use crate::robot::data_pipeline::{StepStatus, AnomalySeverity, AnomalyKind};
-            use std::time::{SystemTime, UNIX_EPOCH};
             loop {
-                let now_epoch = SystemTime::now().duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs()).unwrap_or(0);
+                let now_epoch = crate::core::time::now_epoch_secs();
 
                 let stop = {
                     let st = match st_hb.lock() { Ok(s) => s, Err(_) => break };
@@ -218,8 +216,7 @@ impl Engine {
                 // tarafından epoch saniye olarak değerlendiriliyor (now_epoch - last_run).
                 // İki ayrı semantik ayağı karıştırmamak için record_step çağrısına ayrı
                 // bir `now_epoch_secs` geç — yaş gösterimi doğru olur.
-                let now_epoch_secs: u64 = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let now_epoch_secs: u64 = crate::core::time::now_epoch_secs();
                 if let Ok(mut st) = st_px.lock() {
                     if let Ok(mut prices) = st.fleet.live_price.write() {
                         for (sym, px) in &new_prices { prices.insert(sym.clone(), *px); }
@@ -283,8 +280,7 @@ impl Engine {
                 if !fired.is_empty() {
                     // Aşağıdaki record_step çağrıları için epoch saniye. Bridge.rs
                     // "X saniye önce" yaşı bu epoch'tan hesaplar.
-                    let now_secs: u64 = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                    let now_secs: u64 = crate::core::time::now_epoch_secs();
 
                     for name in &fired {
                         let label = format!("trigger:{}", name);
@@ -476,8 +472,7 @@ impl Engine {
                     // record_step epoch saniye bekler; bridge "now - last_run" yaşı bundan
                     // hesaplar. Elapsed semantiği vereyim diye eski hesap "1779…" anomalisi
                     // yaratıyordu.
-                    let now_epoch_secs: u64 = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                    let now_epoch_secs: u64 = crate::core::time::now_epoch_secs();
                     if let Ok(st) = st_pipe.lock() {
                         if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
                             pipe.record_step(
