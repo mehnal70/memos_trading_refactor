@@ -18,6 +18,8 @@ test_results_array.json
 # Runtime data klasörleri (DB binary'leri ~GB ölçeğinde, snapshot, reports, cache)
 data/
 memos_trading_core/data/
+reports/
+memos_trading_core/reports/
 
 # Backtest job runtime çıktıları (her run'da yeniden üretilir)
 config/active_profile.json

@@ -176,6 +176,58 @@ pub fn list_symbols(db_path: &str) -> Result<Vec<String>, crate::MemosTradingErr
     list_symbols_for_market(db_path, None, None)
 }
 
+/// `candles` tablosundaki bir kanonik seri referansı: (exchange, market, symbol, interval)
+/// + bar sayısı. `list_series` döndürür; edge-tarama gibi "DB'de ne var" gezen araçlar için.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandleSeriesRef {
+    pub exchange: String,
+    pub market: String,
+    pub symbol: String,
+    pub interval: String,
+    pub rows: usize,
+}
+
+/// 🗂️ `candles` tablosundaki TÜM benzersiz (exchange, market, symbol, interval) serilerini
+/// bar sayısıyla listeler — DB'de fiilen ne olduğunu tek sorguyla çıkarır (edge-tarama,
+/// envanter). `market_filter = Some("futures")` → yalnız o market. Bar sayısına göre AZALAN
+/// sıralı (en zengin seri başta). Market-SAF (exchange+market kolonlu kanonik şema, Faz 0).
+pub fn list_series(
+    db_path: &str,
+    market_filter: Option<&str>,
+) -> Result<Vec<CandleSeriesRef>, crate::MemosTradingError> {
+    let conn = crate::persistence::open_db(db_path)
+        .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
+    let (sql, has_filter) = match market_filter {
+        Some(_) => (
+            "SELECT exchange, market, symbol, interval, COUNT(*) AS n FROM candles \
+             WHERE market = ?1 GROUP BY exchange, market, symbol, interval ORDER BY n DESC",
+            true,
+        ),
+        None => (
+            "SELECT exchange, market, symbol, interval, COUNT(*) AS n FROM candles \
+             GROUP BY exchange, market, symbol, interval ORDER BY n DESC",
+            false,
+        ),
+    };
+    let mut stmt = conn.prepare(sql)
+        .map_err(|e| crate::MemosTradingError::Database(format!("list_series hazırlık: {}", e)))?;
+    let map_row = |row: &rusqlite::Row| -> rusqlite::Result<CandleSeriesRef> {
+        Ok(CandleSeriesRef {
+            exchange: row.get(0)?,
+            market:   row.get(1)?,
+            symbol:   row.get(2)?,
+            interval: row.get(3)?,
+            rows:     row.get::<_, i64>(4)?.max(0) as usize,
+        })
+    };
+    let rows = if has_filter {
+        stmt.query_map(rusqlite::params![market_filter.unwrap()], map_row)
+    } else {
+        stmt.query_map([], map_row)
+    }.map_err(|e| crate::MemosTradingError::Database(format!("list_series sorgu: {}", e)))?;
+    Ok(rows.flatten().collect())
+}
+
 /// 📊 SEGMENTLİ SEMBOL ARŞİVİ: `candles` tablosunda **belirli market ve/veya
 /// interval'a** uyan benzersiz sembolleri döndürür. Screener gibi çağrıcılar
 /// crypto + BIST karışık havuzu (`candles` ana tablosu) yerine kendi
