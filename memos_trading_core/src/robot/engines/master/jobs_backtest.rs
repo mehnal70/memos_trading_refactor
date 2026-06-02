@@ -289,6 +289,19 @@ impl Engine {
         // Okuma: "trailing yok/gevşek" baseline'ı belirgin geçiyorsa → trailing edge'i
         // yiyor (gevşet/kapat). Üçü de ~0 sharpe/PF~1 → girişlerde edge yok (çıkış ayarı
         // kurtarmaz). active_profile.json["exit_sweep"]'e mühürlenir.
+        // Teşhis taramaları TÜM seride (tek uzun pencere) koşar — 50-barlık WF OOS
+        // pencereleri (üstelik use_htf'te HTF kapısı kısa pencerede bar bulamaz) işlem
+        // üretemeyecek kadar kısa (filtre kapalıyken bile 0 işlem gözlendi). Tam seri =
+        // işlem-bol + canlı HTF davranışına yakın. In-sample iyimser ama "edge VAR MI"
+        // sorusu için yeterli: çok işlemde bile PF<1 ise edge yok demektir.
+        let full_window = vec![crate::robot::backtester::walk_forward::WindowResult {
+            window_idx: 0,
+            in_sample_range: (0, 0),
+            oos_range: (0, candles.len()),
+            best_tp_pct: final_res.best_parameters.take_profit_pct,
+            best_sl_pct: final_res.best_parameters.stop_loss_pct,
+            oos_metrics: Default::default(),
+        }];
         let loose_mult = {
             let nf = crate::robot::parameters::window_noise_floor_pct(&candles);
             match nf { Some(n) if n > 0.0 => (5.0 / n).clamp(1.5, 30.0), _ => exit_trail_mult.max(5.0) }
@@ -299,7 +312,18 @@ impl Engine {
             (format!("gevsek-{:.1}x", loose_mult),        Some(loose_mult),      Some(EXIT_BREAKEVEN_RR)),
         ];
         let exit_sweep = crate::robot::backtester::walk_forward::evaluate_exit_models(
-            &candles, &best_wf_res.windows, &dir_ab_base, &exit_models,
+            &candles, &full_window, &dir_ab_base, &exit_models,
+        );
+
+        // ─── 3b-4) EDGE-FİLTRE TARAMASI (teşhis: huni mi sıkı, sinyal mi kötü) ─────
+        // Yalnız GİRİŞ HUNİSİ (edge_min_score) değişir (çıkış/strateji/param sabit; base'in
+        // canlı çıkış modeli korunur). Çıkış taraması trailing'i eledi → asıl şüpheli giriş.
+        // Okuma: gevşek eşik işlemi belirgin artırıp PF'i 1+ yapıyorsa → huni çok sıkıymış
+        // (gevşet). İşlem artıyor ama PF<1 kalıyorsa → sinyalde edge yok (strateji/feature işi).
+        // active_profile.json["edge_sweep"]'e mühürlenir.
+        let edge_thresholds: Vec<Option<f64>> = vec![None, Some(0.10), Some(0.20), Some(0.30)];
+        let edge_sweep = crate::robot::backtester::walk_forward::evaluate_edge_filters(
+            &candles, &full_window, &dir_ab_base, &edge_thresholds,
         );
 
         // ─── 3c) POOL-WIDE otonom INTERVAL seçimi (hafif OOS skoru) ──────────────
@@ -483,6 +507,15 @@ impl Engine {
                 )).collect();
                 st.push_log(format!("🪤 Çıkış taraması: {}", line.join(" · ")));
             }
+            // Edge-filtre taraması özeti (teşhis): eşik · işlem · win% · beklenti · PF · sharpe.
+            if !edge_sweep.is_empty() {
+                let line: Vec<String> = edge_sweep.iter().map(|s| format!(
+                    "{}[n={} wr={:.0}% E={:+.3} PF={:.2} Sh={:+.2}]",
+                    s.label, s.total_trades, s.win_rate * 100.0,
+                    s.expectancy, s.profit_factor, s.sharpe,
+                )).collect();
+                st.push_log(format!("🚪 Edge-filtre taraması: {}", line.join(" · ")));
+            }
         }
 
         // Profil de diske mühürlenir.
@@ -496,6 +529,20 @@ impl Engine {
             })))
             .collect::<serde_json::Map<_, _>>()
             .into();
+        // Havuzlanmış varyant istatistiklerini JSON'a çevirir (exit_sweep + edge_sweep DRY).
+        let sweep_json = |sweep: &[crate::robot::backtester::walk_forward::ExitModelStats]| {
+            sweep.iter().map(|s| serde_json::json!({
+                "label": s.label,
+                "total_trades": s.total_trades,
+                "win_rate": s.win_rate,
+                "avg_win": s.avg_win,
+                "avg_loss": s.avg_loss,
+                "expectancy": s.expectancy,
+                "profit_factor": if s.profit_factor.is_finite() { serde_json::json!(s.profit_factor) } else { serde_json::json!("inf") },
+                "sharpe": s.sharpe,
+                "total_pnl": s.total_pnl,
+            })).collect::<Vec<_>>()
+        };
         let snapshot = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             serde_json::json!({
@@ -513,17 +560,8 @@ impl Engine {
                 "auto_interval_pool": iv_results.iter()
                     .map(|(sym, iv)| (sym.clone(), serde_json::json!(iv))).collect::<serde_json::Map<_, _>>(),
                 "auto_interval_evaluated": iv_log,
-                "exit_sweep": exit_sweep.iter().map(|s| serde_json::json!({
-                    "label": s.label,
-                    "total_trades": s.total_trades,
-                    "win_rate": s.win_rate,
-                    "avg_win": s.avg_win,
-                    "avg_loss": s.avg_loss,
-                    "expectancy": s.expectancy,
-                    "profit_factor": if s.profit_factor.is_finite() { serde_json::json!(s.profit_factor) } else { serde_json::json!("inf") },
-                    "sharpe": s.sharpe,
-                    "total_pnl": s.total_pnl,
-                })).collect::<Vec<_>>(),
+                "exit_sweep": sweep_json(&exit_sweep),
+                "edge_sweep": sweep_json(&edge_sweep),
                 "sealed_at": chrono::Utc::now().to_rfc3339(),
             })
         };

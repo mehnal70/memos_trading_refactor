@@ -334,10 +334,45 @@ pub struct ExitModelStats {
     pub total_pnl: f64,
 }
 
+/// Bir (hazırlanmış) config varyantını OOS pencerelerinde koşar, tüm işlem PnL'lerini
+/// HAVUZLAR ve beklenti/PF/sharpe/win-rate istatistiğini tek seferde üretir. Config-varyant
+/// A/B'lerinin (çıkış-modeli, edge-filtre, …) paylaşılan çekirdeği — tek-kaynak.
+fn pooled_variant_stats(
+    label: String, candles: &[Candle], windows: &[WindowResult], cfg: &BacktestConfig,
+) -> ExitModelStats {
+    let mut pnls: Vec<f64> = Vec::new();
+    for w in windows {
+        let (s, e) = w.oos_range;
+        if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN { continue; }
+        pnls.extend(backtest_trade_pnls(cfg, &candles[s..e]));
+    }
+    let n = pnls.len();
+    let wins: Vec<f64> = pnls.iter().copied().filter(|&p| p > 0.0).collect();
+    let losses: Vec<f64> = pnls.iter().copied().filter(|&p| p < 0.0).collect();
+    let gp: f64 = wins.iter().sum();
+    let gl: f64 = losses.iter().map(|p| -p).sum();
+    let total_pnl: f64 = pnls.iter().sum();
+    let win_rate = if n > 0 { wins.len() as f64 / n as f64 } else { 0.0 };
+    let avg_win = if !wins.is_empty() { gp / wins.len() as f64 } else { 0.0 };
+    let avg_loss = if !losses.is_empty() { gl / losses.len() as f64 } else { 0.0 };
+    let expectancy = if n > 0 { total_pnl / n as f64 } else { 0.0 };
+    let profit_factor = if gl > f64::EPSILON { gp / gl }
+                        else if gp > 0.0 { f64::INFINITY } else { 0.0 };
+    let sharpe = if n >= 2 {
+        let mean = total_pnl / n as f64;
+        let var = pnls.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
+        let sd = var.sqrt();
+        if sd > f64::EPSILON { mean / sd } else { 0.0 }
+    } else { 0.0 };
+    ExitModelStats {
+        label, total_trades: n, win_rate, avg_win, avg_loss,
+        expectancy, profit_factor, sharpe, total_pnl,
+    }
+}
+
 /// Çıkış-modeli A/B taraması — yalnız ÇIKIŞ ekseni değişir, giriş/strateji/param sabit.
 /// `exits`: `(etiket, atr_trail_mult, breakeven_at_rr)` üçlüleri (None trail = trailing yok).
-/// Her varyant `windows`'un OOS dilimlerinde koşulur, PnL'ler HAVUZLANIR ve istatistik
-/// tek seferde hesaplanır. Döner: girişteki sırayla `ExitModelStats` listesi.
+/// Döner: girişteki sırayla havuzlanmış `ExitModelStats` listesi.
 pub fn evaluate_exit_models(
     candles: &[Candle],
     windows: &[WindowResult],
@@ -345,37 +380,32 @@ pub fn evaluate_exit_models(
     exits: &[(String, Option<f64>, Option<f64>)],
 ) -> Vec<ExitModelStats> {
     exits.iter().map(|(label, trail, be)| {
-        let mut pnls: Vec<f64> = Vec::new();
-        for w in windows {
-            let (s, e) = w.oos_range;
-            if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN { continue; }
-            let mut c = base.clone();
-            c.atr_trail_mult = *trail;
-            c.breakeven_at_rr = *be;
-            pnls.extend(backtest_trade_pnls(&c, &candles[s..e]));
-        }
-        let n = pnls.len();
-        let wins: Vec<f64> = pnls.iter().copied().filter(|&p| p > 0.0).collect();
-        let losses: Vec<f64> = pnls.iter().copied().filter(|&p| p < 0.0).collect();
-        let gp: f64 = wins.iter().sum();
-        let gl: f64 = losses.iter().map(|p| -p).sum();
-        let total_pnl: f64 = pnls.iter().sum();
-        let win_rate = if n > 0 { wins.len() as f64 / n as f64 } else { 0.0 };
-        let avg_win = if !wins.is_empty() { gp / wins.len() as f64 } else { 0.0 };
-        let avg_loss = if !losses.is_empty() { gl / losses.len() as f64 } else { 0.0 };
-        let expectancy = if n > 0 { total_pnl / n as f64 } else { 0.0 };
-        let profit_factor = if gl > f64::EPSILON { gp / gl }
-                            else if gp > 0.0 { f64::INFINITY } else { 0.0 };
-        let sharpe = if n >= 2 {
-            let mean = total_pnl / n as f64;
-            let var = pnls.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
-            let sd = var.sqrt();
-            if sd > f64::EPSILON { mean / sd } else { 0.0 }
-        } else { 0.0 };
-        ExitModelStats {
-            label: label.clone(), total_trades: n, win_rate, avg_win, avg_loss,
-            expectancy, profit_factor, sharpe, total_pnl,
-        }
+        let mut c = base.clone();
+        c.atr_trail_mult = *trail;
+        c.breakeven_at_rr = *be;
+        pooled_variant_stats(label.clone(), candles, windows, &c)
+    }).collect()
+}
+
+/// Edge-filtre A/B taraması — yalnız GİRİŞ HUNİSİ (edge_min_score) değişir, çıkış/strateji/
+/// param sabit (base'in canlı çıkış modeli korunur). Teşhis: huni mi çok sıkı (işlem
+/// kıtlığı → gevşetince PF düzelir) yoksa sinyalde edge mi yok (gevşetince işlem artar
+/// ama PF<1 kalır). `thresholds`: `None` = filtre yok (her Buy açılır), `Some(t)` = edge≥t.
+/// Döner: girişteki sırayla havuzlanmış `ExitModelStats` (label = eşik).
+pub fn evaluate_edge_filters(
+    candles: &[Candle],
+    windows: &[WindowResult],
+    base: &BacktestConfig,
+    thresholds: &[Option<f64>],
+) -> Vec<ExitModelStats> {
+    thresholds.iter().map(|t| {
+        let mut c = base.clone();
+        c.edge_min_score = *t;
+        let label = match t {
+            Some(v) => format!("edge≥{:.2}", v),
+            None => "filtre-yok".to_string(),
+        };
+        pooled_variant_stats(label, candles, windows, &c)
     }).collect()
 }
 
@@ -720,6 +750,32 @@ mod tests {
             // PF inf olabilir (gl=0) ama NaN olmamalı
             assert!(!s.profit_factor.is_nan());
         }
+    }
+
+    #[test]
+    fn evaluate_edge_filters_returns_stats_and_tighter_filter_trades_no_more() {
+        let candles: Vec<Candle> = (0..240).map(|i| {
+            let phase = (i / 8) % 2;
+            let dir = if phase == 0 { 1.0 } else { -1.0 };
+            let base = 100.0 + dir * (i % 8) as f64 * 0.5;
+            let c = base + dir * 0.5;
+            Candle { open: base, high: c.max(base) + 0.6, low: c.min(base) - 0.6, close: c,
+                     volume: 1000.0, symbol: "T".into(), interval: "1h".into(),
+                     ..Default::default() }
+        }).collect();
+        let windows = vec![wnd(0, 60, 4.0, 2.0), wnd(60, 120, 4.0, 2.0),
+                           wnd(120, 180, 4.0, 2.0), wnd(180, 240, 4.0, 2.0)];
+        let thresholds = vec![None, Some(0.10), Some(0.40)];
+        let stats = evaluate_edge_filters(&candles, &windows, &dir_base_cfg(), &thresholds);
+        assert_eq!(stats.len(), 3);
+        assert_eq!(stats[0].label, "filtre-yok");
+        assert_eq!(stats[2].label, "edge≥0.40");
+        // Daha sıkı eşik daha çok işlem AÇMAMALI (monotonluk: filtre yalnız eler).
+        assert!(stats[0].total_trades >= stats[1].total_trades,
+            "filtre-yok ({}) ≥ edge≥0.10 ({})", stats[0].total_trades, stats[1].total_trades);
+        assert!(stats[1].total_trades >= stats[2].total_trades,
+            "edge≥0.10 ({}) ≥ edge≥0.40 ({})", stats[1].total_trades, stats[2].total_trades);
+        for s in &stats { assert!(!s.profit_factor.is_nan() && s.expectancy.is_finite()); }
     }
 
     #[test]
