@@ -23,7 +23,8 @@ impl Engine {
         // Canlı feed'i olmayan borsa sembolleri (örn. BIST) download'a gönderilmez →
         // aksi halde "Veri Format Hatası" log kirliliği. Karar market-agnostik tek nokta:
         // RuntimeTuning.symbol_eligible_for_live (hydrate/price_poll/cycle ile aynı).
-        let (symbols, interval, symbol_interval, db_path, limit, exchange, market) = {
+        let (symbols, interval, symbol_interval, db_path, limit, exchange, market,
+             backfill_enabled, backfill_max_requests) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             let tuning = Arc::clone(&st.tuning);
             let eligible = |s: &str| tuning.symbol_eligible_for_live(s);
@@ -56,7 +57,8 @@ impl Engine {
                 .map(|p| p.symbol_interval.clone()).unwrap_or_default();
             (syms, st.config.interval.clone(), symbol_interval, st.config.db_path.clone(),
              st.config.download_candle_limit.max(50),
-             st.config.exchange.clone(), st.config.market.clone())
+             st.config.exchange.clone(), st.config.market.clone(),
+             tuning.backfill_enabled, tuning.backfill_max_requests)
         };
 
         if symbols.is_empty() {
@@ -87,8 +89,26 @@ impl Engine {
             let iv_secs = crate::robot::data_pipeline::DataNormalizer::parse_interval(&sym_iv).max(1) as i64;
             let last_ms = crate::persistence::reader::last_candle_ts(&db_path, sym, &sym_iv, &market);
             let now_ms = crate::core::time::now_epoch_millis() as i64;
-            let fetch_limit = gap_aware_fetch_limit(last_ms, now_ms, iv_secs, limit);
-            match fetcher.fetch_latest_market(sym, &sym_iv, &market, fetch_limit).await {
+            // Derin gap (>1000 bar geride): startTime-pagination ile gap'in BAŞINDAN ileri
+            // doldur (fetch_latest son-1000 çekip aradaki deliği kalıcı bırakırdı). Sığ
+            // gap/yeni sembol → tek-istek son-N (mevcut Faz 2 yolu, sıfır regresyon).
+            let fetch_fut = match backfill_enabled
+                .then(|| deep_gap_start_ms(last_ms, now_ms, iv_secs))
+                .flatten()
+            {
+                Some(start_ms) => {
+                    push_state_log(state, format!(
+                        "    └─ {} 🕳️ derin gap → backfill (start={}, ≤{}×1000 bar)",
+                        sym, start_ms, backfill_max_requests,
+                    ));
+                    fetcher.fetch_history_market(sym, &sym_iv, &market, start_ms, iv_secs, backfill_max_requests).await
+                }
+                None => {
+                    let fetch_limit = gap_aware_fetch_limit(last_ms, now_ms, iv_secs, limit);
+                    fetcher.fetch_latest_market(sym, &sym_iv, &market, fetch_limit).await
+                }
+            };
+            match fetch_fut {
                 Ok(candles) => {
                     // Başarılı fetch → delisted sayacını sıfırla (geçici hata
                     // sonrası sembol normalleştiyse yanlış pozitif olmasın).
@@ -281,9 +301,51 @@ pub(crate) fn gap_aware_fetch_limit(last_ms: Option<i64>, now_ms: i64, iv_secs: 
     }
 }
 
+/// 🕳️ Derin-gap kararı (Faz 2 follow-up): son kayıt ŞİMDİDEN >1000 bar geride ise
+/// pagination'ın başlayacağı `start_ms`'i (= son mum + 1 interval) döndürür; aksi halde
+/// `None` (tek-istek son-N yolu yeterli — `gap_aware_fetch_limit` zaten kapatır). Kayıt
+/// yoksa (`None`) backfill TETİKLENMEZ: yeni sembolde "derin geçmiş" ≠ "gap", tek-istek
+/// tohumlaması yapılır (deep-history seed ayrı bir mod). Saf/test-edilebilir.
+pub(crate) fn deep_gap_start_ms(last_ms: Option<i64>, now_ms: i64, iv_secs: i64) -> Option<i64> {
+    let last = last_ms?;
+    let step = iv_secs.max(1) * 1000;
+    let missing = (now_ms - last) / step;
+    if missing > 1000 {
+        Some(last + step) // son kayıtlı mumdan bir interval ÖTESİ → üst-üste binme yok
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod download_tests {
-    use super::gap_aware_fetch_limit;
+    use super::{gap_aware_fetch_limit, deep_gap_start_ms};
+
+    #[test]
+    fn deep_gap_triggers_backfill_from_just_after_last() {
+        // 5000 bar (1m) geride → backfill, start = last + 1 interval.
+        let iv = 60i64;
+        let step = iv * 1000;
+        let now = 10_000_000 * step;
+        let last = now - 5000 * step;
+        assert_eq!(deep_gap_start_ms(Some(last), now, iv), Some(last + step));
+    }
+
+    #[test]
+    fn shallow_gap_no_backfill() {
+        // 1000 bar tam → eşik > 1000 değil → None (tek-istek yolu kapatır).
+        let iv = 60i64; let step = iv * 1000;
+        let now = 10_000_000 * step;
+        assert_eq!(deep_gap_start_ms(Some(now - 1000 * step), now, iv), None);
+        // 1001 bar → backfill.
+        assert!(deep_gap_start_ms(Some(now - 1001 * step), now, iv).is_some());
+    }
+
+    #[test]
+    fn no_record_no_backfill() {
+        // Kayıt yok → backfill tetiklenmez (yeni sembol tek-istekle tohumlanır).
+        assert_eq!(deep_gap_start_ms(None, 1_000_000_000, 60), None);
+    }
 
     #[test]
     fn no_record_seeds_with_base() {

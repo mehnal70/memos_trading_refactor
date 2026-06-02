@@ -312,6 +312,16 @@ pub struct RuntimeTuning {
     pub data_max_gap_pct: f64,
     /// Son bar en fazla bu kadar BAR-yaşında olabilir (interval-farkında). Env DATA_GATE_MAX_STALE_BARS.
     pub data_max_stale_bars: u64,
+    /// 🕳️ Derin tarihsel gap backfill (Faz 2 follow-up): son kayıt ŞİMDİDEN >1000 bar
+    /// geride ise `fetch_latest` son-1000'i çekip aradaki deliği kalıcı bırakır. Açıkken
+    /// download job `startTime`-pagination ile gap'in başından ileri doldurur (bounded).
+    /// `true` (default) → veri-doğruluğu; gap'siz seriler backtest/canlı kararını sağlamlaştırır.
+    /// Env `BACKFILL_ENABLED` (0/false/off → kapat).
+    pub backfill_enabled: bool,
+    /// Backfill'in bir cycle'da bir sembol×interval için yapacağı azami istek (her biri
+    /// ≤1000 bar). Tavanı aşan gap sonraki cycle'larda yakınsar → API yükü sınırlı kalır.
+    /// Env `BACKFILL_MAX_REQUESTS` (default 50 → ~50k bar/cycle).
+    pub backfill_max_requests: usize,
 }
 
 impl Default for RuntimeTuning {
@@ -351,6 +361,8 @@ impl Default for RuntimeTuning {
             data_min_rows: 100,
             data_max_gap_pct: 90.0,     // gevşek (mevcut veri ~%22-49 gappy); Faz 2 sonrası sık
             data_max_stale_bars: 10,    // son bar en fazla 10×interval yaşında
+            backfill_enabled: true,     // veri-doğruluğu (gap'i doldur); bounded → güvenli
+            backfill_max_requests: 50,  // 50×1000 = ~50k bar/cycle; büyük gap cycle'larda yakınsar
         }
     }
 }
@@ -420,6 +432,9 @@ impl RuntimeTuning {
             data_min_rows: env_parse("DATA_GATE_MIN_ROWS", d.data_min_rows),
             data_max_gap_pct: env_parse("DATA_GATE_MAX_GAP_PCT", d.data_max_gap_pct),
             data_max_stale_bars: env_parse("DATA_GATE_MAX_STALE_BARS", d.data_max_stale_bars),
+            // Default açık (0/false/off → kapat) — gap doldurma veri-doğruluğu; bounded.
+            backfill_enabled: !matches!(std::env::var("BACKFILL_ENABLED").ok().as_deref(), Some("0") | Some("false") | Some("off")),
+            backfill_max_requests: env_parse("BACKFILL_MAX_REQUESTS", d.backfill_max_requests).max(1),
         }
     }
 
