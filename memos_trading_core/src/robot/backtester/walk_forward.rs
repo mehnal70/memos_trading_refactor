@@ -669,6 +669,37 @@ mod tests {
         println!("Beklenti: 1m hamPnL yanıltıcı olabilir; pooledPF 1h'ı üstün göstermeli.\n");
     }
 
+    /// 🔬 KOL B TEŞHİS (gerçek DB, #[ignore]): fee düşürmek (maker-limit) 1h PF'ini >1.0'a
+    /// taşıyabilir mi? SIFIR-fee tavanı PF<1.0 ise hiçbir fee optimizasyonu kurtaramaz =
+    /// sorun gross edge, Kol B beyhude. Elle:
+    /// `cargo test -p memos_trading_core kol_b_fee_sensitivity -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn kol_b_fee_sensitivity() {
+        let db = ["../data/trader.db", "data/trader.db"].into_iter()
+            .find(|p| std::path::Path::new(p).exists()).expect("trader.db yok");
+        let (sym, market, tf) = ("BTCUSDT", "futures", "1h");
+        let base = BacktestConfig {
+            symbol: sym.into(), interval: tf.into(), initial_balance: 10_000.0,
+            max_position_size: 1.0, take_profit_pct: 4.0, stop_loss_pct: 2.0,
+            strategy_name: "EMA_CROSSOVER".into(), edge_min_score: Some(0.20),
+            breakeven_at_rr: Some(1.0), atr_trail_mult: Some(2.0),
+            ..Default::default()
+        };
+        let candles = crate::persistence::reader::read_candles_market(db, sym, tf, market, 5000)
+            .unwrap_or_default();
+        let windows = wf_oos_windows(candles.len(), 300, 100, 100);
+        println!("\n=== Kol B teşhis: {sym} {market} {tf} — fee duyarlılığı (pooled PF) ===");
+        // (etiket, simetrik commission_pct). 0.0003 ≈ maker-giriş(0.0002)+taker-çıkış(0.0004) ort.
+        for (label, c) in [("taker 0.0004", 0.0004), ("maker-ort 0.0003", 0.0003),
+                           ("maker 0.0002", 0.0002), ("SIFIR (tavan)", 0.0)] {
+            let mut cfg = base.clone(); cfg.commission_pct = c;
+            let pf = score_config_over_windows(&cfg, &candles, &windows);
+            println!("  {label:<18}: pooledPF={pf:>6.3}");
+        }
+        println!("Karar: SIFIR-fee PF<1.0 ise Kol B fee'yle PF>1.0 yapamaz (gross edge sorunu).\n");
+    }
+
     fn wnd(start: usize, end: usize, tp: f64, sl: f64) -> WindowResult {
         WindowResult {
             window_idx: 0,
