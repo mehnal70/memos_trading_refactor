@@ -282,6 +282,26 @@ impl Engine {
             regime_min_samples,
         );
 
+        // ─── 3b-3) ÇIKIŞ-MODELİ TARAMASI (teşhis: trailing mi suçlu, edge mi yok) ──
+        // Yalnız ÇIKIŞ ekseni değişir (giriş/strateji/param sabit = global best). Üç
+        // model OOS pencerelerinde havuzlanıp karşılaştırılır:
+        //   • trailing yok (TP/SL) · baseline (~temsili mult) · gevşek (target=5.0)
+        // Okuma: "trailing yok/gevşek" baseline'ı belirgin geçiyorsa → trailing edge'i
+        // yiyor (gevşet/kapat). Üçü de ~0 sharpe/PF~1 → girişlerde edge yok (çıkış ayarı
+        // kurtarmaz). active_profile.json["exit_sweep"]'e mühürlenir.
+        let loose_mult = {
+            let nf = crate::robot::parameters::window_noise_floor_pct(&candles);
+            match nf { Some(n) if n > 0.0 => (5.0 / n).clamp(1.5, 30.0), _ => exit_trail_mult.max(5.0) }
+        };
+        let exit_models: Vec<(String, Option<f64>, Option<f64>)> = vec![
+            ("trailing-yok".into(),                       None,                  Some(EXIT_BREAKEVEN_RR)),
+            (format!("baseline-{:.1}x", exit_trail_mult), Some(exit_trail_mult), Some(EXIT_BREAKEVEN_RR)),
+            (format!("gevsek-{:.1}x", loose_mult),        Some(loose_mult),      Some(EXIT_BREAKEVEN_RR)),
+        ];
+        let exit_sweep = crate::robot::backtester::walk_forward::evaluate_exit_models(
+            &candles, &best_wf_res.windows, &dir_ab_base, &exit_models,
+        );
+
         // ─── 3c) POOL-WIDE otonom INTERVAL seçimi (hafif OOS skoru) ──────────────
         // Her pool sembolü için aday TF'ler (env AUTO_INTERVAL_CANDIDATES, default 15m,1h)
         // arasında HAFİF skor: wf_oos_windows + score_config_over_windows (param SABİT =
@@ -454,6 +474,15 @@ impl Engine {
                 entries.sort();
                 st.push_log(format!("🎚  Rejim katmanları yazıldı: {}", entries.join(" | ")));
             }
+            // Çıkış-modeli taraması özeti (teşhis): model · işlem · win% · beklenti · PF · sharpe.
+            if !exit_sweep.is_empty() {
+                let line: Vec<String> = exit_sweep.iter().map(|s| format!(
+                    "{}[n={} wr={:.0}% E={:+.3} PF={:.2} Sh={:+.2}]",
+                    s.label, s.total_trades, s.win_rate * 100.0,
+                    s.expectancy, s.profit_factor, s.sharpe,
+                )).collect();
+                st.push_log(format!("🪤 Çıkış taraması: {}", line.join(" · ")));
+            }
         }
 
         // Profil de diske mühürlenir.
@@ -484,6 +513,17 @@ impl Engine {
                 "auto_interval_pool": iv_results.iter()
                     .map(|(sym, iv)| (sym.clone(), serde_json::json!(iv))).collect::<serde_json::Map<_, _>>(),
                 "auto_interval_evaluated": iv_log,
+                "exit_sweep": exit_sweep.iter().map(|s| serde_json::json!({
+                    "label": s.label,
+                    "total_trades": s.total_trades,
+                    "win_rate": s.win_rate,
+                    "avg_win": s.avg_win,
+                    "avg_loss": s.avg_loss,
+                    "expectancy": s.expectancy,
+                    "profit_factor": if s.profit_factor.is_finite() { serde_json::json!(s.profit_factor) } else { serde_json::json!("inf") },
+                    "sharpe": s.sharpe,
+                    "total_pnl": s.total_pnl,
+                })).collect::<Vec<_>>(),
                 "sealed_at": chrono::Utc::now().to_rfc3339(),
             })
         };

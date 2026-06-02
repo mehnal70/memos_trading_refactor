@@ -308,6 +308,77 @@ pub(crate) fn backtest_gross(cfg: &BacktestConfig, slice: &[Candle]) -> (f64, f6
     }
 }
 
+/// Bir cfg'i dilimde koşar; tek tek işlem PnL'lerini döner (boş/hata → []).
+/// Çıkış-modeli taraması pencereler boyunca tüm PnL'leri havuzlayıp beklenti/PF/
+/// sharpe hesaplamak için kullanır (tek-kaynak istatistik).
+pub(crate) fn backtest_trade_pnls(cfg: &BacktestConfig, slice: &[Candle]) -> Vec<f64> {
+    Backtester::new(cfg.clone()).run(slice)
+        .map(|r| r.trades.iter().map(|t| t.pnl).collect())
+        .unwrap_or_default()
+}
+
+/// Bir çıkış-modeli varyantının havuzlanmış (tüm OOS pencereleri birleştirilmiş)
+/// performans istatistikleri. R/R teşhisi için: trailing'in edge'i mi yediği
+/// (gevşet/kapat → düzelir) yoksa girişlerde edge'in mi olmadığı (hiçbir çıkış
+/// kurtarmaz) sorusunu sayıyla ayırır.
+#[derive(Debug, Clone)]
+pub struct ExitModelStats {
+    pub label: String,
+    pub total_trades: usize,
+    pub win_rate: f64,      // 0..1
+    pub avg_win: f64,
+    pub avg_loss: f64,      // pozitif
+    pub expectancy: f64,    // işlem başına ortalama PnL
+    pub profit_factor: f64,
+    pub sharpe: f64,        // işlem-başı PnL ortalaması / std (yıllıklaştırılmamış proxy)
+    pub total_pnl: f64,
+}
+
+/// Çıkış-modeli A/B taraması — yalnız ÇIKIŞ ekseni değişir, giriş/strateji/param sabit.
+/// `exits`: `(etiket, atr_trail_mult, breakeven_at_rr)` üçlüleri (None trail = trailing yok).
+/// Her varyant `windows`'un OOS dilimlerinde koşulur, PnL'ler HAVUZLANIR ve istatistik
+/// tek seferde hesaplanır. Döner: girişteki sırayla `ExitModelStats` listesi.
+pub fn evaluate_exit_models(
+    candles: &[Candle],
+    windows: &[WindowResult],
+    base: &BacktestConfig,
+    exits: &[(String, Option<f64>, Option<f64>)],
+) -> Vec<ExitModelStats> {
+    exits.iter().map(|(label, trail, be)| {
+        let mut pnls: Vec<f64> = Vec::new();
+        for w in windows {
+            let (s, e) = w.oos_range;
+            if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN { continue; }
+            let mut c = base.clone();
+            c.atr_trail_mult = *trail;
+            c.breakeven_at_rr = *be;
+            pnls.extend(backtest_trade_pnls(&c, &candles[s..e]));
+        }
+        let n = pnls.len();
+        let wins: Vec<f64> = pnls.iter().copied().filter(|&p| p > 0.0).collect();
+        let losses: Vec<f64> = pnls.iter().copied().filter(|&p| p < 0.0).collect();
+        let gp: f64 = wins.iter().sum();
+        let gl: f64 = losses.iter().map(|p| -p).sum();
+        let total_pnl: f64 = pnls.iter().sum();
+        let win_rate = if n > 0 { wins.len() as f64 / n as f64 } else { 0.0 };
+        let avg_win = if !wins.is_empty() { gp / wins.len() as f64 } else { 0.0 };
+        let avg_loss = if !losses.is_empty() { gl / losses.len() as f64 } else { 0.0 };
+        let expectancy = if n > 0 { total_pnl / n as f64 } else { 0.0 };
+        let profit_factor = if gl > f64::EPSILON { gp / gl }
+                            else if gp > 0.0 { f64::INFINITY } else { 0.0 };
+        let sharpe = if n >= 2 {
+            let mean = total_pnl / n as f64;
+            let var = pnls.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
+            let sd = var.sqrt();
+            if sd > f64::EPSILON { mean / sd } else { 0.0 }
+        } else { 0.0 };
+        ExitModelStats {
+            label: label.clone(), total_trades: n, win_rate, avg_win, avg_loss,
+            expectancy, profit_factor, sharpe, total_pnl,
+        }
+    }).collect()
+}
+
 /// `cfg`'i tüm OOS pencere dilimlerinde koşup toplam PnL döndürür — her pencere
 /// bağımsız (look-ahead'siz). `MIN_EVAL_WINDOW_LEN` altı pencereler atlanır.
 /// Sembol-interval değerlendirmesi bunu aday TF başına kullanır.
@@ -619,6 +690,36 @@ mod tests {
         let empty = evaluate_regime_trail(&candles, &windows, classify, &dir_base_cfg(),
             &[], 1);
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn evaluate_exit_models_returns_stats_per_model_in_order() {
+        let candles: Vec<Candle> = (0..240).map(|i| {
+            let phase = (i / 8) % 2;
+            let dir = if phase == 0 { 1.0 } else { -1.0 };
+            let base = 100.0 + dir * (i % 8) as f64 * 0.5;
+            let c = base + dir * 0.5;
+            Candle { open: base, high: c.max(base) + 0.6, low: c.min(base) - 0.6, close: c,
+                     volume: 1000.0, symbol: "T".into(), interval: "1h".into(),
+                     ..Default::default() }
+        }).collect();
+        let windows = vec![wnd(0, 60, 4.0, 2.0), wnd(60, 120, 4.0, 2.0),
+                           wnd(120, 180, 4.0, 2.0), wnd(180, 240, 4.0, 2.0)];
+        let exits = vec![
+            ("trailing-yok".to_string(), None,      Some(1.0)),
+            ("baseline".to_string(),     Some(2.0), Some(1.0)),
+            ("gevsek".to_string(),       Some(8.0), Some(1.0)),
+        ];
+        let stats = evaluate_exit_models(&candles, &windows, &dir_base_cfg(), &exits);
+        assert_eq!(stats.len(), 3, "her model için bir kayıt");
+        assert_eq!(stats[0].label, "trailing-yok");
+        assert_eq!(stats[2].label, "gevsek");
+        for s in &stats {
+            assert!(s.expectancy.is_finite() && s.total_pnl.is_finite());
+            assert!((0.0..=1.0).contains(&s.win_rate));
+            // PF inf olabilir (gl=0) ama NaN olmamalı
+            assert!(!s.profit_factor.is_nan());
+        }
     }
 
     #[test]
