@@ -35,6 +35,10 @@ impl Engine {
         Self::hydrate_account_state_from_db(&state);
         Self::hydrate_symbol_status_from_db(&state);
 
+        // 0d. EDGE SEED GÖRÜNÜRLÜĞÜ: EDGE_SEED_REPORT ile yüklenen per-symbol stratejileri
+        //     TUI state-log paneline düşür (TUI'de logger backend yok → log::info! görünmez).
+        Self::report_edge_seed(&state);
+
         // 1. INFRASTRUCTURE FLEET (WS, Diagnostic, Pipeline)
         Self::spawn_infrastructure_fleet(Arc::clone(&state)).await;
 

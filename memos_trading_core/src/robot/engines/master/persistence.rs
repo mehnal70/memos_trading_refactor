@@ -61,6 +61,31 @@ impl Engine {
         }
     }
 
+    /// 🌱 edge_scan SEED görünürlüğü (TUI state-log). `ParameterStore.symbol_strategy` boot'ta
+    /// YALNIZ seed'den dolar (ParameterStore tek-kaynak `from_env`, disk reload yok; backtest job
+    /// henüz koşmadı) → buradaki sayım = seed'lenen sembol sayısı. TUI'de logger backend yok →
+    /// `log::info!` görünmez; bu state-log paneline düşer (rtc_tui + headless ortak). EDGE_SEED_REPORT
+    /// set ama 0 yüklendiyse "WF-onaylı aday yok" notu (sessiz-0 yerine görünür sinyal). [[project_edge_scan]].
+    pub(crate) fn report_edge_seed(state: &Arc<Mutex<AppState>>) {
+        let seed_path = std::env::var("EDGE_SEED_REPORT").ok().filter(|s| !s.trim().is_empty());
+        let entries: Vec<(String, String)> = match state.lock() {
+            Ok(st) => st.brain.parameters.read().ok()
+                .map(|p| p.symbol_strategy.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                .unwrap_or_default(),
+            Err(_) => return,
+        };
+        if !entries.is_empty() {
+            let mut preview: Vec<String> = entries.iter().take(8).map(|(s, st)| format!("{s}→{st}")).collect();
+            if entries.len() > 8 { preview.push(format!("+{} daha", entries.len() - 8)); }
+            push_state_log(state, format!(
+                "🌱 edge seed: {} sembol→strateji yüklendi ({})", entries.len(), preview.join(", ")));
+        } else if let Some(path) = seed_path {
+            push_state_log(state, format!(
+                "🌱 edge seed: '{}' okundu ama 0 WF-onaylı aday → symbol_strategy boş (global/auto sürer)", path));
+        }
+        // EDGE_SEED_REPORT yokken ve map boşken: log YOK (gürültüsüz).
+    }
+
     /// Boot sırasında önceki run'un `open_positions_snapshot` tablosundan
     /// açık pozisyonları okur ve `live_positions` HashMap'ine hidrate eder.
     /// - Tablo yoksa / kayıt yoksa: sessiz geçer (cold-start).
