@@ -29,7 +29,8 @@ impl Engine {
 
         // 1) State'ten yapı yapısı + kapasite + pinned + strateji + blocked + multi-TF.
         let (db_path, market, interval, pinned, blocked, active_strategy, capital,
-             max_workers, current_workers, multi_tf_enabled, multi_tf_min) = {
+             max_workers, current_workers, multi_tf_enabled, multi_tf_min,
+             data_gate_enabled, health_th) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             let strat = st.brain.live_strategy.read()
                 .map(|s| s.clone()).unwrap_or_else(|_| "MA_CROSSOVER".to_string());
@@ -56,6 +57,8 @@ impl Engine {
                 current,
                 mtf_on,
                 mtf_min,
+                st.tuning.data_gate_enabled,
+                st.tuning.health_thresholds(),
             )
         };
 
@@ -108,9 +111,18 @@ impl Engine {
         //    htf_aware ise her aday için HTF mumları yüklenip composite'e trend
         //    hizası katılır (sinyal yoluyla aynı load_htf_candles + SMA(10/30)).
         use rayon::prelude::*;
+        // Faz 3 veri-sağlık kapısı: bayat/sparse/gappy sembol×interval havuza girmez.
+        let unhealthy_skips = std::sync::atomic::AtomicUsize::new(0);
         let mut scored: Vec<(String, ScreenerScore)> = pool.par_iter().filter_map(|sym| {
             let candles = crate::persistence::reader::read_candles_market(&db_path, sym, &interval, &market, limit).ok()?;
             if candles.len() < 50 { return None; }
+            if data_gate_enabled {
+                let h = crate::robot::data_pipeline::CandleHealth::from_candles(&candles, &interval);
+                if !h.is_healthy(&health_th, &interval) {
+                    unhealthy_skips.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return None;
+                }
+            }
             let htf_vec = if htf_aware {
                 crate::robot::data_pipeline::load_htf_candles(&db_path, sym, &interval, &market, multi_tf_min)
             } else {
@@ -121,6 +133,14 @@ impl Engine {
             if s.avg_volume < min_volume { return None; }
             Some((sym.clone(), s))
         }).collect();
+
+        let n_unhealthy = unhealthy_skips.load(std::sync::atomic::Ordering::Relaxed);
+        if n_unhealthy > 0 {
+            push_state_log(state, format!(
+                "🩺 Veri-sağlık kapısı: {} sembol elendi (bayat/sparse/gappy; min_rows={} max_gap={:.0}% max_stale={}bar)",
+                n_unhealthy, health_th.min_rows, health_th.max_gap_pct, health_th.max_stale_bars,
+            ));
+        }
 
         // 5) Composite skoruna göre sıralı (büyükten küçüğe).
         scored.sort_by(|a, b| b.1.composite.partial_cmp(&a.1.composite)

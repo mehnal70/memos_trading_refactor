@@ -300,6 +300,18 @@ pub struct RuntimeTuning {
     /// teyit shorting'i kâra çeviren bileşen. Default false (opt-in; WF+slippage doğrulaması
     /// önce). Env `REGIME_DIRECTIONAL`. [[project_autonomy_backlog]] [[project_adaptive_regime]].
     pub regime_directional: bool,
+    /// 🩺 Veri-sağlık kapısı (Faz 3): otonom işler (screener pool, backtest) bu eşikleri
+    /// geçmeyen sembol×interval'i atlar → bayat/sparse veride yanıltıcı verdikt yok.
+    /// `data_gate_enabled=false` (default) → kapı kapalı (sıfır regresyon). Açıkken
+    /// metrikler ZATEN yüklü mumlardan hesaplanır (ek IO yok). Env DATA_GATE_ENABLED.
+    pub data_gate_enabled: bool,
+    /// Asgari bar sayısı (altı → sağlıksız). Env DATA_GATE_MIN_ROWS.
+    pub data_min_rows: usize,
+    /// İzin verilen maksimum gap% (mevcut veri gappy → gevşek default; Faz 2 sonrası
+    /// sıkılaştırılır). Env DATA_GATE_MAX_GAP_PCT.
+    pub data_max_gap_pct: f64,
+    /// Son bar en fazla bu kadar BAR-yaşında olabilir (interval-farkında). Env DATA_GATE_MAX_STALE_BARS.
+    pub data_max_stale_bars: u64,
 }
 
 impl Default for RuntimeTuning {
@@ -335,6 +347,10 @@ impl Default for RuntimeTuning {
             reentry_cooldown_secs: 0,
             regime_adaptive_pctl: None,
             regime_directional: false,
+            data_gate_enabled: false,   // opt-in (sıfır regresyon); açınca bayat/sparse elenir
+            data_min_rows: 100,
+            data_max_gap_pct: 90.0,     // gevşek (mevcut veri ~%22-49 gappy); Faz 2 sonrası sık
+            data_max_stale_bars: 10,    // son bar en fazla 10×interval yaşında
         }
     }
 }
@@ -400,6 +416,20 @@ impl RuntimeTuning {
                 .and_then(|s| s.parse::<f64>().ok())
                 .filter(|p| p.is_finite() && *p > 0.0 && *p < 1.0),
             regime_directional: env_truthy("REGIME_DIRECTIONAL"),
+            data_gate_enabled: env_truthy("DATA_GATE_ENABLED"),
+            data_min_rows: env_parse("DATA_GATE_MIN_ROWS", d.data_min_rows),
+            data_max_gap_pct: env_parse("DATA_GATE_MAX_GAP_PCT", d.data_max_gap_pct),
+            data_max_stale_bars: env_parse("DATA_GATE_MAX_STALE_BARS", d.data_max_stale_bars),
+        }
+    }
+
+    /// Faz 3 veri-sağlık eşikleri (HealthThresholds). `data_gate_enabled` ile kapı açık mı
+    /// ayrı kontrol edilir; bu yalnız eşik değerlerini paketler.
+    pub fn health_thresholds(&self) -> crate::robot::data_pipeline::HealthThresholds {
+        crate::robot::data_pipeline::HealthThresholds {
+            min_rows: self.data_min_rows,
+            max_gap_pct: self.data_max_gap_pct,
+            max_stale_bars: self.data_max_stale_bars,
         }
     }
 

@@ -10,13 +10,14 @@ impl Engine {
     pub(crate) fn run_backtest_job(state: &Arc<Mutex<AppState>>) -> std::result::Result<(), String> {
         log::info!("🔬 E2: Walk-Forward Backtest başlatıldı (grid: 6×4×3)...");
 
-        let (symbol, interval, db_path, capital, use_htf, market) = {
+        let (symbol, interval, db_path, capital, use_htf, market, data_gate, health_th) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             // Backtest, canlının multi-TF'ini aynalasın: multi_tf.enabled açıksa WF
             // seçimi + param araması da HTF filtresini görür (canlı ile tek-davranış).
             let use_htf = st.brain.parameters.read().map(|p| p.multi_tf.enabled).unwrap_or(false);
             (st.config.symbol.clone(), st.config.interval.clone(),
-             st.config.db_path.clone(), st.finance.equity, use_htf, st.config.market.clone())
+             st.config.db_path.clone(), st.finance.equity, use_htf, st.config.market.clone(),
+             st.tuning.data_gate_enabled, st.tuning.health_thresholds())
         };
 
         // Giriş kalitesi edge filtresi (#4): backtest, canlı process_symbol_cycle'ın
@@ -71,6 +72,16 @@ impl Engine {
                 "yetersiz mum verisi: {} mum (walk-forward için ≥{} gerekli)",
                 candles.len(), wf_min,
             ));
+        }
+        // Faz 3 veri-sağlık kapısı: bayat/gappy veride backtest = yanıltıcı verdikt → atla.
+        if data_gate {
+            let h = crate::robot::data_pipeline::CandleHealth::from_candles(&candles, &interval);
+            if !h.is_healthy(&health_th, &interval) {
+                return Err(format!(
+                    "veri-sağlık kapısı: {} {} atlandı (satır={} gap={:.0}% bayat={}s)",
+                    symbol, interval, h.rows, h.gap_pct, h.stale_secs,
+                ));
+            }
         }
 
         // ─── Canlı ÇIKIŞ MODELİ (TP/SL re-opt) ────────────────────────────────

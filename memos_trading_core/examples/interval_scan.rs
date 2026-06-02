@@ -25,6 +25,7 @@
 use memos_trading_core::core::types::Candle;
 use memos_trading_core::persistence::reader::read_candles_market;
 use memos_trading_core::robot::backtester::{Backtester, BacktestConfig, ParameterOptimizer};
+use memos_trading_core::robot::data_pipeline::CandleHealth;
 use memos_trading_core::robot::parameters::window_noise_floor_pct;
 use memos_trading_core::robot::strategies::default_registry;
 
@@ -72,14 +73,13 @@ fn main() {
     println!("   edge≥{EDGE_MIN} · breakeven@RR {BREAKEVEN_RR} · tek-TF · holdout %70 IS / %30 OOS · canlı-temsili trailing\n");
 
     let pool = default_registry().canonical_pool();
-    let now = chrono::Utc::now();
     let mut results: Vec<IntervalResult> = Vec::new();
 
     for iv in &intervals {
-        let Some(sec) = interval_secs(iv) else {
+        if interval_secs(iv).is_none() {
             println!("• {iv:<4} → bilinmeyen interval, atlandı");
             continue;
-        };
+        }
         let candles: Vec<Candle> = match read_candles_market(&db_path, &symbol, iv, market, limit) {
             Ok(c) => c,
             Err(e) => { println!("• {iv:<4} → okuma hatası: {e}"); continue; }
@@ -89,13 +89,10 @@ fn main() {
             println!("• {iv:<4} → veri yok ({n} mum)");
             continue;
         }
-        // Veri sağlığı: yüklenen (en taze) pencerenin gap%'i + bayatlık.
-        let first_ts = candles.first().unwrap().timestamp;
-        let last_ts = candles.last().unwrap().timestamp;
-        let span = (last_ts - first_ts).num_seconds().max(1);
-        let expected = (span / sec) + 1;
-        let gap_pct = (1.0 - n as f64 / expected as f64).clamp(0.0, 1.0) * 100.0;
-        let stale_days = (now - last_ts).num_seconds() as f64 / 86_400.0;
+        // Veri sağlığı: runtime kapısıyla TEK KAYNAK (CandleHealth::from_candles).
+        let health = CandleHealth::from_candles(&candles, iv);
+        let gap_pct = health.gap_pct;
+        let stale_days = health.stale_secs as f64 / 86_400.0;
 
         if n < MIN_CANDLES {
             println!("• {iv:<4} → n={n} gap={gap_pct:.0}% bayat={stale_days:.1}g · yetersiz veri (<{MIN_CANDLES}), tarama atlandı");

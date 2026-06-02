@@ -10,6 +10,7 @@ pub mod orchestrator; // Merkezi veri orkestratörü (Asıl İşçi Motor)
 pub mod status;       // Pipeline çalışma zamanı durumu (chain_steps + anomalies)
 pub mod canon;        // 7 kanonik faz: ingest → extract → eval → risk → execute → learn → optimize
 pub mod htf_loader;   // Multi-TF (Faz B): HTF mum yükleyici (DB + 1m→HTF fallback)
+pub mod health;       // Faz 3: candle veri-sağlık kapısı (CandleHealth + HealthThresholds)
 
 // Kütüphane geneline (prelude / lib.rs) kolay erişim için re-export mühürleri
 pub use cache::CandleCache;
@@ -22,3 +23,4 @@ pub use status::{PipelineStatus, PipelineStepRuntime, PipelineAnomalyRuntime,
                  StepStatus, AnomalySeverity, AnomalyKind};
 pub use canon::PipelineStage;
 pub use htf_loader::{load_htf_candles, aggregate_1m_to, aggregate_to, HTF_MIN_REQUIRED};
+pub use health::{CandleHealth, HealthThresholds};
