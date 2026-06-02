@@ -324,6 +324,17 @@ fn read_candles_filtered(
     Ok(candles)
 }
 
+/// Bir (symbol, interval, market) serisinin en yeni mum timestamp'i (epoch ms) — gap-farkında
+/// download için (Faz 2). Kayıt yoksa None. MAX(timestamp) tek-satır, hızlı (idx_candles_pk).
+pub fn last_candle_ts(db_path: &str, symbol: &str, interval: &str, market: &str) -> Option<i64> {
+    let conn = crate::persistence::open_db(db_path).ok()?;
+    conn.query_row(
+        "SELECT MAX(timestamp) FROM candles WHERE symbol=?1 AND interval=?2 AND market=?3",
+        params![symbol, interval, market],
+        |row| row.get::<_, Option<i64>>(0),
+    ).ok().flatten()
+}
+
 /// 🗂️ Sembol-statü registry'sini DB'den okur (boot hydrate). Tablo henüz yoksa boş
 /// döner (ilk çalıştırmada refresh job doldurana kadar). Dönen (symbol, status) listesi
 /// `set_symbol_statuses` ile cache'e yüklenir.

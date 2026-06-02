@@ -23,7 +23,7 @@ impl Engine {
         // Canlı feed'i olmayan borsa sembolleri (örn. BIST) download'a gönderilmez →
         // aksi halde "Veri Format Hatası" log kirliliği. Karar market-agnostik tek nokta:
         // RuntimeTuning.symbol_eligible_for_live (hydrate/price_poll/cycle ile aynı).
-        let (symbols, interval, symbol_interval, db_path, limit) = {
+        let (symbols, interval, symbol_interval, db_path, limit, exchange, market) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             let tuning = Arc::clone(&st.tuning);
             let eligible = |s: &str| tuning.symbol_eligible_for_live(s);
@@ -55,7 +55,8 @@ impl Engine {
             let symbol_interval = st.brain.parameters.read().ok()
                 .map(|p| p.symbol_interval.clone()).unwrap_or_default();
             (syms, st.config.interval.clone(), symbol_interval, st.config.db_path.clone(),
-             st.config.download_candle_limit.max(50))
+             st.config.download_candle_limit.max(50),
+             st.config.exchange.clone(), st.config.market.clone())
         };
 
         if symbols.is_empty() {
@@ -80,7 +81,14 @@ impl Engine {
         for sym in &symbols {
             // Per-sembol otonom interval; map'te yoksa config.interval (sıfır regresyon).
             let sym_iv = symbol_interval.get(sym).cloned().unwrap_or_else(|| interval.clone());
-            match fetcher.fetch_latest(sym, &sym_iv, limit).await {
+            // Faz 2 gap-farkında çekim: son kayıtlı bardan ŞİMDİYE kadar eksik bar kadar
+            // (tampon + base limit; Binance tek-istek tavanı 1000) çek → forward gap kapanır.
+            // Kayıt yoksa base limit ile tohumla. Market-SAF son ts (Faz 0+1).
+            let iv_secs = crate::robot::data_pipeline::DataNormalizer::parse_interval(&sym_iv).max(1) as i64;
+            let last_ms = crate::persistence::reader::last_candle_ts(&db_path, sym, &sym_iv, &market);
+            let now_ms = crate::core::time::now_epoch_millis() as i64;
+            let fetch_limit = gap_aware_fetch_limit(last_ms, now_ms, iv_secs, limit);
+            match fetcher.fetch_latest_market(sym, &sym_iv, &market, fetch_limit).await {
                 Ok(candles) => {
                     // Başarılı fetch → delisted sayacını sıfırla (geçici hata
                     // sonrası sembol normalleştiyse yanlış pozitif olmasın).
@@ -90,6 +98,8 @@ impl Engine {
                     // 3) SQLite yazımı senkron → spawn_blocking
                     let db_path_clone = db_path.clone();
                     let candles_clone = candles.clone();
+                    let exchange_c = exchange.clone();
+                    let market_c = market.clone();
                     // Yazımı gerçekten say + ilk hatayı yüzeye çıkar (eskiden `let _ =` ile
                     // yutuluyordu → şema uyumsuzluğunda sahte "✓ N mum yazıldı" basılıyordu).
                     let write_result = tokio::task::spawn_blocking(move || -> std::result::Result<(usize, Option<String>), String> {
@@ -102,7 +112,7 @@ impl Engine {
                         let mut written = 0usize;
                         let mut first_err: Option<String> = None;
                         for c in &candles_clone {
-                            match crate::persistence::writer::save_candle(&conn, "binance", "spot", c) {
+                            match crate::persistence::writer::save_candle(&conn, &exchange_c, &market_c, c) {
                                 Ok(()) => written += 1,
                                 Err(e) => if first_err.is_none() { first_err = Some(e.to_string()); },
                             }
@@ -150,16 +160,17 @@ impl Engine {
                             let htf_interval = crate::robot::data_pipeline::DataPipeline::get_htf_interval(&sym_iv);
                             if download_htf && htf_interval != sym_iv {
                                 let htf_limit = (limit / 4).max(50);
-                                match fetcher.fetch_latest(sym, htf_interval, htf_limit).await {
+                                match fetcher.fetch_latest_market(sym, htf_interval, &market, htf_limit).await {
                                     Ok(htf_candles) if !htf_candles.is_empty() => {
                                         let htf_n = htf_candles.len();
                                         let db2 = db_path.clone();
                                         let htf_clone = htf_candles.clone();
+                                        let (ex2, mk2) = (exchange.clone(), market.clone());
                                         let _ = tokio::task::spawn_blocking(move || {
                                             if let Ok(conn) = crate::persistence::open_db(&db2) {
                                                 let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
                                                 for c in &htf_clone {
-                                                    let _ = crate::persistence::writer::save_candle(&conn, "binance", "spot", c);
+                                                    let _ = crate::persistence::writer::save_candle(&conn, &ex2, &mk2, c);
                                                 }
                                             }
                                         }).await;
@@ -208,15 +219,16 @@ impl Engine {
             for sym in &symbols {
                 let sym_iv = symbol_interval.get(sym).cloned().unwrap_or_else(|| interval.clone());
                 for cand in auto_iv_candidates.iter().filter(|c| **c != sym_iv) {
-                    match fetcher.fetch_latest(sym, cand, limit).await {
+                    match fetcher.fetch_latest_market(sym, cand, &market, limit).await {
                         Ok(c) if !c.is_empty() => {
                             let db2 = db_path.clone();
                             let cc = c.clone();
+                            let (ex2, mk2) = (exchange.clone(), market.clone());
                             let _ = tokio::task::spawn_blocking(move || {
                                 if let Ok(conn) = crate::persistence::open_db(&db2) {
                                     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
                                     for k in &cc {
-                                        let _ = crate::persistence::writer::save_candle(&conn, "binance", "spot", k);
+                                        let _ = crate::persistence::writer::save_candle(&conn, &ex2, &mk2, k);
                                     }
                                 }
                             }).await;
@@ -252,5 +264,55 @@ impl Engine {
         } else {
             Ok(())
         }
+    }
+}
+
+/// Gap-farkında fetch limit (Faz 2): son kayıttan ŞİMDİYE kadar eksik bar + tampon,
+/// `[base, 1000]` (Binance tek-istek tavanı) clamp. Kayıt yoksa base ([50,1000] clamp).
+/// Saf/test-edilebilir; download döngüsü her sembol×interval için bunu kullanır.
+pub(crate) fn gap_aware_fetch_limit(last_ms: Option<i64>, now_ms: i64, iv_secs: i64, base: usize) -> usize {
+    match last_ms {
+        Some(last) => {
+            let step = iv_secs.max(1) * 1000;
+            let missing = ((now_ms - last) / step).max(0) as usize;
+            (missing + 5).clamp(base, 1000)
+        }
+        None => base.clamp(50, 1000),
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::gap_aware_fetch_limit;
+
+    #[test]
+    fn no_record_seeds_with_base() {
+        assert_eq!(gap_aware_fetch_limit(None, 1_000_000, 60, 500), 500);
+        assert_eq!(gap_aware_fetch_limit(None, 1_000_000, 60, 20), 50, "base<50 → 50");
+        assert_eq!(gap_aware_fetch_limit(None, 1_000_000, 60, 5000), 1000, "base>1000 → 1000");
+    }
+
+    #[test]
+    fn small_gap_returns_base_floor() {
+        // 10 bar (1h) eksik → base 500'ün altında → base zemini.
+        let now = 10_000 * 3600_000;
+        let last = now - 10 * 3600_000;
+        assert_eq!(gap_aware_fetch_limit(Some(last), now, 3600, 500), 500);
+    }
+
+    #[test]
+    fn medium_gap_covers_missing_plus_buffer() {
+        // 100 bar (1h) eksik, base 50 → missing+5 = 105.
+        let now = 10_000 * 3600_000;
+        let last = now - 100 * 3600_000;
+        assert_eq!(gap_aware_fetch_limit(Some(last), now, 3600, 50), 105);
+    }
+
+    #[test]
+    fn huge_gap_caps_at_1000() {
+        // 5000 bar eksik → 1000 tavanı.
+        let now = 10_000 * 60_000;
+        let last = now - 5000 * 60_000;
+        assert_eq!(gap_aware_fetch_limit(Some(last), now, 60, 50), 1000);
     }
 }

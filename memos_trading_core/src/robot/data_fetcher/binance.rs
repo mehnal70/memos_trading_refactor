@@ -26,19 +26,32 @@ impl BinanceFetcher {
                 .unwrap_or_default(),
         }
     }
-}
 
-#[async_trait]
-impl MarketFetcher for BinanceFetcher {
-    fn name(&self) -> &'static str { "binance" }
+    /// Market-farkında klines endpoint'i: futures → fapi.binance.com/fapi/v1,
+    /// diğer (spot) → api.binance.com/api/v3. Eskiden fetcher SABİT spot endpoint'ine
+    /// vuruyordu → futures botu spot veriyle karar veriyordu (Faz 2 correctness).
+    fn klines_base(market: &str) -> &'static str {
+        if market.eq_ignore_ascii_case("futures") {
+            "https://fapi.binance.com/fapi/v1/klines"
+        } else {
+            "https://api.binance.com/api/v3/klines"
+        }
+    }
 
-    async fn fetch_latest(&self, symbol: &str, interval: &str, limit: usize) -> Result<Vec<Candle>, String> {
+    /// Market-farkında son N mum. `fetch_latest` bunun spot kısayoludur (geriye-uyum).
+    pub async fn fetch_latest_market(
+        &self, symbol: &str, interval: &str, market: &str, limit: usize,
+    ) -> Result<Vec<Candle>, String> {
         let url = format!(
-            "https://api.binance.com/api/v3/klines?symbol={}&interval={}&limit={}",
-            symbol, interval, limit
+            "{}?symbol={}&interval={}&limit={}",
+            Self::klines_base(market), symbol, interval, limit
         );
+        self.fetch_klines(&url, symbol, interval).await
+    }
 
-        let resp = self.client.get(&url)
+    /// Ortak klines parse çekirdeği (spot/futures aynı payload formatı).
+    async fn fetch_klines(&self, url: &str, symbol: &str, interval: &str) -> Result<Vec<Candle>, String> {
+        let resp = self.client.get(url)
             .send()
             .await
             .map_err(|e| format!("Binance Bağlantı Hatası: {}", e))?
@@ -97,5 +110,16 @@ impl MarketFetcher for BinanceFetcher {
         }
 
         Ok(candles)
+    }
+}
+
+#[async_trait]
+impl MarketFetcher for BinanceFetcher {
+    fn name(&self) -> &'static str { "binance" }
+
+    /// Trait yolu spot kısayolu (geriye-uyum). Market-farkında çağrılar
+    /// `fetch_latest_market` kullanmalı (download job Faz 2'de geçti).
+    async fn fetch_latest(&self, symbol: &str, interval: &str, limit: usize) -> Result<Vec<Candle>, String> {
+        self.fetch_latest_market(symbol, interval, "spot", limit).await
     }
 }
