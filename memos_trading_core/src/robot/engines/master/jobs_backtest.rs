@@ -237,7 +237,7 @@ impl Engine {
         // regime_overrides[regime].target_trail_pct'e yazılır, canlı
         // resolve_atr_mult_for_regime numerator'da okur (per-sembol mikro-yapı korunur).
         // Base canlı çıkışı modeller (breakeven_at_rr=1.0) → ölçüm sadık.
-        const TRAIL_CANDIDATES: [f64; 6] = [0.5, 0.7, 1.0, 1.5, 2.0, 3.0];
+        const TRAIL_CANDIDATES: [f64; 8] = [0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
         let trail_ab_base = crate::robot::backtester::BacktestConfig {
             breakeven_at_rr: Some(1.0),
             ..dir_ab_base.clone()

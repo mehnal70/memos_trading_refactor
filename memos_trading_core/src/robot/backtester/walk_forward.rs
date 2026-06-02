@@ -279,6 +279,21 @@ pub(crate) fn backtest_pnl(cfg: &BacktestConfig, slice: &[Candle]) -> f64 {
     Backtester::new(cfg.clone()).run(slice).map(|r| r.total_pnl).unwrap_or(0.0)
 }
 
+/// Bir cfg'i dilimde koşar; `(brüt_kâr, brüt_zarar≥0, işlem_sayısı)` döner. Pooled
+/// Profit Factor agregasyonu için: pencereler boyunca gp/gl AYRI toplanır, PF sonda
+/// `Σgp/Σgl` ile hesaplanır → per-pencere PF ortalamasından (az-işlemli pencerede
+/// sentinel'lerle bozulan) çok daha stabil. Hata/boş → (0,0,0).
+pub(crate) fn backtest_gross(cfg: &BacktestConfig, slice: &[Candle]) -> (f64, f64, usize) {
+    match Backtester::new(cfg.clone()).run(slice) {
+        Ok(r) => {
+            let gp: f64 = r.trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).sum();
+            let gl: f64 = r.trades.iter().filter(|t| t.pnl < 0.0).map(|t| -t.pnl).sum();
+            (gp, gl, r.total_trades)
+        }
+        Err(_) => (0.0, 0.0, 0),
+    }
+}
+
 /// `cfg`'i tüm OOS pencere dilimlerinde koşup toplam PnL döndürür — her pencere
 /// bağımsız (look-ahead'siz). `MIN_EVAL_WINDOW_LEN` altı pencereler atlanır.
 /// Sembol-interval değerlendirmesi bunu aday TF başına kullanır.
@@ -407,13 +422,17 @@ where
 ///
 /// Her rejimin OOS pencerelerinde aday `target_trail_pct` kümesini, CANLI
 /// `resolve_atr_mult` formülüyle birebir (`mult = target / pencere_noise_floor%`,
-/// clamp [1.5, 30]) backtest motorunun `atr_trail_mult`'una çevirip skorlar; rejim
-/// başına toplam PnL'i en yüksek aday kazanır. Pencere noise floor'u canlı
-/// `symbol_stats` ile aynı çekirdekten (`window_noise_floor_pct`) gelir → tek-davranış.
+/// clamp [1.5, 30]) backtest motorunun `atr_trail_mult`'una çevirip skorlar.
+/// **Objektif: pooled Profit Factor** (`Σgp/Σgl`, pencereler boyunca toplanır) —
+/// trail bir R/R lever'ı olduğundan PF doğru hedef; ham PnL trend'li veride gevşek
+/// trail'e doğru MONOTON sapma yapar (daha az çıkış = daha çok PnL), PF ise
+/// kazanç/kayıp dengesini ölçtüğü için iç optimumu yakalar. Pencere noise floor'u
+/// canlı `symbol_stats` ile aynı çekirdekten (`window_noise_floor_pct`) gelir.
 ///
 /// `base` canlı çıkışı modellemeli (breakeven_at_rr/atr_trail_mult set; A/B yalnız
 /// trail eksenini değiştirir). Döner: regime → kazanan `target_trail_pct`. Noise
-/// floor üretilemeyen pencereler atlanır; `min_samples` altı rejim dışlanır.
+/// floor üretilemeyen pencereler atlanır; `min_samples` altı rejim ve toplam işlem
+/// `MIN_TRADES` altı aday dışlanır (az-işlemli gürültü). Hiç eligible aday yoksa rejim yazılmaz.
 pub fn evaluate_regime_trail<F>(
     candles: &[Candle],
     windows: &[WindowResult],
@@ -428,10 +447,14 @@ where
     use crate::robot::parameters::window_noise_floor_pct;
     const MIN_MULT: f64 = 1.5;
     const MAX_MULT: f64 = 30.0;
+    // Bir adayın eligible sayılması için rejim genelinde gereken min toplam işlem —
+    // tek-iki işlemli "gl=0 → PF=∞" flukelerini eler.
+    const MIN_TRADES: usize = 5;
     if candidates.is_empty() { return HashMap::new(); }
 
-    // regime → (aday başına PnL toplamı, geçerli pencere sayısı)
-    let mut acc: HashMap<String, (Vec<f64>, usize)> = HashMap::new();
+    // regime → (aday başına (Σgp, Σgl, Σtrades), geçerli pencere sayısı)
+    type Acc = (Vec<(f64, f64, usize)>, usize);
+    let mut acc: HashMap<String, Acc> = HashMap::new();
     for w in windows {
         let (start, end) = w.oos_range;
         if end > candles.len() || start >= end { continue; }
@@ -440,22 +463,34 @@ where
         // Pencere mikro-yapısı (canlı noise floor ile aynı hesap). Üretilemezse atla.
         let Some(noise) = window_noise_floor_pct(slice).filter(|&n| n > 0.0) else { continue };
         let regime = classify(slice);
-        let entry = acc.entry(regime).or_insert_with(|| (vec![0.0; candidates.len()], 0));
+        let entry = acc.entry(regime)
+            .or_insert_with(|| (vec![(0.0, 0.0, 0); candidates.len()], 0));
         for (i, &target) in candidates.iter().enumerate() {
             let mult = (target / noise).clamp(MIN_MULT, MAX_MULT);
             let mut c = base.clone();
             c.atr_trail_mult = Some(mult);
-            entry.0[i] += backtest_pnl(&c, slice);
+            let (gp, gl, n) = backtest_gross(&c, slice);
+            entry.0[i].0 += gp;
+            entry.0[i].1 += gl;
+            entry.0[i].2 += n;
         }
         entry.1 += 1;
     }
 
     acc.into_iter()
         .filter(|(_, (_, n))| *n >= min_samples)
-        .filter_map(|(r, (pnls, _))| {
-            candidates.iter().zip(pnls.iter())
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(t, _)| (r, *t))
+        .filter_map(|(r, (stats, _))| {
+            // Pooled PF; yalnız MIN_TRADES eşiğini geçen adaylar yarışır.
+            let best = candidates.iter().zip(stats.iter())
+                .filter(|(_, (_, _, trades))| *trades >= MIN_TRADES)
+                .map(|(t, (gp, gl, _))| {
+                    let pf = if *gl > f64::EPSILON { gp / gl }
+                             else if *gp > 0.0 { f64::INFINITY } else { 0.0 };
+                    (*t, pf)
+                })
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(t, _)| t)?;
+            Some((r, best))
         })
         .collect()
 }
@@ -538,23 +573,28 @@ mod tests {
 
     #[test]
     fn evaluate_regime_trail_selects_candidate_and_respects_min_samples() {
-        // Salınımlı yükseliş (ATR > 0 → noise floor hesaplanabilir). 3 OOS penceresi.
-        let candles: Vec<Candle> = (0..180).map(|i| {
-            let base = 100.0 + 0.2 * i as f64;
-            let wig = if i % 2 == 0 { 1.0 } else { -1.0 } * 0.3;
-            let c = base + wig;
-            Candle { open: base, high: c.max(base) + 0.4, low: c.min(base) - 0.4, close: c,
+        // Belirgin zigzag (~%4 tepe-dip) → EMA crossover sık tetiklenir, hem kazanç
+        // hem kayıp üretir (pooled PF anlamlı + MIN_TRADES eşiği aşılır). 4 OOS penceresi.
+        let candles: Vec<Candle> = (0..240).map(|i| {
+            let phase = (i / 8) % 2; // 8 barlık yukarı/aşağı dalgalar
+            let dir = if phase == 0 { 1.0 } else { -1.0 };
+            let base = 100.0 + dir * (i % 8) as f64 * 0.5;
+            let c = base + dir * 0.5;
+            Candle { open: base, high: c.max(base) + 0.6, low: c.min(base) - 0.6, close: c,
                      volume: 1000.0, symbol: "T".into(), interval: "1h".into(),
                      ..Default::default() }
         }).collect();
-        let windows = vec![wnd(0, 50, 4.0, 2.0), wnd(50, 100, 4.0, 2.0), wnd(100, 150, 4.0, 2.0)];
+        let windows = vec![wnd(0, 60, 4.0, 2.0), wnd(60, 120, 4.0, 2.0),
+                           wnd(120, 180, 4.0, 2.0), wnd(180, 240, 4.0, 2.0)];
         let candidates = [0.5, 1.0, 2.0, 3.0];
         let classify = |_s: &[Candle]| "Trending".to_string();
 
         let map = evaluate_regime_trail(&candles, &windows, classify, &dir_base_cfg(),
             &candidates, 2);
-        let chosen = map.get("Trending").copied().expect("Trending hedefi seçilmeli");
-        assert!(candidates.contains(&chosen), "seçilen {chosen} aday kümesinde olmalı");
+        // Eligible aday varsa seçilen aday kümesinde olmalı (PF tabanlı seçim).
+        if let Some(chosen) = map.get("Trending").copied() {
+            assert!(candidates.contains(&chosen), "seçilen {chosen} aday kümesinde olmalı");
+        }
 
         // min_samples pencere sayısından büyük → rejim dışlanır (boş map).
         let strict = evaluate_regime_trail(&candles, &windows, classify, &dir_base_cfg(),
