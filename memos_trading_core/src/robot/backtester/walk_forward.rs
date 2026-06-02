@@ -308,6 +308,50 @@ pub(crate) fn backtest_gross(cfg: &BacktestConfig, slice: &[Candle]) -> (f64, f6
     }
 }
 
+/// WF çoklu-pencere çapraz-kontrol istatistiği — tek-holdout fluke'una karşı tutarlılık ölçer.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WfCrossCheck {
+    /// İşlem üreten OOS pencere sayısı (denominatör).
+    pub windows: usize,
+    /// PF≥1.0 olan pencere sayısı (tutarlılık payı).
+    pub profitable_windows: usize,
+    /// Pencereler boyunca pooled PF (Σgp/Σgl) — şanslı tek pencereye dayanmaz.
+    pub pooled_pf: f64,
+    /// Toplam işlem (tüm pencereler).
+    pub trades: usize,
+}
+
+impl Default for WfCrossCheck {
+    fn default() -> Self { Self { windows: 0, profitable_windows: 0, pooled_pf: 0.0, trades: 0 } }
+}
+
+impl WfCrossCheck {
+    /// Kâr-eden pencere oranı (0..1). İşlemli pencere yoksa 0.
+    pub fn consistency(&self) -> f64 {
+        if self.windows == 0 { 0.0 } else { self.profitable_windows as f64 / self.windows as f64 }
+    }
+}
+
+/// Bir cfg'i OOS pencerelerinde TEK TEK koşar → pooled PF + kâr-eden pencere oranı (tutarlılık).
+/// `score_config_over_windows` yalnız pooled PF döndürür; bu, EK OLARAK pencere-bazlı tutarlılığı
+/// (edge bir şanslı pencereden mi yoksa süregelen mi) ölçer. İşlemsiz pencere `windows` sayımına
+/// girmez (boş pencere tutarlılığı bozmasın). Edge-tarama çapraz-kontrolünün tek-kaynağı.
+pub fn wf_cross_check(cfg: &BacktestConfig, candles: &[Candle], windows: &[WindowResult]) -> WfCrossCheck {
+    let (mut gp_sum, mut gl_sum, mut trades, mut with_trades, mut profitable) = (0.0_f64, 0.0_f64, 0usize, 0usize, 0usize);
+    for w in windows {
+        let (s, e) = w.oos_range;
+        if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN { continue; }
+        let (gp, gl, t) = backtest_gross(cfg, &candles[s..e]);
+        if t == 0 { continue; }
+        gp_sum += gp; gl_sum += gl; trades += t; with_trades += 1;
+        let win_pf = if gl > f64::EPSILON { gp / gl } else if gp > 0.0 { f64::INFINITY } else { 0.0 };
+        if win_pf >= 1.0 { profitable += 1; }
+    }
+    let pooled_pf = if gl_sum > f64::EPSILON { gp_sum / gl_sum }
+                    else if gp_sum > 0.0 { 100.0 } else { 0.0 };
+    WfCrossCheck { windows: with_trades, profitable_windows: profitable, pooled_pf, trades }
+}
+
 /// Bir cfg'i dilimde koşar; tek tek işlem PnL'lerini döner (boş/hata → []).
 /// Çıkış-modeli taraması pencereler boyunca tüm PnL'leri havuzlayıp beklenti/PF/
 /// sharpe hesaplamak için kullanır (tek-kaynak istatistik).
@@ -926,6 +970,24 @@ mod tests {
         let (empty_choice, empty_scored) = evaluate_symbol_interval(&cands, load, none_score, Some("1h"), 0.0);
         assert_eq!(empty_choice, None);
         assert!(empty_scored.is_empty());
+    }
+
+    #[test]
+    fn wf_cross_check_counts_windows_and_consistency() {
+        // Düşüş serisi + long-only → her pencere zarar → profitable_windows=0, pooled_pf=0.
+        let candles: Vec<Candle> = (0..120).map(|i| {
+            let c = 200.0 - 0.1 * i as f64;
+            Candle { open: c, high: c * 1.004, low: c * 0.996, close: c,
+                     volume: 1000.0, symbol: "T".into(), interval: "1h".into(), ..Default::default() }
+        }).collect();
+        let windows = vec![wnd(0, 50, 4.0, 2.0), wnd(50, 100, 4.0, 2.0)];
+        let cc = wf_cross_check(&dir_base_cfg(), &candles, &windows);
+        assert_eq!(cc.profitable_windows, 0, "düşüşte hiçbir pencere kârlı değil");
+        assert!(cc.pooled_pf >= 0.0 && cc.pooled_pf < 1.0);
+        // consistency math.
+        let synth = WfCrossCheck { windows: 4, profitable_windows: 3, pooled_pf: 1.2, trades: 40 };
+        assert!((synth.consistency() - 0.75).abs() < 1e-9);
+        assert_eq!(WfCrossCheck::default().consistency(), 0.0, "işlemsiz → 0");
     }
 
     #[test]

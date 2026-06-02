@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::persistence::reader::{list_series, read_candles_market, CandleSeriesRef};
-use crate::robot::backtester::{Backtester, BacktestConfig, ParameterOptimizer};
+use crate::robot::backtester::{Backtester, BacktestConfig, ParameterOptimizer, WfCrossCheck};
 use crate::robot::data_pipeline::CandleHealth;
 use crate::robot::parameters::window_noise_floor_pct;
 use crate::robot::strategies::default_registry;
@@ -53,6 +53,13 @@ pub struct EdgeScanConfig {
     pub ps_grid: (f64, f64, f64),
     /// Komisyon (tek bacak; backtest simetrik uygular).
     pub commission_pct: f64,
+    /// WF çapraz-kontrol pencere parametreleri (kazanan config'i çoklu OOS penceresinde dener).
+    pub wf_is: usize,
+    pub wf_oos: usize,
+    pub wf_step: usize,
+    /// `wf_robust` için: pooled PF≥1.0 VE kâr-eden-pencere oranı ≥ bu VE pencere ≥ wf_min_windows.
+    pub wf_min_consistency: f64,
+    pub wf_min_windows: usize,
 }
 
 impl Default for EdgeScanConfig {
@@ -75,6 +82,11 @@ impl Default for EdgeScanConfig {
             sl_grid: (1.0, 3.0, 1.0),
             ps_grid: (0.2, 0.4, 0.1),
             commission_pct: 0.001,
+            wf_is: 300,
+            wf_oos: 100,
+            wf_step: 100,
+            wf_min_consistency: 0.5,  // pencerelerin en az yarısı kârlı olmalı
+            wf_min_windows: 3,        // en az 3 işlemli pencere (tek-pencere fluke'u eler)
         }
     }
 }
@@ -98,8 +110,14 @@ pub struct EdgeRow {
     pub profit_factor: f64,
     pub expectancy: f64,
     pub sharpe: f64,
-    /// PF≥1.0 VE işlem≥min_trades → net kârlı edge.
+    /// PF≥1.0 VE işlem≥min_trades → net kârlı edge (tek-holdout).
     pub profitable: bool,
+    /// Kazanan config'in çoklu-pencere WF çapraz-kontrolü (tek-holdout fluke'una karşı).
+    #[serde(default)]
+    pub wf: WfCrossCheck,
+    /// WF-onaylı sağlam edge: pooled PF≥1.0 + tutarlılık ≥ eşik + yeterli pencere. Seed bunu arar.
+    #[serde(default)]
+    pub wf_robust: bool,
 }
 
 /// (market, interval) grubu için özet — toplu taramada "nerede edge var" survey'i.
@@ -229,8 +247,36 @@ pub fn scan_one_series(cfg: &EdgeScanConfig, series: &CandleSeriesRef, candles: 
             expectancy,
             sharpe: r.sharpe_ratio,
             profitable: r.profit_factor >= 1.0 && r.total_trades >= cfg.min_trades,
+            wf: WfCrossCheck::default(),
+            wf_robust: false,
         };
         if is_better(&cand, best.as_ref(), cfg.min_trades) { best = Some(cand); }
+    }
+
+    // ─── WF çoklu-pencere çapraz-kontrol (yalnız KAZANAN config için; tek-holdout fluke'una karşı).
+    // Kazanan strateji+param'ı TÜM seride rolling OOS pencerelerinde dener → pooled PF + kâr-eden
+    // pencere oranı. wf_robust: pooled PF≥1.0 + tutarlılık ≥ eşik + yeterli pencere. Seed bunu arar.
+    if let Some(b) = best.as_mut() {
+        let win_cfg = BacktestConfig {
+            symbol: series.symbol.clone(),
+            interval: series.interval.clone(),
+            initial_balance: cfg.capital,
+            max_position_size: b.max_position_size,
+            take_profit_pct: b.take_profit_pct,
+            stop_loss_pct: b.stop_loss_pct,
+            strategy_name: b.best_strategy.clone(),
+            commission_pct: cfg.commission_pct,
+            edge_min_score: Some(cfg.edge_min),
+            atr_trail_mult: Some(trail_mult),
+            breakeven_at_rr: Some(cfg.breakeven_rr),
+            ..Default::default()
+        };
+        let windows = crate::robot::backtester::walk_forward::wf_oos_windows(n, cfg.wf_is, cfg.wf_oos, cfg.wf_step);
+        let cc = crate::robot::backtester::wf_cross_check(&win_cfg, candles, &windows);
+        b.wf_robust = cc.pooled_pf >= 1.0
+            && cc.windows >= cfg.wf_min_windows
+            && cc.consistency() >= cfg.wf_min_consistency;
+        b.wf = cc;
     }
     best
 }
@@ -316,19 +362,23 @@ where
 pub struct SeedRobustness {
     pub min_trades: usize,
     pub min_pf: f64,
+    /// true → yalnız WF-onaylı (çoklu-pencere) satırlar seed'lenir (tek-holdout fluke'unu eler).
+    pub require_wf_robust: bool,
 }
 
 impl Default for SeedRobustness {
-    fn default() -> Self { Self { min_trades: 30, min_pf: 1.2 } }
+    fn default() -> Self { Self { min_trades: 30, min_pf: 1.2, require_wf_robust: true } }
 }
 
 /// Bir rapordan robustluk barını geçen `sembol → en iyi strateji` seed map'i üretir.
 /// Aynı sembol birden çok seride geçerse EN YÜKSEK PF kazanır. Yalnız `profitable` +
-/// bar'ı aşan satırlar. Saf → testli. ParameterStore.symbol_strategy'ye PRIOR olarak yüklenir.
+/// (require_wf_robust ise WF-onaylı) + bar'ı aşan satırlar. Saf → testli.
+/// ParameterStore.symbol_strategy'ye PRIOR olarak yüklenir.
 pub fn seed_symbol_strategy(report: &EdgeScanReport, r: SeedRobustness) -> HashMap<String, String> {
     let mut best: HashMap<String, (String, f64)> = HashMap::new();
     for row in &report.rows {
         if !row.profitable || row.trades < r.min_trades || row.profit_factor < r.min_pf { continue; }
+        if r.require_wf_robust && !row.wf_robust { continue; }
         let e = best.entry(row.symbol.clone()).or_insert_with(|| (String::new(), f64::NEG_INFINITY));
         if row.profit_factor > e.1 { *e = (row.best_strategy.clone(), row.profit_factor); }
     }
@@ -376,6 +426,7 @@ mod tests {
             rows: 500, gap_pct: 0.0, stale_days: 0.0, best_strategy: "X".into(),
             take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
             trades, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0, profitable: false,
+            wf: WfCrossCheck::default(), wf_robust: false,
         };
         // Yeterli-işlemli düşük-PF, az-işlemli yüksek-PF'i yener (fluke koruması).
         let suff_low = mk(20, 1.1);
@@ -393,6 +444,7 @@ mod tests {
             rows: 500, gap_pct: 0.0, stale_days: 0.0, best_strategy: "X".into(),
             take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
             trades: 20, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0, profitable,
+            wf: WfCrossCheck::default(), wf_robust: false,
         };
         let rows = vec![
             mk("futures", "1h", "A", 1.5, true),
@@ -423,6 +475,8 @@ mod tests {
                 best_strategy: "ICT_COMPOSITE".into(), take_profit_pct: 6.0, stop_loss_pct: 1.0,
                 max_position_size: 0.3, trades: 40, win_rate: 0.4, profit_factor: 1.5,
                 expectancy: 5.0, sharpe: 0.5, profitable: true,
+                wf: WfCrossCheck { windows: 6, profitable_windows: 5, pooled_pf: 1.4, trades: 40 },
+                wf_robust: true,
             }],
         };
         let dir = std::env::temp_dir();
@@ -437,30 +491,37 @@ mod tests {
 
     #[test]
     fn seed_filters_flukes_and_keeps_best_per_symbol() {
-        let mk = |sym: &str, iv: &str, strat: &str, pf: f64, trades: usize, profitable: bool| EdgeRow {
+        let mk = |sym: &str, iv: &str, strat: &str, pf: f64, trades: usize, profitable: bool, wf_robust: bool| EdgeRow {
             exchange: "b".into(), market: "futures".into(), symbol: sym.into(), interval: iv.into(),
             rows: 5000, gap_pct: 0.0, stale_days: 0.0, best_strategy: strat.into(),
             take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
             trades, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0, profitable,
+            wf: WfCrossCheck::default(), wf_robust,
         };
         let report = EdgeScanReport {
             generated_at: "t".into(), db_path: "d".into(), market_filter: None,
-            series_candidates: 5, series_scanned: 5, series_skipped: 0, profitable_count: 4,
+            series_candidates: 6, series_scanned: 6, series_skipped: 0, profitable_count: 5,
             summary: vec![],
             rows: vec![
-                mk("RAVEUSDT", "1h", "MA_CROSSOVER", 18.5, 16, true), // fluke: trades<30 → elenir
-                mk("BTCUSDT", "1h", "ICT_COMPOSITE", 1.5, 40, true),  // robust → girer
-                mk("BTCUSDT", "4h", "MACD", 1.3, 35, true),           // aynı sembol düşük PF → kaybeder
-                mk("ETHUSDT", "1h", "RSI", 1.1, 50, true),            // PF<1.2 → elenir
-                mk("ADAUSDT", "1h", "BB", 2.0, 40, false),            // profitable=false → elenir
+                mk("RAVEUSDT", "1h", "MA_CROSSOVER", 18.5, 16, true, true),  // fluke: trades<30 → elenir
+                mk("BTCUSDT", "1h", "ICT_COMPOSITE", 1.5, 40, true, true),   // robust + WF-onaylı → girer
+                mk("BTCUSDT", "4h", "MACD", 1.3, 35, true, true),            // aynı sembol düşük PF → kaybeder
+                mk("ETHUSDT", "1h", "RSI", 1.1, 50, true, true),             // PF<1.2 → elenir
+                mk("ADAUSDT", "1h", "BB", 2.0, 40, false, true),             // profitable=false → elenir
+                mk("XRPUSDT", "1h", "CCI", 1.4, 40, true, false),            // WF-onaysız → elenir (yeni)
             ],
         };
         let seed = seed_symbol_strategy(&report, SeedRobustness::default());
-        assert_eq!(seed.len(), 1, "yalnız BTCUSDT robustluk barını geçer");
+        assert_eq!(seed.len(), 1, "yalnız BTCUSDT tüm barları (trades+PF+WF) geçer");
         assert_eq!(seed.get("BTCUSDT").map(|s| s.as_str()), Some("ICT_COMPOSITE"),
             "aynı sembolde en yüksek PF (1.5>1.3) kazanır");
         assert!(!seed.contains_key("RAVEUSDT"), "16 işlem fluke elenir");
         assert!(!seed.contains_key("ETHUSDT"), "PF 1.1 < 1.2 elenir");
+        assert!(!seed.contains_key("XRPUSDT"), "WF-onaysız (wf_robust=false) elenir");
+        // require_wf_robust=false → XRP (WF-onaysız ama PF/trades geçer) artık girer.
+        let loose = SeedRobustness { require_wf_robust: false, ..SeedRobustness::default() };
+        let seed2 = seed_symbol_strategy(&report, loose);
+        assert!(seed2.contains_key("XRPUSDT"), "WF şartı gevşeyince XRP girer");
     }
 
     #[test]

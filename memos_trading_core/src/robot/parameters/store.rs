@@ -218,6 +218,10 @@ impl ParameterStore {
                 min_trades: std::env::var("EDGE_SEED_MIN_TRADES").ok()
                     .and_then(|v| v.parse().ok()).unwrap_or(30),
                 min_pf: parse_env_f64("EDGE_SEED_MIN_PF").unwrap_or(1.2),
+                // Default: yalnız WF-onaylı seed (EDGE_SEED_REQUIRE_WF=0 ile gevşet).
+                require_wf_robust: !matches!(
+                    std::env::var("EDGE_SEED_REQUIRE_WF").ok().as_deref(),
+                    Some("0") | Some("false") | Some("off")),
             };
             let seed = crate::robot::backtester::seed_symbol_strategy_from_file(&path, r);
             let n = seed.len();

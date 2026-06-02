@@ -82,14 +82,15 @@ fn main() {
     if report.rows.is_empty() {
         println!("  Taranabilir seri yok — filtre çok dar ya da veri yetersiz/gappy.");
     } else {
-        println!("  {:<4} {:<9} {:<10} {:<5} {:<14} {:>5} {:>6} {:>6} {:>8} {:>7}",
-            "#", "market", "symbol", "iv", "strateji", "işl", "win%", "PF", "beklenti", "TP/SL");
+        println!("  {:<4} {:<9} {:<10} {:<5} {:<14} {:>5} {:>6} {:>6} {:>7} {:>7} {:>5}",
+            "#", "market", "symbol", "iv", "strateji", "işl", "win%", "PF", "wfPF", "tutar%", "WF✓");
         for (i, r) in report.rows.iter().take(40).enumerate() {
             let flag = if r.profitable { "✅" } else if r.profit_factor >= 0.9 { "≈" } else { "❌" };
-            println!("  {:<4} {:<9} {:<10} {:<5} {:<14} {:>5} {:>5.0}% {:>5.2}{} {:>+8.2} {:>3.0}/{:.0}",
+            let wf_flag = if r.wf_robust { "✅" } else { "—" };
+            println!("  {:<4} {:<9} {:<10} {:<5} {:<14} {:>5} {:>5.0}% {:>5.2}{} {:>7.2} {:>6.0}% {:>5}",
                 i + 1, r.market, r.symbol, r.interval, r.best_strategy,
-                r.trades, r.win_rate, r.profit_factor, flag, r.expectancy,
-                r.take_profit_pct, r.stop_loss_pct);
+                r.trades, r.win_rate, r.profit_factor, flag,
+                r.wf.pooled_pf, r.wf.consistency() * 100.0, wf_flag);
         }
         if report.rows.len() > 40 { println!("  … ({} satır daha JSON'da)", report.rows.len() - 40); }
     }
@@ -104,6 +105,8 @@ fn main() {
         Ok(_) => println!("\n📄 Rapor: {out_path}"),
         Err(e) => eprintln!("\n⚠️ Rapor yazılamadı ({out_path}): {e}"),
     }
-    println!("\n→ NET KÂRLI (PF≥1.0, işlem≥{}) seri sayısı: {}. PF<1.0 ise o seri net edge taşımıyor.\n",
-        cfg.min_trades, report.profitable_count);
+    let wf_robust_count = report.rows.iter().filter(|r| r.wf_robust).count();
+    println!("\n→ NET KÂRLI (holdout PF≥1.0, işlem≥{}): {} · WF-ONAYLI (çoklu-pencere tutarlı): {}",
+        cfg.min_trades, report.profitable_count, wf_robust_count);
+    println!("  Seed yalnız WF-ONAYLI satırları alır (fluke eler). Başlatırken: EDGE_SEED_REPORT={out_path}\n");
 }
