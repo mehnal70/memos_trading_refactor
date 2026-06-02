@@ -223,11 +223,16 @@ impl ParameterStore {
                     std::env::var("EDGE_SEED_REQUIRE_WF").ok().as_deref(),
                     Some("0") | Some("false") | Some("off")),
             };
-            let seed = crate::robot::backtester::seed_symbol_strategy_from_file(&path, r);
+            // Fix A: seed (TF, strateji) ÇİFTİni taşır → strateji DOĞRU TF'de koşar (BB'yi 1m'de
+            // değil 1d'de). symbol_interval + symbol_strategy birlikte yüklenir. [[project_edge_scan]].
+            let seed = crate::robot::backtester::seed_symbol_plan_from_file(&path, r);
             let n = seed.len();
-            store.symbol_strategy.extend(seed);
+            for (sym, entry) in &seed {
+                store.symbol_interval.insert(sym.clone(), entry.interval.clone());
+                store.symbol_strategy.insert(sym.clone(), entry.strategy.clone());
+            }
             if n > 0 {
-                log::info!("🌱 edge seed: {} sembol×strateji symbol_strategy'ye yüklendi ({})", n, path);
+                log::info!("🌱 edge seed: {} sembol (interval+strateji) yüklendi ({})", n, path);
             }
         }
         store

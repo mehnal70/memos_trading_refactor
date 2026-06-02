@@ -242,7 +242,7 @@ pub struct AppState {
 
 impl AppState {
     /// Yeni bir otonom organizma oluşturur (Srivastava ATP - F1 Mühürlü)
-    pub fn new(config: RoboticLoopConfig) -> Self {
+    pub fn new(mut config: RoboticLoopConfig) -> Self {
         // Global durdurma sinyallerini oluştur
         let stop_sig = Arc::new(AtomicBool::new(false));
 
@@ -312,6 +312,19 @@ impl AppState {
                 crate::robot::logic::regime_context::RegimeCache::new(),
             )),
         };
+
+        // B1: edge_scan SEED'lenen sembolleri pinned'e ekle → HER ZAMAN pool'da. Aksi halde
+        // screener yalnız momentumla seçer; bir sembolün (1d) edge'i screener'a görünmez →
+        // seed'i hiç tetiklenmezdi. symbol_strategy boot'ta yalnız seed'den dolar (from_env tek
+        // kaynak, disk reload yok). Gerçek trade TF'i cycle'da symbol_interval'den okunur (Fix A
+        // ile seed 1d set etti); buradaki register interval'i yalnız ilk worker kaydı. [[project_edge_scan]].
+        if let Ok(ps) = brain.parameters.read() {
+            for sym in ps.symbol_strategy.keys() {
+                if !config.pinned_symbols.iter().any(|p| p == sym) {
+                    config.pinned_symbols.push(sym.clone());
+                }
+            }
+        }
 
         // --- 🧬 F1: ORKESTRATÖRÜNÜN SAFİLEŞTİRİLMESİ VE FİLO KAYDI ---
         // 1. SymbolOrchestrator nesnesini ham olarak üret
