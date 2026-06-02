@@ -47,6 +47,12 @@ impl Engine {
                 "📐 SQLite şeması doğrulandı (candles + open_positions_snapshot + account_state)".to_string(),
             );
         }
+        // Faz 0: candle şemasını market-farkında unique key'e taşı (idempotent;
+        // taşınmışsa no-op). Boot'ta yazımlardan ÖNCE çalışır → spot/futures çarpışması biter.
+        if let Err(e) = crate::persistence::writer::migrate_candle_schema(&conn) {
+            log::warn!("⚠️ candle şema migration başarısız: {}", e);
+            push_state_log(state, format!("⚠️ candle şema migration başarısız: {}", e));
+        }
         // open_positions_snapshot ayrıca save_open_positions_snapshot içinde
         // ilk INSERT öncesi yaratılıyor; ek bir CREATE çağrısına gerek yok.
         if let Err(e) = crate::persistence::writer::ensure_account_state_table(&conn) {

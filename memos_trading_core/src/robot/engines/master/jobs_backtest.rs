@@ -10,13 +10,13 @@ impl Engine {
     pub(crate) fn run_backtest_job(state: &Arc<Mutex<AppState>>) -> std::result::Result<(), String> {
         log::info!("🔬 E2: Walk-Forward Backtest başlatıldı (grid: 6×4×3)...");
 
-        let (symbol, interval, db_path, capital, use_htf) = {
+        let (symbol, interval, db_path, capital, use_htf, market) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             // Backtest, canlının multi-TF'ini aynalasın: multi_tf.enabled açıksa WF
             // seçimi + param araması da HTF filtresini görür (canlı ile tek-davranış).
             let use_htf = st.brain.parameters.read().map(|p| p.multi_tf.enabled).unwrap_or(false);
             (st.config.symbol.clone(), st.config.interval.clone(),
-             st.config.db_path.clone(), st.finance.equity, use_htf)
+             st.config.db_path.clone(), st.finance.equity, use_htf, st.config.market.clone())
         };
 
         // Giriş kalitesi edge filtresi (#4): backtest, canlı process_symbol_cycle'ın
@@ -64,7 +64,7 @@ impl Engine {
         let wf_step: usize = env_parse("WALK_FORWARD_STEP_BARS", 50);
         let wf_min  = wf_is + wf_oos;
 
-        let candles = crate::persistence::reader::read_candles(&db_path, &symbol, &interval, candle_limit)
+        let candles = crate::persistence::reader::read_candles_market(&db_path, &symbol, &interval, &market, candle_limit)
             .map_err(|e| format!("read_candles: {}", e))?;
         if candles.len() < wf_min {
             return Err(format!(
@@ -375,7 +375,7 @@ impl Engine {
             let cur = iv_current.get(sym).cloned().unwrap_or_else(|| interval.clone());
             let (chosen, scored) = crate::robot::backtester::walk_forward::evaluate_symbol_interval(
                 &auto_iv_candidates,
-                |tf| crate::persistence::reader::read_candles(&db_path, sym, tf, 5000).unwrap_or_default(),
+                |tf| crate::persistence::reader::read_candles_market(&db_path, sym, tf, &market, 5000).unwrap_or_default(),
                 |tf, cand_candles| {
                     if cand_candles.len() < min_iv_bars { return None; }
                     let windows = crate::robot::backtester::walk_forward::wf_oos_windows(

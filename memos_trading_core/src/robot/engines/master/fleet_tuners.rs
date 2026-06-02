@@ -197,7 +197,7 @@ impl Engine {
                 // 1) Aktif sembolleri topla. Canlı feed'i olmayan borsa sembolleri
                 // (örn. eski BIST mumları DB'de durur) SR/Market Gözetimi'ne girmesin →
                 // market-agnostik tek nokta: RuntimeTuning.symbol_eligible_for_live.
-                let (db_path, interval, symbols) = {
+                let (db_path, interval, market, symbols) = {
                     let st = match state.lock() { Ok(s) => s, Err(_) => break };
                     let tuning = Arc::clone(&st.tuning);
                     let eligible = |s: &str| tuning.symbol_eligible_for_live(s);
@@ -219,7 +219,7 @@ impl Engine {
                             if !symbols.contains(&w.symbol) { symbols.push(w.symbol); }
                         }
                     }
-                    (st.config.db_path.clone(), st.config.interval.clone(), symbols)
+                    (st.config.db_path.clone(), st.config.interval.clone(), st.config.market.clone(), symbols)
                 };
 
                 // 2) Her sembol için candles oku, SR detect — IO/CPU lock dışında yapılır.
@@ -227,7 +227,7 @@ impl Engine {
                     = Default::default();
                 let mut total_zones = 0usize;
                 for sym in &symbols {
-                    if let Ok(candles) = crate::persistence::reader::read_candles(&db_path, sym, &interval, 200) {
+                    if let Ok(candles) = crate::persistence::reader::read_candles_market(&db_path, sym, &interval, &market, 200) {
                         // Detect lookback=5 default; en az ~11 candle gerekir, güvenli alt sınır 20.
                         if candles.len() >= 20 {
                             let zones = detector.detect(&candles);

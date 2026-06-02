@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::Path;
 use crate::prelude::*; // Evrensel prelude odası (AppState, Candle, RoboticLoopConfig otomatik geldi)
-use crate::persistence::reader::{list_available_tables, list_symbols, read_candles};
+use crate::persistence::reader::{list_available_tables, list_symbols, read_candles_market};
 use crate::persistence::writer::save_candle; // K4/K5 uyumlu bulk veya tekil kayıt köprüsü
 
 use std::fs::{OpenOptions, File};
@@ -227,7 +227,7 @@ impl AutonomousTrader {
                     let _ = save_candle(&conn, &exchange, &market, candle);
                 }
 
-                let candles = match read_candles(&self.config.db_path, &sym, &interval, self.config.min_candles) {
+                let candles = match read_candles_market(&self.config.db_path, &sym, &interval, &market, self.config.min_candles) {
                     Ok(c) => c,
                     Err(_) => { continue; }
                 };

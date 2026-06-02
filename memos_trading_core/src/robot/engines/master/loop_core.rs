@@ -282,8 +282,10 @@ impl Engine {
                 .and_then(|st| st.brain.parameters.read().ok()
                     .map(|p| (p.multi_tf.enabled, p.multi_tf.min_required)))
                 .unwrap_or((true, crate::robot::data_pipeline::HTF_MIN_REQUIRED));
+            // Faz 1: HTF yüklemesi de market-saf (config.market).
+            let market = state.lock().ok().map(|st| st.config.market.clone()).unwrap_or_default();
             let htf_candles_vec = if multi_tf_enabled {
-                crate::robot::data_pipeline::load_htf_candles(db_path, symbol, interval, multi_tf_min)
+                crate::robot::data_pipeline::load_htf_candles(db_path, symbol, interval, &market, multi_tf_min)
             } else {
                 Vec::new()
             };
@@ -561,9 +563,16 @@ impl Engine {
     ) -> Option<Vec<Candle>> {
         use crate::robot::data_pipeline::canon::PipelineStage;
         use crate::robot::data_pipeline::StepStatus;
+        // Faz 1: market-saf okuma (spot/futures karışmasını önler). config.market boşsa
+        // market-kör okumaya düş (geriye-uyum). state zaten elde → imza değişmeden.
+        let market = state.lock().ok().map(|st| st.config.market.clone()).filter(|m| !m.is_empty());
+        let read = match &market {
+            Some(m) => crate::persistence::reader::read_candles_market(db_path, symbol, interval, m, 200),
+            None => crate::persistence::reader::read_candles(db_path, symbol, interval, 200),
+        };
         // Üç ayrım: Ok(non-empty) Done. Ok(empty) sessiz Failed (sembol için 1m
         // candle DB'de yok = veri kaynağı eksikliği, alarm değil). Err = gerçek DB hatası.
-        match crate::persistence::reader::read_candles(db_path, symbol, interval, 200) {
+        match read {
             Ok(c) if !c.is_empty() => {
                 Self::mark_pipeline_stage(state, PipelineStage::DataIngest, StepStatus::Done);
                 Some(c)

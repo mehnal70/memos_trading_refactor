@@ -109,10 +109,10 @@ impl Engine {
         //    hizası katılır (sinyal yoluyla aynı load_htf_candles + SMA(10/30)).
         use rayon::prelude::*;
         let mut scored: Vec<(String, ScreenerScore)> = pool.par_iter().filter_map(|sym| {
-            let candles = crate::persistence::reader::read_candles(&db_path, sym, &interval, limit).ok()?;
+            let candles = crate::persistence::reader::read_candles_market(&db_path, sym, &interval, &market, limit).ok()?;
             if candles.len() < 50 { return None; }
             let htf_vec = if htf_aware {
-                crate::robot::data_pipeline::load_htf_candles(&db_path, sym, &interval, multi_tf_min)
+                crate::robot::data_pipeline::load_htf_candles(&db_path, sym, &interval, &market, multi_tf_min)
             } else {
                 Vec::new()
             };

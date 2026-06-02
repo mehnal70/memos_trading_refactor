@@ -217,7 +217,7 @@ pub fn save_candle(
         conn.execute(
             "INSERT INTO candles (exchange, market, symbol, interval, timestamp, open, high, low, close, volume) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
-             ON CONFLICT(symbol, interval, timestamp) DO UPDATE SET \
+             ON CONFLICT(exchange, market, symbol, interval, timestamp) DO UPDATE SET \
                open=excluded.open, high=excluded.high, low=excluded.low, \
                close=excluded.close, volume=excluded.volume",
             params![
@@ -269,23 +269,63 @@ fn column_exists(conn: &Connection, table: &str, col: &str) -> Result<bool> {
 /// Boot zincirinden de çağrılır → ML retrain ve scheduler'lar cold-start'ta
 /// "no such table: candles" hatasına çarpmasın.
 pub fn ensure_candles_table(conn: &Connection) -> Result<()> {
+    // KANONİK ŞEMA (Faz 0): market kimliğin parçası → unique key
+    // (exchange,market,symbol,interval,timestamp). Eskiden key market içermiyordu →
+    // spot+futures aynı (symbol,interval,ts)'de çarpışıp tek seriye karışıyordu (basis
+    // sıçraması). timestamp INTEGER (epoch ms). Mevcut DB'ler `migrate_candle_schema`
+    // ile dar→geniş index'e taşınır (tablo zaten exchange/market kolonlu).
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS candles (
-            id INTEGER PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            exchange TEXT NOT NULL,
+            market TEXT NOT NULL,
             symbol TEXT NOT NULL,
             interval TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
             open REAL NOT NULL,
             high REAL NOT NULL,
             low REAL NOT NULL,
             close REAL NOT NULL,
-            volume REAL NOT NULL,
-            created_at TEXT NOT NULL
+            volume REAL NOT NULL
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_symbol_interval_timestamp ON candles(symbol, interval, timestamp);
-        CREATE INDEX IF NOT EXISTS idx_symbol ON candles(symbol);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_candles_pk ON candles(exchange, market, symbol, interval, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_candles_smi ON candles(symbol, interval, timestamp);
         CREATE INDEX IF NOT EXISTS idx_timestamp ON candles(timestamp);"
     ).map_err(|e| crate::MemosTradingError::Database(format!("candles tablo init hatası: {}", e)))?;
+    Ok(())
+}
+
+/// Kanonik candle şema sürümü (PRAGMA user_version ile izlenir).
+pub const CANDLE_SCHEMA_VERSION: i64 = 2;
+
+/// 🔧 Faz 0 migration: mevcut `candles` tablosunu dar unique key
+/// `(symbol,interval,timestamp)` → kanonik geniş key
+/// `(exchange,market,symbol,interval,timestamp)`'e taşır. TABLO YENİDEN YAZILMAZ —
+/// yalnız index'ler değişir (kolonlar zaten yerinde): dar unique'ler düşürülür, geniş
+/// unique + (symbol,interval,ts) yardımcı index kurulur. Eski dar key zaten tekil
+/// olduğundan geniş key de kesin tekil → UNIQUE oluşturma garantili başarılı (kayıpsız).
+///
+/// Idempotent: `user_version >= CANDLE_SCHEMA_VERSION` ise no-op. `exchange` kolonu
+/// yoksa (kod-üretimi taze şema zaten kanonik) yalnız sürüm damgalanır.
+pub fn migrate_candle_schema(conn: &Connection) -> Result<()> {
+    let uv: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
+    if uv >= CANDLE_SCHEMA_VERSION { return Ok(()); }
+
+    // Tablo yoksa kanonik yarat (taze DB). Varsa ve exchange kolonluysa index swap.
+    ensure_candles_table(conn)?;
+    if column_exists(conn, "candles", "exchange")? {
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_candles_dedup;
+             DROP INDEX IF EXISTS idx_symbol_interval_timestamp;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_candles_pk ON candles(exchange, market, symbol, interval, timestamp);
+             CREATE INDEX IF NOT EXISTS idx_candles_smi ON candles(symbol, interval, timestamp);
+             CREATE INDEX IF NOT EXISTS idx_timestamp ON candles(timestamp);"
+        ).map_err(|e| crate::MemosTradingError::Database(
+            format!("candle şema migration (index swap) hatası: {}", e)))?;
+        log::info!("🔧 candle şema migration: market-farkında unique key kuruldu (v{CANDLE_SCHEMA_VERSION})");
+    }
+    conn.pragma_update(None, "user_version", CANDLE_SCHEMA_VERSION)
+        .map_err(|e| crate::MemosTradingError::Database(format!("user_version damga hatası: {}", e)))?;
     Ok(())
 }
 
@@ -340,4 +380,90 @@ pub fn parse_binance_kline(
         symbol: symbol.to_string(),
         interval: interval.to_string(),
     })
+}
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    // Eski (dar key) üretim şemasını birebir kurar: exchange/market kolonlu ama
+    // unique index market içermeyen → spot+futures çarpışır.
+    fn setup_old_schema() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE candles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                exchange TEXT NOT NULL, market TEXT NOT NULL,
+                symbol TEXT NOT NULL, interval TEXT NOT NULL, timestamp INTEGER NOT NULL,
+                open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL,
+                close REAL NOT NULL, volume REAL NOT NULL
+            );
+            CREATE UNIQUE INDEX idx_candles_dedup ON candles(symbol, interval, timestamp);
+            CREATE UNIQUE INDEX idx_symbol_interval_timestamp ON candles(symbol, interval, timestamp);"
+        ).unwrap();
+        conn
+    }
+
+    fn ins(conn: &Connection, market: &str, ts: i64, close: f64) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO candles (exchange, market, symbol, interval, timestamp, open, high, low, close, volume) \
+             VALUES ('binance', ?1, 'BTCUSDT', '1h', ?2, ?3, ?3, ?3, ?3, 1.0) \
+             ON CONFLICT(exchange, market, symbol, interval, timestamp) DO UPDATE SET close=excluded.close",
+            params![market, ts, close],
+        )
+    }
+
+    #[test]
+    fn migration_enables_cross_market_coexistence() {
+        let conn = setup_old_schema();
+        // Migrasyon ÖNCESİ: dar unique → aynı ts'de spot yazılır, futures'ı eklemek için
+        // önce migrasyon gerekir (yoksa 5-kolon ON CONFLICT eşleşen index bulamaz).
+        super::migrate_candle_schema(&conn).unwrap();
+
+        // Migrasyon SONRASI: geniş unique key → spot ve futures AYNI (symbol,interval,ts)'de
+        // birlikte yaşar (basis sıçraması = artık ayrık seriler).
+        ins(&conn, "spot", 1000, 100.0).unwrap();
+        ins(&conn, "futures", 1000, 101.0).unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM candles WHERE symbol='BTCUSDT' AND interval='1h' AND timestamp=1000",
+            [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 2, "spot+futures aynı ts'de ayrı satır olmalı (market key'de)");
+
+        // Market-saf okuma doğru fiyatı verir.
+        let spot_close: f64 = conn.query_row(
+            "SELECT close FROM candles WHERE market='spot' AND timestamp=1000", [], |r| r.get(0)).unwrap();
+        let fut_close: f64 = conn.query_row(
+            "SELECT close FROM candles WHERE market='futures' AND timestamp=1000", [], |r| r.get(0)).unwrap();
+        assert_eq!(spot_close, 100.0);
+        assert_eq!(fut_close, 101.0);
+
+        // user_version damgalandı.
+        let uv: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(uv, CANDLE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let conn = setup_old_schema();
+        super::migrate_candle_schema(&conn).unwrap();
+        // İkinci çağrı no-op (uv>=2) — panik/hata yok.
+        super::migrate_candle_schema(&conn).unwrap();
+        let uv: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(uv, CANDLE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_preserves_existing_rows() {
+        let conn = setup_old_schema();
+        // Migrasyon ÖNCESİ düz INSERT (geniş-key ON CONFLICT index'i henüz yok).
+        let ins_plain = |ts: i64, close: f64| conn.execute(
+            "INSERT INTO candles (exchange, market, symbol, interval, timestamp, open, high, low, close, volume) \
+             VALUES ('binance','spot','BTCUSDT','1h', ?1, ?2, ?2, ?2, ?2, 1.0)",
+            params![ts, close]).unwrap();
+        ins_plain(2000, 50.0);
+        ins_plain(3000, 51.0);
+        super::migrate_candle_schema(&conn).unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM candles", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 2, "mevcut satırlar korunmalı (index swap kayıpsız)");
+    }
 }

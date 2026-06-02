@@ -12,7 +12,7 @@
 // Hedef HTF eşlemesi `DataPipeline::get_htf_interval` tek-noktasından gelir.
 
 use crate::core::types::Candle;
-use crate::persistence::reader::read_candles;
+use crate::persistence::reader::{read_candles, read_candles_market};
 use super::orchestrator::DataPipeline;
 use super::synth::CandleSynth;
 
@@ -27,6 +27,7 @@ pub fn load_htf_candles(
     db_path: &str,
     symbol: &str,
     base_interval: &str,
+    market: &str,
     min_required: usize,
 ) -> Vec<Candle> {
     let htf = DataPipeline::get_htf_interval(base_interval);
@@ -36,8 +37,14 @@ pub fn load_htf_candles(
 
     let need = min_required.max(HTF_MIN_REQUIRED);
 
+    // Faz 1: market-saf okuma (boşsa market-kör fallback → geriye-uyum).
+    let read = |iv: &str, lim: usize| -> crate::Result<Vec<Candle>> {
+        if market.is_empty() { read_candles(db_path, symbol, iv, lim) }
+        else { read_candles_market(db_path, symbol, iv, market, lim) }
+    };
+
     // 1) DB önceliği
-    if let Ok(c) = read_candles(db_path, symbol, htf, need.max(50)) {
+    if let Ok(c) = read(htf, need.max(50)) {
         if c.len() >= need {
             return c;
         }
@@ -50,7 +57,7 @@ pub fn load_htf_candles(
             return Vec::new();
         }
         let pull = (need * target_mins) + target_mins; // bir tampon
-        if let Ok(base_1m) = read_candles(db_path, symbol, base_interval, pull) {
+        if let Ok(base_1m) = read(base_interval, pull) {
             let agg = aggregate_1m_to(&base_1m, htf, symbol);
             if agg.len() >= need {
                 return agg;

@@ -16,13 +16,14 @@ impl Engine {
         use crate::robot::ml_engine::feature_extractor::FeatureVector;
 
         // 1) Mum verisini ve aktif sembolü al (kilit kısa)
-        let (symbol, interval, db_path) = {
+        let (symbol, interval, db_path, market) = {
             let st = match state.lock() { Ok(s) => s, Err(_) => return };
-            (st.config.symbol.clone(), st.config.interval.clone(), st.config.db_path.clone())
+            (st.config.symbol.clone(), st.config.interval.clone(), st.config.db_path.clone(),
+             st.config.market.clone())
         };
 
         // Mum varsa drift güncellemesi yap; yoksa sadece evrim tick'i çalışır.
-        let candles_opt = crate::persistence::reader::read_candles(&db_path, &symbol, &interval, 200).ok();
+        let candles_opt = crate::persistence::reader::read_candles_market(&db_path, &symbol, &interval, &market, 200).ok();
         let fv: Option<FeatureVector> = candles_opt.as_ref()
             .filter(|c| c.len() >= 50)
             .map(|c| crate::robot::ml_engine::feature_extractor::FeatureExtractor::extract(c));
@@ -226,10 +227,10 @@ impl Engine {
         log::info!("🧠 E2: ML Retrain başlatıldı (random search 60 iter)...");
 
         // 1) Çalışma sembolü ve mum kuyruğu — kilidi job boyunca tutmuyoruz.
-        let (symbol, interval, db_path, capital) = {
+        let (symbol, interval, db_path, capital, market) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             (st.config.symbol.clone(), st.config.interval.clone(),
-             st.config.db_path.clone(), st.finance.equity)
+             st.config.db_path.clone(), st.finance.equity, st.config.market.clone())
         };
 
         push_state_log(state, format!(
@@ -237,7 +238,7 @@ impl Engine {
             symbol, interval, capital,
         ));
 
-        let candles = crate::persistence::reader::read_candles(&db_path, &symbol, &interval, 1000)
+        let candles = crate::persistence::reader::read_candles_market(&db_path, &symbol, &interval, &market, 1000)
             .map_err(|e| format!("read_candles: {}", e))?;
         if candles.len() < 50 {
             return Err(format!("yetersiz mum verisi: {} mum", candles.len()));
@@ -341,7 +342,7 @@ impl Engine {
         const GBT_HTF_MIN_BARS: usize = 80;
         let htf_candles: Vec<crate::core::types::Candle> =
             if gbt_train_htf && multi_tf_enabled && htf_interval != interval {
-                crate::persistence::reader::read_candles(&db_path, &symbol, htf_interval, 2000)
+                crate::persistence::reader::read_candles_market(&db_path, &symbol, htf_interval, &market, 2000)
                     .unwrap_or_default()
             } else {
                 Vec::new()
