@@ -19,6 +19,13 @@ pub struct RegimePatch {
     /// A/B sonucuna göre doldurur, canlı cycle bu rejimde okur. None → env/operatör.
     #[serde(default)]
     pub policy: Option<RegimePolicy>,
+    /// Bu rejim için otonom seçilmiş trailing-stop hedef yüzdesi (R/R lever'ı).
+    /// Değerlendirme job'ı her rejimin OOS pencerelerinde target_trail_pct A/B'si
+    /// koşup kazananı buraya yazar; canlı `target_trail_pct_for_strategy_and_symbol`
+    /// noise-floor formülünün numerator'ında okur (per-sembol mikro-yapı korunur).
+    /// None → strateji default'una düş (sıfır regresyon). [[project_runtime_observations]].
+    #[serde(default)]
+    pub target_trail_pct: Option<f64>,
 }
 
 impl RegimePatch {
@@ -39,10 +46,16 @@ impl RegimePatch {
         self
     }
 
+    pub fn with_trail_target(mut self, pct: f64) -> Self {
+        self.target_trail_pct = Some(pct);
+        self
+    }
+
     /// Patch hiçbir alanı override etmiyor mu? Engine boş patch'leri store'a
     /// koymaktan kaçınmak için bunu kontrol eder.
     pub fn is_empty(&self) -> bool {
-        self.edge_thresholds.is_none() && self.trade_risk.is_none() && self.policy.is_none()
+        self.edge_thresholds.is_none() && self.trade_risk.is_none()
+            && self.policy.is_none() && self.target_trail_pct.is_none()
     }
 }
 

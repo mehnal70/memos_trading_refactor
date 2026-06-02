@@ -346,19 +346,43 @@ impl ParameterStore {
     }
 
     /// Strateji + sembol bağlamlı trail target — Phase C feedback katmanı dahil.
-    /// Precedence:
-    ///   1) `TARGET_TRAIL_PCT` env — operatör global override
-    ///   2) `trail_feedback[(sym, strategy)].target_override` — runtime feedback patch
-    ///   3) `strategy_trail_targets[strategy_name]` — Phase B sensible default
-    ///   4) `strategy_trail_targets["default"]` — bilinmeyen strateji fallback
-    ///   5) Hard-coded 0.7 — store boşsa
+    /// Rejim-agnostik thin delege (geriye-uyum); rejim-farkında call site'lar
+    /// `target_trail_pct_resolved`'i kullanmalı.
     pub fn target_trail_pct_for_strategy_and_symbol(&self, symbol: &str, strategy_name: &str) -> f64 {
+        self.target_trail_pct_resolved(symbol, strategy_name, None)
+    }
+
+    /// İlgili rejim için otonom backtest A/B'siyle yazılmış trailing hedefi (varsa).
+    /// `regime_overrides[regime].target_trail_pct`; yoksa None → çözümleme strateji
+    /// default'una düşer (sıfır regresyon).
+    pub fn regime_trail_target_for(&self, regime: &str) -> Option<f64> {
+        self.regime_overrides.get(regime).and_then(|p| p.target_trail_pct)
+    }
+
+    /// Trail target çözümleme — tam precedence (rejim-farkında).
+    ///   1) `TARGET_TRAIL_PCT` env — operatör global override
+    ///   2) `trail_feedback[(sym, strategy)].target_override` — runtime online feedback
+    ///   3) `regime_overrides[regime].target_trail_pct` — per-rejim backtest A/B (Option B)
+    ///   4) `strategy_trail_targets[strategy_name]` — Phase B sensible default
+    ///   5) `strategy_trail_targets["default"]` — bilinmeyen strateji fallback
+    ///   6) Hard-coded 0.7 — store boşsa
+    ///
+    /// Online feedback (2) rejim A/B'sinin (3) üstünde: canlı gözlem, offline-ölçülmüş
+    /// rejim taban-çizgisini ezer. Rejim A/B static strateji default'unun (4) üstünde.
+    pub fn target_trail_pct_resolved(
+        &self, symbol: &str, strategy_name: &str, regime: Option<&str>,
+    ) -> f64 {
         if let Some(v) = parse_env_f64("TARGET_TRAIL_PCT") {
             return v;
         }
         if let Some(fb) = self.trail_feedback.get(&(symbol.to_string(), strategy_name.to_string())) {
             if let Some(override_pct) = fb.target_override {
                 return override_pct;
+            }
+        }
+        if let Some(r) = regime {
+            if let Some(t) = self.regime_trail_target_for(r) {
+                return t;
             }
         }
         if let Some(&v) = self.strategy_trail_targets.get(strategy_name) {
@@ -410,12 +434,29 @@ impl ParameterStore {
         self.strategy_params.insert(strategy_name.into(), params);
     }
 
+    /// Rejim-agnostik thin delege (geriye-uyum). Yeni call site'lar rejim bağlamını
+    /// geçen `resolve_atr_mult_for_regime`'i kullanmalı.
     pub fn resolve_atr_mult(
         &self,
         symbol: &str,
         interval: &str,
         strategy_name: &str,
         default_mult: f64,
+    ) -> f64 {
+        self.resolve_atr_mult_for_regime(symbol, interval, strategy_name, default_mult, None)
+    }
+
+    /// ATR-trail multiplier çözümleme — rejim-farkında. Taze symbol_stats varsa
+    /// `mult = target_trail_pct / noise_floor_pct` (per-sembol mikro-yapı korunur);
+    /// `target_trail_pct` precedence rejim A/B'sini içerir (`target_trail_pct_resolved`).
+    /// Stats yok/stale/yetersiz → `default_mult`.
+    pub fn resolve_atr_mult_for_regime(
+        &self,
+        symbol: &str,
+        interval: &str,
+        strategy_name: &str,
+        default_mult: f64,
+        regime: Option<&str>,
     ) -> f64 {
         const TTL_SECS: u64 = 21_600; // 6 saat
         const MIN_MULT: f64 = 1.5;
@@ -427,8 +468,8 @@ impl ParameterStore {
                 && s.noise_floor_pct > 0.0
                 && super::symbol_stats::is_fresh(s, TTL_SECS)
             {
-                // Phase C feedback patch'i de dahil (per-sym, strateji override).
-                let target = self.target_trail_pct_for_strategy_and_symbol(symbol, strategy_name);
+                // Phase C feedback patch'i + per-rejim A/B hedefi dahil.
+                let target = self.target_trail_pct_resolved(symbol, strategy_name, regime);
                 let mult = target / s.noise_floor_pct;
                 return mult.clamp(MIN_MULT, MAX_MULT);
             }

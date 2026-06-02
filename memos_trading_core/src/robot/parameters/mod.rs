@@ -23,7 +23,7 @@ pub mod trail_feedback;
 
 pub use types::*;
 pub use store::*;
-pub use symbol_stats::{SymbolStats, compute_symbol_stats};
+pub use symbol_stats::{SymbolStats, compute_symbol_stats, window_noise_floor_pct};
 pub use trail_feedback::{TrailFeedback, PendingTrailObservation};
 
 fn parse_env_f64(key: &str) -> Option<f64> {
@@ -612,6 +612,46 @@ mod tests {
         let u = s.trade_risk_for("StrongUptrend");
         assert_eq!(u.take_profit_pct,   3.0);
         assert_eq!(u.max_position_size, 0.5);
+    }
+
+    #[test]
+    fn regime_trail_target_for_reads_patch_or_none() {
+        let mut s = ParameterStore::default();
+        assert_eq!(s.regime_trail_target_for("StrongUptrend"), None, "patch yok → None");
+        s.set_regime_patch("StrongUptrend", RegimePatch::empty().with_trail_target(1.8));
+        assert_eq!(s.regime_trail_target_for("StrongUptrend"), Some(1.8));
+        // trade_risk patch'i target_trail_pct içermez → None kalır
+        s.set_regime_patch("Ranging", RegimePatch::empty().with_trade_risk(
+            TradeRiskParams { take_profit_pct: 1.5, stop_loss_pct: 0.8, max_position_size: 0.3 }));
+        assert_eq!(s.regime_trail_target_for("Ranging"), None);
+    }
+
+    #[test]
+    fn target_trail_pct_resolved_regime_layer_beats_strategy_default() {
+        let mut s = ParameterStore::default();
+        // SUPERTREND strateji default'u 1.2; rejim A/B 2.5 yazdı → rejim kazanır.
+        s.set_regime_patch("StrongUptrend", RegimePatch::empty().with_trail_target(2.5));
+        let with_regime = s.target_trail_pct_resolved("ETHUSDT", "SUPERTREND", Some("StrongUptrend"));
+        assert!((with_regime - 2.5).abs() < 1e-9, "rejim hedefi strateji default'unu ezmeli");
+        // Rejim yoksa (None) strateji default'una düşer (sıfır regresyon).
+        let no_regime = s.target_trail_pct_resolved("ETHUSDT", "SUPERTREND", None);
+        assert!((no_regime - 1.2).abs() < 1e-9, "rejim None → strateji default");
+        // Patch'i olmayan rejim → strateji default.
+        let other = s.target_trail_pct_resolved("ETHUSDT", "SUPERTREND", Some("Ranging"));
+        assert!((other - 1.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn target_trail_pct_resolved_online_feedback_beats_regime() {
+        let mut s = ParameterStore::default();
+        s.set_regime_patch("StrongUptrend", RegimePatch::empty().with_trail_target(2.5));
+        // Online feedback override (canlı gözlem) rejim A/B'sinin üstünde.
+        s.trail_feedback.insert(
+            ("ETHUSDT".into(), "SUPERTREND".into()),
+            TrailFeedback { target_override: Some(0.9), ..Default::default() },
+        );
+        let r = s.target_trail_pct_resolved("ETHUSDT", "SUPERTREND", Some("StrongUptrend"));
+        assert!((r - 0.9).abs() < 1e-9, "online feedback rejim hedefini ezmeli");
     }
 
     #[test]

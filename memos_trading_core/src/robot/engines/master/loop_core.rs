@@ -612,8 +612,12 @@ impl Engine {
             let pos_strategy: String = st.finance.live_positions.read().ok()
                 .and_then(|m| m.get(symbol).map(|p| p.trade_type.clone()))
                 .unwrap_or_else(|| "default".to_string());
+            // Rejim-farkında trail: open path (open_paper_position) ile AYNI kaynak
+            // (classify_regime(candles)) → per-rejim A/B hedefi open/exit'te tutarlı.
+            let regime_str = Self::classify_regime(candles).as_str().to_string();
             let atr_mult = st.brain.parameters.read().ok()
-                .map(|p| p.resolve_atr_mult(symbol, interval, &pos_strategy, default_mult))
+                .map(|p| p.resolve_atr_mult_for_regime(
+                    symbol, interval, &pos_strategy, default_mult, Some(&regime_str)))
                 .unwrap_or(default_mult);
             let be_rr = st.brain.best_params.get("pos_breakeven_at_rr").copied().unwrap_or(1.0);
             let fleet_price = st.fleet.live_price.read().ok()

@@ -29,20 +29,9 @@ pub struct SymbolStats {
 /// Minimum örneklem: 50 candle (yeterli ATR-ratio için). Kesinlik için median
 /// hızlı select yerine sort + indeks; N=200 tipik → <100µs.
 pub fn compute_symbol_stats(candles: &[Candle]) -> Option<SymbolStats> {
-    const ATR_PERIOD: usize = 14;
     const MIN_SAMPLE: usize = 50;
 
-    if candles.len() < ATR_PERIOD + MIN_SAMPLE { return None; }
-
-    let mut ratios: Vec<f64> = Vec::with_capacity(candles.len() - ATR_PERIOD);
-    for i in ATR_PERIOD..candles.len() {
-        let window = &candles[i - ATR_PERIOD..=i];
-        let atr = atr_for_window(window);
-        let close = candles[i].close;
-        if close > 0.0 && atr > 0.0 && atr.is_finite() {
-            ratios.push(atr / close);
-        }
-    }
+    let mut ratios = collect_atr_ratios(candles);
     if ratios.len() < MIN_SAMPLE { return None; }
 
     ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -59,6 +48,36 @@ pub fn compute_symbol_stats(candles: &[Candle]) -> Option<SymbolStats> {
         sample_size:     ratios.len(),
         last_updated:    now,
     })
+}
+
+/// Pencere-seviyesi gürültü tabanı (medyan ATR%/close × 100) — `compute_symbol_stats`'in
+/// 50-örneklem kapısı OLMADAN hafif sürümü. Backtest trail A/B'si OOS pencerelerinde
+/// (≥~30 mum, default OOS=50) per-pencere noise floor'unu CANLIYLA AYNI formülle
+/// hesaplamak için kullanır → A/B target→mult dönüşümü resolve_atr_mult ile tek-davranış.
+/// Min örneklem ATR_PERIOD+5; altı → None.
+pub fn window_noise_floor_pct(candles: &[Candle]) -> Option<f64> {
+    const MIN_SAMPLE: usize = 5;
+    let mut ratios = collect_atr_ratios(candles);
+    if ratios.len() < MIN_SAMPLE { return None; }
+    ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(ratios[ratios.len() / 2] * 100.0)
+}
+
+/// ATR(14)/close oran serisi — `compute_symbol_stats` + `window_noise_floor_pct`
+/// paylaşılan çekirdeği (tek-kaynak). Bozuk/yetersiz mumda boş Vec döner.
+fn collect_atr_ratios(candles: &[Candle]) -> Vec<f64> {
+    const ATR_PERIOD: usize = 14;
+    if candles.len() <= ATR_PERIOD { return Vec::new(); }
+    let mut ratios: Vec<f64> = Vec::with_capacity(candles.len() - ATR_PERIOD);
+    for i in ATR_PERIOD..candles.len() {
+        let window = &candles[i - ATR_PERIOD..=i];
+        let atr = atr_for_window(window);
+        let close = candles[i].close;
+        if close > 0.0 && atr > 0.0 && atr.is_finite() {
+            ratios.push(atr / close);
+        }
+    }
+    ratios
 }
 
 /// ATR Wilder benzeri ortalama: son `period` mum üzerinden true range mean.
@@ -146,6 +165,22 @@ mod tests {
         assert!(is_fresh(&s, 3600), "1 saat TTL: 100sn fresh");
         s.last_updated = now - 10_000; // 10K sn önce
         assert!(!is_fresh(&s, 3600), "1 saat TTL: 10000sn stale");
+    }
+
+    #[test]
+    fn window_noise_floor_works_below_full_sample_gate() {
+        // 30 mum: compute_symbol_stats (≥64) None döner ama window_noise_floor_pct
+        // (≥19) çalışır → backtest OOS pencereleri (default 50) için kritik.
+        let c = synth_candles(30, 100.0, 0.5);
+        assert!(compute_symbol_stats(&c).is_none(), "30 mum < 64 → full stats None");
+        let nf = window_noise_floor_pct(&c).expect("30 mum window noise için yeter");
+        assert!((nf - 0.5).abs() < 0.05, "uniform %0.5 → window noise ~0.5, gerçek {nf}");
+    }
+
+    #[test]
+    fn window_noise_floor_none_for_tiny_slice() {
+        let c = synth_candles(15, 100.0, 0.5); // 15 ≤ 14+5
+        assert!(window_noise_floor_pct(&c).is_none(), "çok kısa dilim → None");
     }
 
     #[test]

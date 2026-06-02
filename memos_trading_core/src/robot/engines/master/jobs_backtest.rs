@@ -229,6 +229,28 @@ impl Engine {
             regime_min_samples,
         );
 
+        // ─── 3b-2) Per-rejim TRAILING hedef A/B (R/R asimetrisi lever'ı) ──────────
+        // Canlı çıkışların çoğu TRAILING_STOP ile oluyor; R/R'yi trail SIKILIĞI
+        // belirliyor (sıkı trail kazancı erken keser). Her rejimin OOS pencerelerinde
+        // target_trail_pct adaylarını canlı resolve_atr_mult formülüyle BİREBİR
+        // (target/pencere_noise_floor → mult) skorla; kazanan
+        // regime_overrides[regime].target_trail_pct'e yazılır, canlı
+        // resolve_atr_mult_for_regime numerator'da okur (per-sembol mikro-yapı korunur).
+        // Base canlı çıkışı modeller (breakeven_at_rr=1.0) → ölçüm sadık.
+        const TRAIL_CANDIDATES: [f64; 6] = [0.5, 0.7, 1.0, 1.5, 2.0, 3.0];
+        let trail_ab_base = crate::robot::backtester::BacktestConfig {
+            breakeven_at_rr: Some(1.0),
+            ..dir_ab_base.clone()
+        };
+        let regime_trail_map = crate::robot::backtester::walk_forward::evaluate_regime_trail(
+            &candles,
+            &best_wf_res.windows,
+            |oos_slice| Self::classify_regime(oos_slice).as_str().to_string(),
+            &trail_ab_base,
+            &TRAIL_CANDIDATES,
+            regime_min_samples,
+        );
+
         // ─── 3c) POOL-WIDE otonom INTERVAL seçimi (hafif OOS skoru) ──────────────
         // Her pool sembolü için aday TF'ler (env AUTO_INTERVAL_CANDIDATES, default 15m,1h)
         // arasında HAFİF skor: wf_oos_windows + score_config_over_windows (param SABİT =
@@ -337,6 +359,10 @@ impl Engine {
                             regime_directional: Some(directional),
                         });
                     }
+                    // Per-rejim trailing hedef A/B kazananı (varsa) → target_trail_pct.
+                    if let Some(&trail_pct) = regime_trail_map.get(regime) {
+                        patch = patch.with_trail_target(trail_pct);
+                    }
                     params.set_regime_patch(regime.clone(), patch);
                 }
                 // Kazanan stratejinin yapısal (indikatör) parametreleri — Faz 1b.
@@ -388,9 +414,10 @@ impl Engine {
             } else {
                 let mut entries: Vec<String> = regime_agg.iter()
                     .map(|(r, a)| format!(
-                        "{r}(n={}) TP={:.1}% SL={:.1}% dir={}",
+                        "{r}(n={}) TP={:.1}% SL={:.1}% dir={} trail={}",
                         a.sample_count, a.median_tp_pct, a.median_sl_pct,
                         match regime_dir_map.get(r) { Some(true) => "RD", Some(false) => "long", None => "—" },
+                        match regime_trail_map.get(r) { Some(t) => format!("{:.1}%", t), None => "—".into() },
                     ))
                     .collect();
                 entries.sort();
@@ -405,6 +432,7 @@ impl Engine {
                 "median_sl_pct": a.median_sl_pct,
                 "sample_count": a.sample_count,
                 "regime_directional": regime_dir_map.get(r).copied(),
+                "target_trail_pct": regime_trail_map.get(r).copied(),
             })))
             .collect::<serde_json::Map<_, _>>()
             .into();

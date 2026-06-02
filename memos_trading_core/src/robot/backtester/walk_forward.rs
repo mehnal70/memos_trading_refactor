@@ -403,6 +403,63 @@ where
         .collect()
 }
 
+/// Per-rejim trailing-stop hedef (`target_trail_pct`) A/B — R/R asimetrisi lever'ı.
+///
+/// Her rejimin OOS pencerelerinde aday `target_trail_pct` kümesini, CANLI
+/// `resolve_atr_mult` formülüyle birebir (`mult = target / pencere_noise_floor%`,
+/// clamp [1.5, 30]) backtest motorunun `atr_trail_mult`'una çevirip skorlar; rejim
+/// başına toplam PnL'i en yüksek aday kazanır. Pencere noise floor'u canlı
+/// `symbol_stats` ile aynı çekirdekten (`window_noise_floor_pct`) gelir → tek-davranış.
+///
+/// `base` canlı çıkışı modellemeli (breakeven_at_rr/atr_trail_mult set; A/B yalnız
+/// trail eksenini değiştirir). Döner: regime → kazanan `target_trail_pct`. Noise
+/// floor üretilemeyen pencereler atlanır; `min_samples` altı rejim dışlanır.
+pub fn evaluate_regime_trail<F>(
+    candles: &[Candle],
+    windows: &[WindowResult],
+    classify: F,
+    base: &BacktestConfig,
+    candidates: &[f64],
+    min_samples: usize,
+) -> HashMap<String, f64>
+where
+    F: Fn(&[Candle]) -> String,
+{
+    use crate::robot::parameters::window_noise_floor_pct;
+    const MIN_MULT: f64 = 1.5;
+    const MAX_MULT: f64 = 30.0;
+    if candidates.is_empty() { return HashMap::new(); }
+
+    // regime → (aday başına PnL toplamı, geçerli pencere sayısı)
+    let mut acc: HashMap<String, (Vec<f64>, usize)> = HashMap::new();
+    for w in windows {
+        let (start, end) = w.oos_range;
+        if end > candles.len() || start >= end { continue; }
+        let slice = &candles[start..end];
+        if slice.len() < MIN_EVAL_WINDOW_LEN { continue; }
+        // Pencere mikro-yapısı (canlı noise floor ile aynı hesap). Üretilemezse atla.
+        let Some(noise) = window_noise_floor_pct(slice).filter(|&n| n > 0.0) else { continue };
+        let regime = classify(slice);
+        let entry = acc.entry(regime).or_insert_with(|| (vec![0.0; candidates.len()], 0));
+        for (i, &target) in candidates.iter().enumerate() {
+            let mult = (target / noise).clamp(MIN_MULT, MAX_MULT);
+            let mut c = base.clone();
+            c.atr_trail_mult = Some(mult);
+            entry.0[i] += backtest_pnl(&c, slice);
+        }
+        entry.1 += 1;
+    }
+
+    acc.into_iter()
+        .filter(|(_, (_, n))| *n >= min_samples)
+        .filter_map(|(r, (pnls, _))| {
+            candidates.iter().zip(pnls.iter())
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(t, _)| (r, *t))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,6 +534,37 @@ mod tests {
         let only_short = score_config_over_windows(&dir_base_cfg(), &candles, &[wnd(100, 110, 4.0, 2.0)]);
         assert_eq!(only_short, 0.0, "kısa pencere (<30) atlanmalı");
         assert!(s_all.is_finite());
+    }
+
+    #[test]
+    fn evaluate_regime_trail_selects_candidate_and_respects_min_samples() {
+        // Salınımlı yükseliş (ATR > 0 → noise floor hesaplanabilir). 3 OOS penceresi.
+        let candles: Vec<Candle> = (0..180).map(|i| {
+            let base = 100.0 + 0.2 * i as f64;
+            let wig = if i % 2 == 0 { 1.0 } else { -1.0 } * 0.3;
+            let c = base + wig;
+            Candle { open: base, high: c.max(base) + 0.4, low: c.min(base) - 0.4, close: c,
+                     volume: 1000.0, symbol: "T".into(), interval: "1h".into(),
+                     ..Default::default() }
+        }).collect();
+        let windows = vec![wnd(0, 50, 4.0, 2.0), wnd(50, 100, 4.0, 2.0), wnd(100, 150, 4.0, 2.0)];
+        let candidates = [0.5, 1.0, 2.0, 3.0];
+        let classify = |_s: &[Candle]| "Trending".to_string();
+
+        let map = evaluate_regime_trail(&candles, &windows, classify, &dir_base_cfg(),
+            &candidates, 2);
+        let chosen = map.get("Trending").copied().expect("Trending hedefi seçilmeli");
+        assert!(candidates.contains(&chosen), "seçilen {chosen} aday kümesinde olmalı");
+
+        // min_samples pencere sayısından büyük → rejim dışlanır (boş map).
+        let strict = evaluate_regime_trail(&candles, &windows, classify, &dir_base_cfg(),
+            &candidates, 99);
+        assert!(strict.is_empty(), "min_samples üstünde rejim yazılmamalı");
+
+        // Boş aday kümesi → boş map (panik yok).
+        let empty = evaluate_regime_trail(&candles, &windows, classify, &dir_base_cfg(),
+            &[], 1);
+        assert!(empty.is_empty());
     }
 
     #[test]

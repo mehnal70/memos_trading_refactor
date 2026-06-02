@@ -412,8 +412,10 @@ impl Engine {
             // Aynı resolve zinciri check_exit_conditions ile birebir → open/exit tutarlı.
             let default_mult = st.brain.best_params.get("pos_atr_trail_mult").copied().unwrap_or(2.0);
             let interval_for_resolve = st.config.interval.clone();
+            // Rejim-farkında: per-rejim trail A/B hedefi target_trail_pct_resolved'a girer.
             let atr_mult = st.brain.parameters.read().ok()
-                .map(|p| p.resolve_atr_mult(symbol, &interval_for_resolve, strategy_name, default_mult))
+                .map(|p| p.resolve_atr_mult_for_regime(
+                    symbol, &interval_for_resolve, strategy_name, default_mult, Some(regime.as_str())))
                 .unwrap_or(default_mult);
             let trailing_stop = if is_long { entry - atr * atr_mult }
                                 else       { entry + atr * atr_mult };
