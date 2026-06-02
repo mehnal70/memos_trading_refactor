@@ -415,13 +415,26 @@ pub fn evaluate_edge_filters(
 pub(crate) fn score_config_over_windows(
     cfg: &BacktestConfig, candles: &[Candle], windows: &[WindowResult],
 ) -> f64 {
-    let mut total = 0.0;
+    // OBJEKTİF: pooled Profit Factor (Σgp/Σgl, pencereler boyunca) — ham PnL DEĞİL.
+    // Gerekçe ([[project_rr_trail_ab]] lever A): gürültü TF'i (örn. 1m, fee/gürültü baskın,
+    // ölçülen PF≈0.01) trend'li bir OOS penceresinde yüksek ham PnL gösterip R/R'si berbat
+    // olabilir; PnL objektifi interval seçicisini bu "kumarbaz" TF'i sağlam 1h'a TERCİH
+    // etmeye iter (kazanan-çok/kaybeden-büyük = net negatif). PF R/R dengesini ölçtüğü için
+    // düşük-PF gürültü TF'lerini otonom eler (hard-coded TF yasağı yok [[feedback_autonomy_first]]).
+    // Trail A/B'de PnL→PF dönüşümüyle (0fe2c33) aynı ders; backtest_gross tek-kaynak (DRY).
+    const MIN_IV_TRADES: usize = 5;   // pooled işlem altı → seçim yapma (küçük-örneklem gürültüsü)
+    const PF_CAP: f64 = 100.0;        // kayıpsız varyant → INF yerine finite tavan (seçim stabil)
+    let (mut gp, mut gl, mut n) = (0.0_f64, 0.0_f64, 0usize);
     for w in windows {
         let (s, e) = w.oos_range;
         if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN { continue; }
-        total += backtest_pnl(cfg, &candles[s..e]);
+        let (p, l, t) = backtest_gross(cfg, &candles[s..e]);
+        gp += p; gl += l; n += t;
     }
-    total
+    if n < MIN_IV_TRADES { return 0.0; }
+    if gl > f64::EPSILON { gp / gl }
+    else if gp > 0.0 { PF_CAP }
+    else { 0.0 }
 }
 
 /// `n` mumdan WF OOS pencere aralıklarını üretir — param-opt YOK, yalnız index aralıkları
@@ -614,6 +627,48 @@ where
 mod tests {
     use super::*;
 
+    /// 🔬 TEŞHİS (gerçek DB, #[ignore]): interval seçim objektifi ham PnL → pooled PF
+    /// dönüşümünün lever A iddiasını kanıtlar — gürültü TF'i (1m) PnL'de yüksek/PF'de düşük,
+    /// 1h ise PF'de üstün. Elle:
+    /// `cargo test -p memos_trading_core lever_a_interval_pnl_vs_pf -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn lever_a_interval_pnl_vs_pf() {
+        // Gerçek DB repo-kökünde (crate CWD'sinden bir üst). İkisini de dene.
+        let db = ["../data/trader.db", "data/trader.db"].into_iter()
+            .find(|p| std::path::Path::new(p).exists())
+            .expect("trader.db bulunamadı");
+        let (sym, market) = ("BTCUSDT", "futures");
+        // Üretim iv_base'iyle aynı ruhta temsili config (çıkış modeli set: canlıyı modeller).
+        let base = BacktestConfig {
+            symbol: sym.into(), initial_balance: 10_000.0, max_position_size: 1.0,
+            take_profit_pct: 4.0, stop_loss_pct: 2.0, strategy_name: "EMA_CROSSOVER".into(),
+            commission_pct: 0.0004, edge_min_score: Some(0.20),
+            breakeven_at_rr: Some(1.0), atr_trail_mult: Some(2.0),
+            ..Default::default()
+        };
+        let (wf_is, wf_oos, wf_step) = (300usize, 100usize, 100usize);
+        println!("\n=== Lever A teşhis: {sym} {market} — ham PnL vs pooled PF ===");
+        for tf in ["1m", "15m", "1h"] {
+            let candles = crate::persistence::reader::read_candles_market(db, sym, tf, market, 5000)
+                .unwrap_or_default();
+            if candles.len() < wf_is + wf_oos { println!("{tf:>4}: yetersiz mum ({})", candles.len()); continue; }
+            let windows = wf_oos_windows(candles.len(), wf_is, wf_oos, wf_step);
+            let mut cfg = base.clone(); cfg.interval = tf.to_string();
+            // Ham PnL (eski objektif) — manuel topla.
+            let pnl: f64 = windows.iter().filter_map(|w| {
+                let (s, e) = w.oos_range;
+                if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN { None }
+                else { Some(backtest_pnl(&cfg, &candles[s..e])) }
+            }).sum();
+            // Pooled PF (yeni objektif).
+            let pf = score_config_over_windows(&cfg, &candles, &windows);
+            println!("{tf:>4}: bar={:<5} pencere={:<3} hamPnL={:>10.2}  pooledPF={:>6.3}",
+                     candles.len(), windows.len(), pnl, pf);
+        }
+        println!("Beklenti: 1m hamPnL yanıltıcı olabilir; pooledPF 1h'ı üstün göstermeli.\n");
+    }
+
     fn wnd(start: usize, end: usize, tp: f64, sl: f64) -> WindowResult {
         WindowResult {
             window_idx: 0,
@@ -669,9 +724,9 @@ mod tests {
     }
 
     #[test]
-    fn score_config_over_windows_sums_and_skips_short() {
-        // 2 geçerli pencere (≥MIN_EVAL_WINDOW_LEN) + 1 kısa (atlanır). Düşüş serisinde
-        // long-only ~zarar; toplam sonlu ve kısa pencere toplama girmez (idempotent).
+    fn score_config_over_windows_is_profit_factor_finite_and_skips_short() {
+        // Düşüş serisinde long-only ~hep zarar → pooled PF = 0 (gp=0). Kısa pencere
+        // (<MIN_EVAL_WINDOW_LEN) atlanır → işlem yok → MIN_IV_TRADES guard'ı 0 döndürür.
         let candles: Vec<Candle> = (0..120).map(|i| {
             let c = 200.0 - 0.1 * i as f64;
             Candle { open: c, high: c * 1.004, low: c * 0.996, close: c,
@@ -680,10 +735,10 @@ mod tests {
         }).collect();
         let windows = vec![wnd(0, 50, 4.0, 2.0), wnd(50, 100, 4.0, 2.0), wnd(100, 110, 4.0, 2.0)];
         let s_all = score_config_over_windows(&dir_base_cfg(), &candles, &windows);
-        // Kısa pencereyi tek başına vermek toplama 0 katkı verir (skip guard).
         let only_short = score_config_over_windows(&dir_base_cfg(), &candles, &[wnd(100, 110, 4.0, 2.0)]);
-        assert_eq!(only_short, 0.0, "kısa pencere (<30) atlanmalı");
-        assert!(s_all.is_finite());
+        assert_eq!(only_short, 0.0, "kısa pencere (<30) → işlem yok → guard 0 döndürür");
+        // PF her zaman SONLU (INF değil — PF_CAP) ve negatif değil (ham PnL'in aksine).
+        assert!(s_all.is_finite() && s_all >= 0.0, "skor finite, non-negatif PF olmalı (PnL değil)");
     }
 
     #[test]
