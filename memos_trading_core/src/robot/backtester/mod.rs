@@ -9,4 +9,5 @@ pub use backtest_engine::{Backtester, BacktestConfig, BacktestResult, DirectionM
 //pub use backtest_engine::{ProfileComparisonResult, ProfilePerformance};
 pub use parameter_optimizer::ParameterOptimizer;
 pub use walk_forward::{WalkForwardTester, WalkForwardConfig, WalkForwardResult, WindowResult};
-pub use edge_scan::{EdgeScanConfig, EdgeScanReport, EdgeRow, run_edge_scan, scan_one_series};
+pub use edge_scan::{EdgeScanConfig, EdgeScanReport, EdgeRow, GroupSummary,
+    run_edge_scan, run_edge_scan_with_progress, summarize_by_group, scan_one_series};

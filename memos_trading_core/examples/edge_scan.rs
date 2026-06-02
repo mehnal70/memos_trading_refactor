@@ -19,7 +19,7 @@
 // Rapor JSON'a yazılır → tekrar koşularda karşılaştır/biriktir. PF MUTLAK değil; veri-sağlık
 // + holdout dürüstlüğü içinde "edge var mı" göstergesidir.
 
-use memos_trading_core::robot::backtester::{run_edge_scan, EdgeScanConfig};
+use memos_trading_core::robot::backtester::{run_edge_scan_with_progress, EdgeScanConfig};
 
 fn csv_or_empty(arg: Option<&String>) -> Vec<String> {
     match arg.map(|s| s.as_str()) {
@@ -61,10 +61,23 @@ fn main() {
         cfg.edge_min, cfg.breakeven_rr, cfg.holdout_is_pct, cfg.min_trades);
     println!("   (seri sayısına göre dakikalar sürebilir; strateji havuzu × TP/SL/PS ızgarası optimize ediliyor)\n");
 
-    let report = run_edge_scan(&cfg);
+    // İlerleme stderr'e (uzun toplu koşuda görünürlük; stdout tabloyu temiz tutar).
+    let report = run_edge_scan_with_progress(&cfg, |i, total, s| {
+        eprintln!("  [{i}/{total}] {} {} {} ({} bar)…", s.market, s.symbol, s.interval, s.rows);
+    });
+
+    // ─── Grup özeti (market × interval survey) ───────────────────────────────
+    if !report.summary.is_empty() {
+        println!("\n══════ ÖZET (market × interval · en iyi PF) ══════");
+        println!("  {:<9} {:<5} {:>8} {:>7} {:>7}  en iyi", "market", "iv", "taranan", "kârlı", "bestPF");
+        for g in &report.summary {
+            println!("  {:<9} {:<5} {:>8} {:>7} {:>7.2}  {} ({})",
+                g.market, g.interval, g.scanned, g.profitable, g.best_pf, g.best_symbol, g.best_strategy);
+        }
+    }
 
     // ─── Sıralı tablo ────────────────────────────────────────────────────────
-    println!("══════ SONUÇ ({} aday seri · {} tarandı · {} atlandı · {} NET KÂRLI) ══════",
+    println!("\n══════ SONUÇ ({} aday seri · {} tarandı · {} atlandı · {} NET KÂRLI) ══════",
         report.series_candidates, report.series_scanned, report.series_skipped, report.profitable_count);
     if report.rows.is_empty() {
         println!("  Taranabilir seri yok — filtre çok dar ya da veri yetersiz/gappy.");

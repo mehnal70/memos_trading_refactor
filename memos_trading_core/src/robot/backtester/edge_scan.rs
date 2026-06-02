@@ -100,6 +100,21 @@ pub struct EdgeRow {
     pub profitable: bool,
 }
 
+/// (market, interval) grubu için özet — toplu taramada "nerede edge var" survey'i.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GroupSummary {
+    pub market: String,
+    pub interval: String,
+    /// Bu grupta taranan (sonuç üreten) seri.
+    pub scanned: usize,
+    /// PF≥1.0 net-kârlı seri.
+    pub profitable: usize,
+    /// Gruptaki en iyi PF + onu veren sembol/strateji.
+    pub best_pf: f64,
+    pub best_symbol: String,
+    pub best_strategy: String,
+}
+
 /// Tüm tarama raporu (serde → JSON; tekrar koşularda karşılaştır/biriktir).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EdgeScanReport {
@@ -114,8 +129,35 @@ pub struct EdgeScanReport {
     pub series_skipped: usize,
     /// PF≥1.0 net-kârlı seri sayısı.
     pub profitable_count: usize,
+    /// (market, interval) kırılımlı özet — en iyi PF AZALAN sıralı.
+    pub summary: Vec<GroupSummary>,
     /// PF AZALAN sıralı satırlar.
     pub rows: Vec<EdgeRow>,
+}
+
+/// Satırlardan (market, interval) grup özeti çıkarır — en iyi PF AZALAN sıralı. Saf → testli.
+pub fn summarize_by_group(rows: &[EdgeRow]) -> Vec<GroupSummary> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<(String, String), GroupSummary> = BTreeMap::new();
+    for r in rows {
+        let g = groups.entry((r.market.clone(), r.interval.clone())).or_insert(GroupSummary {
+            market: r.market.clone(), interval: r.interval.clone(),
+            scanned: 0, profitable: 0, best_pf: f64::NEG_INFINITY,
+            best_symbol: String::new(), best_strategy: String::new(),
+        });
+        g.scanned += 1;
+        if r.profitable { g.profitable += 1; }
+        if r.profit_factor > g.best_pf {
+            g.best_pf = r.profit_factor;
+            g.best_symbol = r.symbol.clone();
+            g.best_strategy = r.best_strategy.clone();
+        }
+    }
+    let mut out: Vec<GroupSummary> = groups.into_values()
+        .map(|mut g| { if !g.best_pf.is_finite() { g.best_pf = 0.0; } g })
+        .collect();
+    out.sort_by(|a, b| b.best_pf.partial_cmp(&a.best_pf).unwrap_or(std::cmp::Ordering::Equal));
+    out
 }
 
 /// Bir seriyi tara (holdout: IS'te optimize, OOS'ta ölç; strateji havuzunun en iyisi).
@@ -214,10 +256,19 @@ fn series_passes(cfg: &EdgeScanConfig, s: &CandleSeriesRef) -> bool {
     true
 }
 
-/// Tam taramayı koşar: serileri sırala/filtrele → her birini tara → PF azalan rapor.
-/// Seri döngüsü SIRALI (optimizer kendi içinde rayon ile paralel → çift-paralellik yok,
-/// bounded). DB hatası/boş seri sessiz atlanır (sayıma yansır).
+/// Tam taramayı koşar (ilerleme bildirimsiz). Bkz. [`run_edge_scan_with_progress`].
 pub fn run_edge_scan(cfg: &EdgeScanConfig) -> EdgeScanReport {
+    run_edge_scan_with_progress(cfg, |_, _, _| {})
+}
+
+/// Tam taramayı koşar: serileri sırala/filtrele → her birini tara → PF azalan rapor + grup özeti.
+/// Her seri ÖNCESİ `on_progress(idx, total, series)` çağrılır (uzun toplu koşuda görünürlük;
+/// lib decoupled kalır, yazımı çağıran yapar). Seri döngüsü SIRALI (optimizer içte rayon →
+/// çift-paralellik yok, bounded). DB hatası/boş seri sessiz atlanır (sayıma yansır).
+pub fn run_edge_scan_with_progress<F>(cfg: &EdgeScanConfig, mut on_progress: F) -> EdgeScanReport
+where
+    F: FnMut(usize, usize, &CandleSeriesRef),
+{
     let all = list_series(&cfg.db_path, cfg.market_filter.as_deref()).unwrap_or_default();
     let candidates: Vec<CandleSeriesRef> = all.into_iter()
         .filter(|s| series_passes(cfg, s))
@@ -227,7 +278,8 @@ pub fn run_edge_scan(cfg: &EdgeScanConfig) -> EdgeScanReport {
 
     let mut rows: Vec<EdgeRow> = Vec::new();
     let mut skipped = 0usize;
-    for s in &candidates {
+    for (i, s) in candidates.iter().enumerate() {
+        on_progress(i + 1, series_candidates, s);
         let candles = read_candles_market(&cfg.db_path, &s.symbol, &s.interval, &s.market, cfg.candle_limit)
             .unwrap_or_default();
         match scan_one_series(cfg, s, &candles) {
@@ -237,6 +289,7 @@ pub fn run_edge_scan(cfg: &EdgeScanConfig) -> EdgeScanReport {
     }
     rows.sort_by(|a, b| b.profit_factor.partial_cmp(&a.profit_factor).unwrap_or(std::cmp::Ordering::Equal));
     let profitable_count = rows.iter().filter(|r| r.profitable).count();
+    let summary = summarize_by_group(&rows);
 
     EdgeScanReport {
         generated_at: chrono::Utc::now().to_rfc3339(),
@@ -246,6 +299,7 @@ pub fn run_edge_scan(cfg: &EdgeScanConfig) -> EdgeScanReport {
         series_scanned: rows.len(),
         series_skipped: skipped,
         profitable_count,
+        summary,
         rows,
     }
 }
@@ -289,6 +343,30 @@ mod tests {
         assert!(!is_better(&few_high, Some(&suff_low), 10));
         // İkisi de yeterli → PF kazanır.
         assert!(is_better(&mk(20, 1.5), Some(&mk(20, 1.2)), 10));
+    }
+
+    #[test]
+    fn summarize_by_group_counts_and_ranks() {
+        let mk = |market: &str, iv: &str, sym: &str, pf: f64, profitable: bool| EdgeRow {
+            exchange: "b".into(), market: market.into(), symbol: sym.into(), interval: iv.into(),
+            rows: 500, gap_pct: 0.0, stale_days: 0.0, best_strategy: "X".into(),
+            take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
+            trades: 20, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0, profitable,
+        };
+        let rows = vec![
+            mk("futures", "1h", "A", 1.5, true),
+            mk("futures", "1h", "B", 0.8, false),
+            mk("futures", "15m", "C", 2.0, true),
+            mk("spot", "1h", "D", 0.5, false),
+        ];
+        let s = summarize_by_group(&rows);
+        assert_eq!(s.len(), 3, "3 grup (futures1h, futures15m, spot1h)");
+        // En iyi PF azalan → futures/15m (2.0) başta.
+        assert_eq!((s[0].market.as_str(), s[0].interval.as_str()), ("futures", "15m"));
+        assert!((s[0].best_pf - 2.0).abs() < 1e-9 && s[0].best_symbol == "C");
+        let f1h = s.iter().find(|g| g.market == "futures" && g.interval == "1h").unwrap();
+        assert_eq!((f1h.scanned, f1h.profitable), (2, 1), "futures/1h: 2 taranan, 1 kârlı");
+        assert!((f1h.best_pf - 1.5).abs() < 1e-9 && f1h.best_symbol == "A");
     }
 
     #[test]
