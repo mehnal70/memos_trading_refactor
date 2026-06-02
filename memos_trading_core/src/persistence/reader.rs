@@ -232,22 +232,54 @@ pub fn read_candles(
     interval: &str,
     limit: usize,
 ) -> Result<Vec<crate::core::types::Candle>, crate::MemosTradingError> {
+    read_candles_filtered(db_path, symbol, interval, None, limit)
+}
+
+/// `read_candles`'ın market-farkında sürümü: yalnız verilen `market` (örn. "spot",
+/// "futures") satırlarını okur. `candles` tablosunda spot+futures tek (symbol,interval)
+/// serisine karıştığından (dedup index market içermez), temiz/saf seri gereken yerler
+/// (interval-tarama, market-özel backtest) bunu kullanmalı. `read_candles` market'i
+/// yok sayar (geriye-uyum). [[project_candle_schema_mismatch]]
+pub fn read_candles_market(
+    db_path: &str,
+    symbol: &str,
+    interval: &str,
+    market: &str,
+    limit: usize,
+) -> Result<Vec<crate::core::types::Candle>, crate::MemosTradingError> {
+    read_candles_filtered(db_path, symbol, interval, Some(market), limit)
+}
+
+fn read_candles_filtered(
+    db_path: &str,
+    symbol: &str,
+    interval: &str,
+    market: Option<&str>,
+    limit: usize,
+) -> Result<Vec<crate::core::types::Candle>, crate::MemosTradingError> {
     use chrono::{DateTime, TimeZone, Utc};
     use rusqlite::types::ValueRef;
 
     let conn = crate::persistence::open_db(db_path)
         .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
 
-    let query = "SELECT timestamp, open, high, low, close, volume, symbol, interval \
+    // Market filtresi opsiyonel: None → eski davranış (market-agnostik).
+    let query = match market {
+        Some(_) => "SELECT timestamp, open, high, low, close, volume, symbol, interval \
+                    FROM candles \
+                    WHERE symbol = ?1 AND interval = ?2 AND market = ?4 \
+                    ORDER BY timestamp DESC LIMIT ?3",
+        None => "SELECT timestamp, open, high, low, close, volume, symbol, interval \
                  FROM candles \
                  WHERE symbol = ?1 AND interval = ?2 \
-                 ORDER BY timestamp DESC LIMIT ?3";
+                 ORDER BY timestamp DESC LIMIT ?3",
+    };
 
     let mut stmt = conn.prepare(query).map_err(|e| {
         crate::MemosTradingError::Database(format!("candles sorgusu hazırlanamadı: {}", e))
     })?;
 
-    let rows = stmt.query_map(params![symbol, interval, limit as i64], |row| {
+    let map_row = |row: &rusqlite::Row| {
         // timestamp INTEGER (ms) ya da TEXT (RFC3339) olabilir → her ikisini de destekle.
         let ts: DateTime<Utc> = match row.get_ref(0)? {
             ValueRef::Integer(ms) => Utc.timestamp_millis_opt(ms).single()
@@ -270,7 +302,12 @@ pub fn read_candles(
             symbol: row.get(6)?,
             interval: row.get(7)?,
         })
-    }).map_err(|e| crate::MemosTradingError::Database(format!("Mum hasat hatası: {}", e)))?;
+    };
+
+    let rows = match market {
+        Some(m) => stmt.query_map(params![symbol, interval, limit as i64, m], map_row),
+        None    => stmt.query_map(params![symbol, interval, limit as i64], map_row),
+    }.map_err(|e| crate::MemosTradingError::Database(format!("Mum hasat hatası: {}", e)))?;
 
     let mut candles = Vec::with_capacity(limit.min(4096));
     for row in rows {
