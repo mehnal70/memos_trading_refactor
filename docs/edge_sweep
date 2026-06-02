@@ -1,4 +1,0 @@
-# 1) Toplu ön-tespit (uzun)
-  ./scripts/edge_sweep.sh
-  # 2) Çıkan raporu seed olarak ver — engine robust adayları yükler, sonra kendi doğrular
-  EDGE_SEED_REPORT=reports/edge_sweep_<ts>.json   # (TUI/engine başlatırken)
