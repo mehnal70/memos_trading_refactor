@@ -73,6 +73,30 @@ impl Engine {
             ));
         }
 
+        // ─── Canlı ÇIKIŞ MODELİ (TP/SL re-opt) ────────────────────────────────
+        // R/R asimetrisinin asıl kaynağı: TP/SL eskiden trailing'siz optimize ediliyordu
+        // (BacktestConfig Default → atr_trail_mult=None), ama canlıda çıkışların çoğu
+        // TRAILING_STOP ile oluyor → seçilen TP nadiren ateşlenip realized R/R çöküyordu.
+        // Artık strateji seçimi + TP/SL/PS araması + yön A/B'si canlının uyguladığı
+        // trailing + breakeven ile BİRLİKTE çalışır. Temsili trail mult canlı
+        // resolve_atr_mult ile aynı: default_target / serinin_noise_floor, clamp[1.5,30]
+        // (per-rejim trail A/B ayrıca ekseni override eder; bu base/temsili değerdir).
+        const EXIT_BREAKEVEN_RR: f64 = 1.0;
+        let exit_trail_mult: f64 = {
+            let default_target = state.lock().ok()
+                .and_then(|st| st.brain.parameters.read().ok()
+                    .map(|p| p.target_trail_pct_for_strategy("default")))
+                .unwrap_or(0.7);
+            match crate::robot::parameters::window_noise_floor_pct(&candles) {
+                Some(nf) if nf > 0.0 => (default_target / nf).clamp(1.5, 30.0),
+                _ => 2.0,
+            }
+        };
+        push_state_log(state, format!(
+            "🪤 Çıkış modeli (TP/SL re-opt): trail≈{:.1}×ATR + breakeven@RR {:.1} (canlı-temsili)",
+            exit_trail_mult, EXIT_BREAKEVEN_RR,
+        ));
+
         // Aday strateji pool'u StrategyRegistry'den otomatik genişler (Faz 4 c2):
         // yeni strateji default_registry()'ye eklendiğinde backtest_job ekstra
         // değişiklik gerektirmez. Alias'lar dahil edilmez (canonical_pool).
@@ -108,6 +132,8 @@ impl Engine {
                 use_htf,
                 edge_min_score: edge_min,
                 orderbook_sim: orderbook_sim.clone(),
+                atr_trail_mult: Some(exit_trail_mult),
+                breakeven_at_rr: Some(EXIT_BREAKEVEN_RR),
             };
             let Some(wf_res) = WalkForwardTester::new(wf_cfg).run(&candles) else {
                 push_state_log(state, format!("🔬   aday {} → WF sonuç alınamadı", name));
@@ -137,7 +163,8 @@ impl Engine {
         // (PS) burada belirlenir ki best_params üç ekseni de kapsasın.
         let final_opt = crate::robot::backtester::parameter_optimizer::ParameterOptimizer::new(
             symbol.clone(), interval.clone(), capital, best_name.clone(),
-        ).with_edge_min_score(edge_min).with_orderbook_sim(orderbook_sim.clone());
+        ).with_edge_min_score(edge_min).with_orderbook_sim(orderbook_sim.clone())
+         .with_exit_model(Some(exit_trail_mult), Some(EXIT_BREAKEVEN_RR));
         let final_res = final_opt.optimize_parallel(
             &candles,
             (2.0, 8.0, 1.0),       // TP %2 → %8, step 1
@@ -168,8 +195,8 @@ impl Engine {
                     strategy_name: best_name.clone(),
                     strategy_params: None,
                     commission_pct: 0.001,
-                    breakeven_at_rr: Some(1.0),
-                    atr_trail_mult: Some(2.0),
+                    breakeven_at_rr: Some(EXIT_BREAKEVEN_RR),
+                    atr_trail_mult: Some(exit_trail_mult),
                     partial_tp_ratio: None,
                     position_profile: None,
                     security_profile: None,
@@ -219,6 +246,10 @@ impl Engine {
             commission_pct: 0.001,
             use_htf,
             edge_min_score: edge_min,
+            // Canlı çıkış modeli — yön A/B'si de trailing'i görür (trail A/B base'i
+            // bunu miras alır, ekseni kendi override eder).
+            atr_trail_mult: Some(exit_trail_mult),
+            breakeven_at_rr: Some(EXIT_BREAKEVEN_RR),
             ..Default::default()
         };
         let regime_dir_map = crate::robot::backtester::walk_forward::evaluate_regime_direction(

@@ -51,11 +51,27 @@ pub struct ParameterOptimizer {
     edge_min_score: Option<f64>,
     /// Orderbook icrası (#c): create_config → BacktestConfig.orderbook_sim. Default None.
     orderbook_sim: Option<String>,
+    /// Canlı çıkış modeli: ATR-trail çarpanı. TP/SL araması canlının uyguladığı
+    /// trailing'le BİRLİKTE yapılsın diye. Default None (geriye-uyum: trailing'siz).
+    atr_trail_mult: Option<f64>,
+    /// Canlı çıkış modeli: breakeven RR eşiği (canlı default 1.0). Default None.
+    breakeven_at_rr: Option<f64>,
 }
 
 impl ParameterOptimizer {
     pub fn new(symbol: String, interval: String, initial_balance: f64, strategy_name: String) -> Self {
-        Self { symbol, interval, initial_balance, strategy_name, edge_min_score: None, orderbook_sim: None }
+        Self { symbol, interval, initial_balance, strategy_name,
+               edge_min_score: None, orderbook_sim: None,
+               atr_trail_mult: None, breakeven_at_rr: None }
+    }
+
+    /// Canlı çıkış modelini ayarlar (TP/SL araması trailing + breakeven'ı görür).
+    /// `None,None` → trailing'siz (eski davranış). Backtest/ML job canlı-temsili
+    /// trail mult'u (target_trail_pct / noise_floor) + breakeven 1.0 ile doldurur.
+    pub fn with_exit_model(mut self, atr_trail_mult: Option<f64>, breakeven_at_rr: Option<f64>) -> Self {
+        self.atr_trail_mult = atr_trail_mult;
+        self.breakeven_at_rr = breakeven_at_rr;
+        self
     }
 
     /// Giriş kalitesi edge eşiğini ayarlar (TP/SL/PS aramasının tüm alt-backtest'leri
@@ -174,8 +190,61 @@ impl ParameterOptimizer {
             commission_pct: 0.001,
             edge_min_score: self.edge_min_score,
             orderbook_sim: self.orderbook_sim.clone(),
+            atr_trail_mult: self.atr_trail_mult,
+            breakeven_at_rr: self.breakeven_at_rr,
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Belirgin zigzag (~%3 tepe-dip) → trailing tetiklenir; çıkış modeli TP/SL
+    /// aramasının sonucunu fiilen değiştirmeli (eskiden trailing'siz seçiliyordu).
+    fn zigzag(n: usize) -> Vec<Candle> {
+        (0..n).map(|i| {
+            let phase = (i / 6) % 2;
+            let dir = if phase == 0 { 1.0 } else { -1.0 };
+            let base = 100.0 + dir * (i % 6) as f64 * 0.5;
+            let c = base + dir * 0.5;
+            Candle { open: base, high: c.max(base) + 0.5, low: c.min(base) - 0.5, close: c,
+                     volume: 1000.0, symbol: "T".into(), interval: "1h".into(),
+                     ..Default::default() }
+        }).collect()
+    }
+
+    #[test]
+    fn exit_model_is_wired_into_tp_sl_search() {
+        let candles = zigzag(300);
+        let mk = || ParameterOptimizer::new(
+            "T".into(), "1h".into(), 10_000.0, "EMA_CROSSOVER".into());
+        let ranges = ((2.0, 6.0, 2.0), (1.0, 3.0, 1.0), (0.2, 0.4, 0.2));
+
+        let no_trail = mk().optimize_parallel(&candles, ranges.0, ranges.1, ranges.2)
+            .expect("trailing'siz arama Ok");
+        let with_trail = mk().with_exit_model(Some(2.0), Some(1.0))
+            .optimize_parallel(&candles, ranges.0, ranges.1, ranges.2)
+            .expect("trailing'li arama Ok");
+
+        assert!(no_trail.best_result.total_pnl.is_finite());
+        assert!(with_trail.best_result.total_pnl.is_finite());
+        // Trailing çıkışı değiştirdiği için en az bir metrik farklılaşmalı
+        // (seçilen TP/SL ya da realized PnL). Aynıysa çıkış modeli bağlanmamış demektir.
+        let differs = (with_trail.best_result.total_pnl - no_trail.best_result.total_pnl).abs() > 1e-9
+            || with_trail.best_parameters.take_profit_pct != no_trail.best_parameters.take_profit_pct
+            || with_trail.best_parameters.stop_loss_pct != no_trail.best_parameters.stop_loss_pct;
+        assert!(differs, "çıkış modeli TP/SL aramasını etkilemeli (trailing bağlı değil?)");
+    }
+
+    #[test]
+    fn exit_model_defaults_to_none() {
+        let opt = ParameterOptimizer::new("T".into(), "1h".into(), 10_000.0, "RSI".into());
+        let cfg = opt.create_config(&ParameterSet {
+            take_profit_pct: 3.0, stop_loss_pct: 1.5, max_position_size: 0.3 });
+        assert_eq!(cfg.atr_trail_mult, None, "default trailing'siz (geriye-uyum)");
+        assert_eq!(cfg.breakeven_at_rr, None);
     }
 }
 

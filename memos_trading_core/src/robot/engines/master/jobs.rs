@@ -266,9 +266,22 @@ impl Engine {
             Some(Self::dynamic_edge_threshold(0.0)),
             Self::dynamic_edge_threshold(0.0),
         );
+        // Canlı çıkış modeli (TP/SL re-opt): random_search da trailing + breakeven ile
+        // birlikte arasın → best_params canlının gerçek çıkışını yansıtsın (run_backtest_job
+        // ile aynı temsili mult: default_target / serinin_noise_floor, clamp[1.5,30]).
+        let exit_trail_mult: f64 = {
+            let default_target = state.lock().ok()
+                .and_then(|st| st.brain.parameters.read().ok()
+                    .map(|p| p.target_trail_pct_for_strategy("default")))
+                .unwrap_or(0.7);
+            match crate::robot::parameters::window_noise_floor_pct(&candles) {
+                Some(nf) if nf > 0.0 => (default_target / nf).clamp(1.5, 30.0),
+                _ => 2.0,
+            }
+        };
         let opt = crate::robot::backtester::parameter_optimizer::ParameterOptimizer::new(
             symbol.clone(), interval.clone(), capital, strategy_name.clone(),
-        ).with_edge_min_score(edge_min);
+        ).with_edge_min_score(edge_min).with_exit_model(Some(exit_trail_mult), Some(1.0));
         let result = opt.random_search(&candles, 60)
             .map_err(|e| format!("random_search: {:?}", e))?;
 

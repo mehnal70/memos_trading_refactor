@@ -27,6 +27,15 @@ pub struct WalkForwardConfig {
     /// Orderbook icrası (#c): BacktestConfig.orderbook_sim'e propagate. Default None.
     #[serde(default)]
     pub orderbook_sim: Option<String>,
+    /// Canlı çıkış modeli: ATR-trail çarpanı. TP/SL araması canlının uyguladığı
+    /// trailing'le BİRLİKTE yapılsın diye (eskiden None = trailing'siz → seçilen TP
+    /// canlıda trailing erken çıkınca nadiren ateşleniyordu). Default None (geriye-uyum:
+    /// eski testler/screener trailing'siz kalır). Backtest job canlı-temsili değerle doldurur.
+    #[serde(default)]
+    pub atr_trail_mult: Option<f64>,
+    /// Canlı çıkış modeli: breakeven RR eşiği (canlı default 1.0). Default None.
+    #[serde(default)]
+    pub breakeven_at_rr: Option<f64>,
 }
 
 impl Default for WalkForwardConfig {
@@ -43,6 +52,8 @@ impl Default for WalkForwardConfig {
             use_htf: false,
             edge_min_score: None,
             orderbook_sim: None,
+            atr_trail_mult: None,
+            breakeven_at_rr: None,
         }
     }
 }
@@ -168,6 +179,9 @@ impl WalkForwardTester {
             use_htf: self.config.use_htf,
             edge_min_score: self.config.edge_min_score,
             orderbook_sim: self.config.orderbook_sim.clone(),
+            // Canlı çıkış modeli (varsa) → strateji seçimi de trailing'i görür.
+            atr_trail_mult: self.config.atr_trail_mult,
+            breakeven_at_rr: self.config.breakeven_at_rr,
             ..Default::default()
         };
 
