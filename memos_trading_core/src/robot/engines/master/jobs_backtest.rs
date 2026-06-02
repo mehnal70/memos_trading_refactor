@@ -338,17 +338,15 @@ impl Engine {
         );
 
         // ─── 3c) POOL-WIDE otonom INTERVAL seçimi (hafif OOS skoru) ──────────────
-        // Her pool sembolü için aday TF'ler (env AUTO_INTERVAL_CANDIDATES, default 15m,1h)
-        // arasında HAFİF skor: wf_oos_windows + score_config_over_windows (param SABİT =
-        // global best → interval ekseni izole + ucuz; per-pencere param re-opt YOK).
-        // OBJEKTİF artık pooled Profit Factor (ham PnL değil) → gürültü TF'i (1m, PF≈0.01)
-        // yüksek PnL ile seçilmez; R/R'si sağlam TF (1h) kazanır ([[project_rr_trail_ab]] lever A).
-        // evaluate_symbol_interval + pick_best_with_margin yeniden kullanılır (DRY).
+        // Her pool sembolü için aday TF'ler (auto_interval_candidates TEK KAYNAK, default
+        // 15m,1h,4h,1d — WF-onaylı edge çoğu 1d'de) arasında HAFİF skor: wf_oos_windows +
+        // score_config_over_windows (param SABİT = global best → interval ekseni izole + ucuz;
+        // per-pencere param re-opt YOK). OBJEKTİF pooled Profit Factor (ham PnL değil) → gürültü
+        // TF'i (1m, PF≈0.01) yüksek PnL ile seçilmez; R/R'si sağlam TF kazanır ([[project_rr_trail_ab]]
+        // lever A). evaluate_symbol_interval + pick_best_with_margin yeniden kullanılır (DRY).
         // Mevcut TF'i IV_MARGIN (PF birimi) ile geçmeyen değişmez (flip-flop). Chicken-egg:
         // yeterli mumu olmayan aday atlanır. [[project_adaptive_regime]] [[feedback_modular_dry_perf]].
-        let auto_iv_candidates: Vec<String> = std::env::var("AUTO_INTERVAL_CANDIDATES")
-            .unwrap_or_else(|_| "15m,1h".into())
-            .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        let auto_iv_candidates: Vec<String> = super::auto_interval_candidates();
         let min_iv_bars = wf_is + wf_oos;
         const IV_MARGIN: f64 = 0.05; // PF birimi: yeni TF mevcudu ≥0.05 PF geçmeli (histerezis)
         // Sabit skorlama şablonu (global best strateji+param; yalnız symbol/interval değişir).

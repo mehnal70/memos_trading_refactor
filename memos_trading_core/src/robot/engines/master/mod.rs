@@ -187,6 +187,16 @@ pub(crate) fn env_truthy(key: &str) -> bool {
     crate::core::env::env_truthy(key)
 }
 
+/// Otonom interval-seçim aday TF'leri — TEK KAYNAK (jobs_backtest interval A/B + jobs_download
+/// aday-TF çekimi ikisi de bunu kullanır; default tek yerde). WF-onaylı edge'in çoğu YÜKSEK
+/// TF'lerde (1d/4h, [[project_edge_scan]] sweep bulgusu) → default ladder 15m,1h,4h,1d. Operatör
+/// `AUTO_INTERVAL_CANDIDATES` ile override eder (örn. yalnız "1h,4h,1d"). Geçersiz/boş → default.
+pub(crate) fn auto_interval_candidates() -> Vec<String> {
+    let raw = std::env::var("AUTO_INTERVAL_CANDIDATES").unwrap_or_else(|_| "15m,1h,4h,1d".into());
+    let v: Vec<String> = raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if v.is_empty() { vec!["15m".into(), "1h".into(), "4h".into(), "1d".into()] } else { v }
+}
+
 /// Boot'ta env'den BİR KEZ okunan runtime ayar paketi. `AppState.tuning` alanında
 /// `Arc` olarak tutulur; cycle hot-path'i her tur `getenv` yapmak yerine bu struct'tan
 /// okur. Env hâlâ kaynaktır (operatör override eder) ama yalnızca `AppState::new`'da

@@ -228,13 +228,11 @@ impl Engine {
         }
 
         // 3b) Faz 3 — Otonom interval eval'in chicken-egg'i: POOL-WIDE aday-TF download.
-        // Her pool sembolü için AUTO_INTERVAL_CANDIDATES TF'lerini de çek (ana loop yalnız
-        // o sembolün sym_iv'sini çeker) → run_backtest_job pool-wide interval eval'i GERÇEK
-        // veriyle kıyaslayabilir. Bounded aday + sym_iv atlanır → API yükü sınırlı.
-        // [[project_adaptive_regime]] Faz 3 · [[feedback_modular_dry_perf]].
-        let auto_iv_candidates: Vec<String> = std::env::var("AUTO_INTERVAL_CANDIDATES")
-            .unwrap_or_else(|_| "15m,1h".into())
-            .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        // Her pool sembolü için aday TF'leri de çek (ana loop yalnız o sembolün sym_iv'sini
+        // çeker) → run_backtest_job pool-wide interval eval'i GERÇEK veriyle kıyaslayabilir.
+        // auto_interval_candidates TEK KAYNAK (jobs_backtest ile aynı default 15m,1h,4h,1d).
+        // Bounded aday + sym_iv atlanır → API yükü sınırlı. [[project_adaptive_regime]] Faz 3.
+        let auto_iv_candidates: Vec<String> = super::auto_interval_candidates();
         if !auto_iv_candidates.is_empty() {
             for sym in &symbols {
                 let sym_iv = symbol_interval.get(sym).cloned().unwrap_or_else(|| interval.clone());
