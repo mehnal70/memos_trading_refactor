@@ -296,7 +296,52 @@ pub fn ensure_candles_table(conn: &Connection) -> Result<()> {
 }
 
 /// Kanonik candle şema sürümü (PRAGMA user_version ile izlenir).
-pub const CANDLE_SCHEMA_VERSION: i64 = 2;
+/// v2 = market-farkında geniş unique key (Faz 0). v3 = ölü/legacy tablo temizliği (Faz 4).
+pub const CANDLE_SCHEMA_VERSION: i64 = 3;
+
+/// 🧹 Faz 4: koddan ARTIK OKUNMAYAN/YAZILMAYAN legacy candle tabloları. Canlı kaynak
+/// tek-nokta `candles` (kanonik, market-ayrık). Bunlar ya bayat snapshot ya da bozuk/
+/// tekrarlı (ör. candles_binance_spot BTCUSDT: 2 günde 236k satır = dup çöp) ya da
+/// per-symbol eski şema kalıntısı. Hiçbiri kodda referanslı değil (yalnız test yorumu).
+/// DB-boyutunun ~%75'ini (~2GB) bunlar tutuyor → DROP + VACUUM ile geri kazanılır.
+/// Tam DB yedeği arşiv politikasıdır (canlı DB'den düşürülür, yedek dosyada kalır).
+const LEGACY_DEAD_TABLES: &[&str] = &[
+    "candles_backup",
+    "candles_binance_spot",
+    "candles_binance_futures",
+    "candles_binance_coinm",
+    "candles_binance_spot_bak",
+    "candles_binance_futures_bak",
+    "candles_bist_bist100",
+    "candles_bist_stocks",
+    "candles_btcusdt_1m",
+    "candles_ethusdt_1m",
+];
+
+/// Verilen tablonun DB'de var olup olmadığını döndürür (sqlite_master sorgusu).
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        params![table], |r| r.get(0),
+    ).map_err(|e| crate::MemosTradingError::Database(format!("sqlite_master sorgu: {}", e)))?;
+    Ok(n > 0)
+}
+
+/// 🧹 Faz 4 adımı: [`LEGACY_DEAD_TABLES`] içindeki ölü tabloları (varsa) düşürür.
+/// Düşürülen tablo sayısını döndürür. VACUUM'u çağıran üstlenir (transaction dışı koşmalı).
+fn prune_legacy_tables(conn: &Connection) -> Result<usize> {
+    let mut dropped = 0usize;
+    for &t in LEGACY_DEAD_TABLES {
+        if table_exists(conn, t)? {
+            // İsim sabit-liste (kullanıcı girdisi değil) → format! güvenli.
+            conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{t}\";"))
+                .map_err(|e| crate::MemosTradingError::Database(
+                    format!("ölü tablo düşürme ({t}) hatası: {e}")))?;
+            dropped += 1;
+        }
+    }
+    Ok(dropped)
+}
 
 /// 🔧 Faz 0 migration: mevcut `candles` tablosunu dar unique key
 /// `(symbol,interval,timestamp)` → kanonik geniş key
@@ -313,7 +358,9 @@ pub fn migrate_candle_schema(conn: &Connection) -> Result<()> {
 
     // Tablo yoksa kanonik yarat (taze DB). Varsa ve exchange kolonluysa index swap.
     ensure_candles_table(conn)?;
-    if column_exists(conn, "candles", "exchange")? {
+
+    // ── v2: market-farkında geniş unique key (Faz 0) — yalnız henüz taşınmamışsa. ──
+    if uv < 2 && column_exists(conn, "candles", "exchange")? {
         conn.execute_batch(
             "DROP INDEX IF EXISTS idx_candles_dedup;
              DROP INDEX IF EXISTS idx_symbol_interval_timestamp;
@@ -322,10 +369,27 @@ pub fn migrate_candle_schema(conn: &Connection) -> Result<()> {
              CREATE INDEX IF NOT EXISTS idx_timestamp ON candles(timestamp);"
         ).map_err(|e| crate::MemosTradingError::Database(
             format!("candle şema migration (index swap) hatası: {}", e)))?;
-        log::info!("🔧 candle şema migration: market-farkında unique key kuruldu (v{CANDLE_SCHEMA_VERSION})");
+        log::info!("🔧 candle şema migration: market-farkında unique key kuruldu (v2)");
     }
+
+    // ── v3: ölü/legacy candle tablolarını düşür + alanı geri kazan (Faz 4). ──
+    let pruned = if uv < 3 { prune_legacy_tables(conn)? } else { 0 };
+
+    // Sürüm damgası VACUUM'dan ÖNCE: DROP'lar zaten commit'li; VACUUM yarıda kesilse
+    // bile tablolar düşürülmüş kalır (correctness korunur), yalnız alan geri kazanılmaz
+    // → sonraki boot uv>=3 görüp tekrar denemez (idempotent, gereksiz iş yok).
     conn.pragma_update(None, "user_version", CANDLE_SCHEMA_VERSION)
         .map_err(|e| crate::MemosTradingError::Database(format!("user_version damga hatası: {}", e)))?;
+
+    // VACUUM transaction-dışı koşmalı (rusqlite execute_batch tek-statement → açık tx yok).
+    // Yalnız gerçekten tablo düşürdüysek çalıştır (taze DB'de boşa I/O yok). Best-effort:
+    // başarısızlık migration'ı bozmaz (tablolar zaten gitti, alan sonra elle geri alınabilir).
+    if pruned > 0 {
+        match conn.execute_batch("VACUUM;") {
+            Ok(_)  => log::info!("🧹 Faz 4: {pruned} ölü tablo düşürüldü + VACUUM tamam (v3, alan geri kazanıldı)"),
+            Err(e) => log::warn!("🧹 Faz 4: {pruned} ölü tablo düşürüldü; VACUUM atlandı ({e}) — alan elle geri alınabilir"),
+        }
+    }
     Ok(())
 }
 
@@ -465,5 +529,45 @@ mod migration_tests {
         super::migrate_candle_schema(&conn).unwrap();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM candles", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 2, "mevcut satırlar korunmalı (index swap kayıpsız)");
+    }
+
+    #[test]
+    fn v3_prunes_dead_tables_and_keeps_canonical() {
+        let conn = setup_old_schema();
+        // Kanonik `candles`'a bir satır + birkaç ölü legacy tablo (veri dolu) kur.
+        conn.execute(
+            "INSERT INTO candles (exchange, market, symbol, interval, timestamp, open, high, low, close, volume) \
+             VALUES ('binance','spot','BTCUSDT','1h', 1000, 1.0,1.0,1.0,1.0,1.0)", []).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE candles_backup (x INTEGER); INSERT INTO candles_backup VALUES (1);
+             CREATE TABLE candles_binance_spot (x INTEGER); INSERT INTO candles_binance_spot VALUES (1);
+             CREATE TABLE candles_btcusdt_1m (x INTEGER); INSERT INTO candles_btcusdt_1m VALUES (1);
+             CREATE TABLE keep_me (x INTEGER); INSERT INTO keep_me VALUES (1);"
+        ).unwrap();
+
+        super::migrate_candle_schema(&conn).unwrap();
+
+        // Ölü tablolar gitti.
+        for t in ["candles_backup", "candles_binance_spot", "candles_btcusdt_1m"] {
+            assert!(!super::table_exists(&conn, t).unwrap(), "{t} düşürülmeliydi");
+        }
+        // Kanonik veri + listede olmayan tablo korundu.
+        assert!(super::table_exists(&conn, "keep_me").unwrap(), "listede olmayan tablo korunmalı");
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM candles", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "kanonik candles satırı korunmalı");
+        let uv: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(uv, 3, "v3 damgalanmalı");
+    }
+
+    #[test]
+    fn v3_prune_idempotent_no_dead_tables() {
+        // uv=2 (zaten market-migrated) DB'de ölü tablo yok → prune no-op, uv=3 olur, hata yok.
+        let conn = setup_old_schema();
+        conn.pragma_update(None, "user_version", 2i64).unwrap();
+        super::migrate_candle_schema(&conn).unwrap();
+        let uv: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(uv, 3);
+        // İkinci çağrı tam no-op.
+        super::migrate_candle_schema(&conn).unwrap();
     }
 }
