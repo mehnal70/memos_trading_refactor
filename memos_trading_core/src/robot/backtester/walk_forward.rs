@@ -503,6 +503,32 @@ where
     (choice, scored)
 }
 
+/// Per-sembol otonom STRATEJİ seçimi (otonom `symbol_strategy` girdisi). `evaluate_symbol_interval`'in
+/// strateji-ekseni kardeşi: aday strateji adlarını `score(name) -> Option<f64>` (pooled PF) ile
+/// skorlar, `pick_best_with_margin` ile mevcut `current`'i `margin` ile geçeni seçer. Mumlar SABİT
+/// (tek seri); yalnız strateji değişir → `load` adımı YOK. `min_score` altındaki kazanan ELENİR
+/// (None) → yalnız GERÇEK edge'li strateji per-symbol atanır, aksi halde çağıran global/auto'da
+/// kalır (gürültüde override yok). Döner: (seçim, tüm skorlar). [[project_edge_scan]].
+pub fn evaluate_symbol_strategy<S>(
+    candidates: &[String], score: S, current: Option<&str>, margin: f64, min_score: f64,
+) -> (Option<String>, Vec<(String, f64)>)
+where
+    S: Fn(&str) -> Option<f64>,
+{
+    let mut scored: Vec<(String, f64)> = Vec::new();
+    for c in candidates {
+        if let Some(s) = score(c) { scored.push((c.clone(), s)); }
+    }
+    if scored.is_empty() { return (None, scored); }
+    let cur = current.map(|s| s.to_string());
+    let choice = pick_best_with_margin(&scored, cur.as_ref(), margin);
+    // Kazananın skoru min_score'u geçmiyorsa atama yapma (gerçek edge yok → global/auto kalsın).
+    let ok = choice.as_ref()
+        .and_then(|c| scored.iter().find(|(n, _)| n == c).map(|(_, s)| *s >= min_score))
+        .unwrap_or(false);
+    (if ok { choice } else { None }, scored)
+}
+
 /// Per-rejim YÖN DİSİPLİNİ A/B'si (otonom `RegimePolicy.regime_directional` girdisi).
 /// Her rejimin OOS pencerelerinde aynı strateji/param ile LongOnly vs RegimeDirectional
 /// backtest koşar, rejim başına toplam PnL'i kıyaslar. Dönen map: regime → disiplin
@@ -900,6 +926,28 @@ mod tests {
         let (empty_choice, empty_scored) = evaluate_symbol_interval(&cands, load, none_score, Some("1h"), 0.0);
         assert_eq!(empty_choice, None);
         assert!(empty_scored.is_empty());
+    }
+
+    #[test]
+    fn evaluate_symbol_strategy_gates_on_min_score_and_margin() {
+        let pool = vec!["EMA".to_string(), "ICT".to_string(), "RSI".to_string()];
+        // PF: EMA=0.68 (edge yok), ICT=1.53 (edge), RSI skorlanamaz (None).
+        let score = |name: &str| -> Option<f64> {
+            match name { "EMA" => Some(0.68), "ICT" => Some(1.53), _ => None }
+        };
+        // current yok, min_score=1.0 → en iyi ICT (1.53 ≥ 1.0) seçilir; RSI atlanır.
+        let (choice, scored) = evaluate_symbol_strategy(&pool, score, None, 0.10, 1.0);
+        assert_eq!(choice, Some("ICT".to_string()));
+        assert_eq!(scored.len(), 2, "RSI skorlanamadı → atlanmalı");
+
+        // Tüm adaylar PF<1.0 ise (min_score) → None (gürültüde per-symbol override yok).
+        let weak = |name: &str| -> Option<f64> { match name { "EMA" => Some(0.7), "ICT" => Some(0.9), _ => None } };
+        let (none_choice, _) = evaluate_symbol_strategy(&pool, weak, None, 0.10, 1.0);
+        assert_eq!(none_choice, None, "edge yokken (PF<1.0) atama yapılmamalı");
+
+        // current=ICT(1.53), aday EMA daha düşük → margin'le ICT korunur (flip-flop yok).
+        let (hold, _) = evaluate_symbol_strategy(&pool, score, Some("ICT"), 0.10, 1.0);
+        assert_eq!(hold, Some("ICT".to_string()));
     }
 
     #[test]

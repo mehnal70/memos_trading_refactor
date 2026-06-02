@@ -10,6 +10,8 @@
 // (Faz 3 sağlık kapısı), ParameterOptimizer/Backtester (holdout), default_registry (strateji havuzu),
 // window_noise_floor_pct (canlı-temsili trailing). Yeni iş yalnız orkestrasyon + raporlama.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::persistence::reader::{list_series, read_candles_market, CandleSeriesRef};
@@ -130,8 +132,11 @@ pub struct EdgeScanReport {
     /// PF≥1.0 net-kârlı seri sayısı.
     pub profitable_count: usize,
     /// (market, interval) kırılımlı özet — en iyi PF AZALAN sıralı.
+    /// serde(default): şema evrimine tolerans (eski/özetsiz rapor da yüklenir → seed kırılmaz).
+    #[serde(default)]
     pub summary: Vec<GroupSummary>,
     /// PF AZALAN sıralı satırlar.
+    #[serde(default)]
     pub rows: Vec<EdgeRow>,
 }
 
@@ -304,6 +309,42 @@ where
     }
 }
 
+/// Seed robustluk barı: bir edge_scan satırını CANLIYA seed etmeye değer mi? edge_scan'ın
+/// küçük-örneklem fluke uyarısını eler — `min_trades` (10 değil ~30) + `min_pf` (1.0 sınırı
+/// değil ~1.2 margin) ile yalnız sağlam adaylar PRIOR olur; online backtest job sonra doğrular.
+#[derive(Debug, Clone, Copy)]
+pub struct SeedRobustness {
+    pub min_trades: usize,
+    pub min_pf: f64,
+}
+
+impl Default for SeedRobustness {
+    fn default() -> Self { Self { min_trades: 30, min_pf: 1.2 } }
+}
+
+/// Bir rapordan robustluk barını geçen `sembol → en iyi strateji` seed map'i üretir.
+/// Aynı sembol birden çok seride geçerse EN YÜKSEK PF kazanır. Yalnız `profitable` +
+/// bar'ı aşan satırlar. Saf → testli. ParameterStore.symbol_strategy'ye PRIOR olarak yüklenir.
+pub fn seed_symbol_strategy(report: &EdgeScanReport, r: SeedRobustness) -> HashMap<String, String> {
+    let mut best: HashMap<String, (String, f64)> = HashMap::new();
+    for row in &report.rows {
+        if !row.profitable || row.trades < r.min_trades || row.profit_factor < r.min_pf { continue; }
+        let e = best.entry(row.symbol.clone()).or_insert_with(|| (String::new(), f64::NEG_INFINITY));
+        if row.profit_factor > e.1 { *e = (row.best_strategy.clone(), row.profit_factor); }
+    }
+    best.into_iter().map(|(sym, (strat, _))| (sym, strat)).collect()
+}
+
+/// JSON rapor DOSYASINDAN seed map (dosya yok/parse hatası → boş, sessiz). Boot'ta
+/// `EDGE_SEED_REPORT` env'i bu yola işaret ederse symbol_strategy'ye yüklenir.
+pub fn seed_symbol_strategy_from_file(path: &str, r: SeedRobustness) -> HashMap<String, String> {
+    let Ok(txt) = std::fs::read_to_string(path) else { return HashMap::new() };
+    match serde_json::from_str::<EdgeScanReport>(&txt) {
+        Ok(report) => seed_symbol_strategy(&report, r),
+        Err(_) => HashMap::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,6 +408,59 @@ mod tests {
         let f1h = s.iter().find(|g| g.market == "futures" && g.interval == "1h").unwrap();
         assert_eq!((f1h.scanned, f1h.profitable), (2, 1), "futures/1h: 2 taranan, 1 kârlı");
         assert!((f1h.best_pf - 1.5).abs() < 1e-9 && f1h.best_symbol == "A");
+    }
+
+    #[test]
+    fn report_json_roundtrips_through_seed_loader() {
+        // serde round-trip: rapor yaz → seed_symbol_strategy_from_file oku (gerçek dosya dikişi).
+        let report = EdgeScanReport {
+            generated_at: "t".into(), db_path: "d".into(), market_filter: Some("futures".into()),
+            series_candidates: 1, series_scanned: 1, series_skipped: 0, profitable_count: 1,
+            summary: vec![],
+            rows: vec![EdgeRow {
+                exchange: "binance".into(), market: "futures".into(), symbol: "BTCUSDT".into(),
+                interval: "1h".into(), rows: 5000, gap_pct: 0.0, stale_days: 0.0,
+                best_strategy: "ICT_COMPOSITE".into(), take_profit_pct: 6.0, stop_loss_pct: 1.0,
+                max_position_size: 0.3, trades: 40, win_rate: 0.4, profit_factor: 1.5,
+                expectancy: 5.0, sharpe: 0.5, profitable: true,
+            }],
+        };
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("edge_roundtrip_{}.json", std::process::id()));
+        let p = path.to_string_lossy().to_string();
+        std::fs::write(&p, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+        let seed = seed_symbol_strategy_from_file(&p, SeedRobustness::default());
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(seed.get("BTCUSDT").map(|s| s.as_str()), Some("ICT_COMPOSITE"),
+            "rapor JSON seed loader'dan round-trip etmeli");
+    }
+
+    #[test]
+    fn seed_filters_flukes_and_keeps_best_per_symbol() {
+        let mk = |sym: &str, iv: &str, strat: &str, pf: f64, trades: usize, profitable: bool| EdgeRow {
+            exchange: "b".into(), market: "futures".into(), symbol: sym.into(), interval: iv.into(),
+            rows: 5000, gap_pct: 0.0, stale_days: 0.0, best_strategy: strat.into(),
+            take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
+            trades, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0, profitable,
+        };
+        let report = EdgeScanReport {
+            generated_at: "t".into(), db_path: "d".into(), market_filter: None,
+            series_candidates: 5, series_scanned: 5, series_skipped: 0, profitable_count: 4,
+            summary: vec![],
+            rows: vec![
+                mk("RAVEUSDT", "1h", "MA_CROSSOVER", 18.5, 16, true), // fluke: trades<30 → elenir
+                mk("BTCUSDT", "1h", "ICT_COMPOSITE", 1.5, 40, true),  // robust → girer
+                mk("BTCUSDT", "4h", "MACD", 1.3, 35, true),           // aynı sembol düşük PF → kaybeder
+                mk("ETHUSDT", "1h", "RSI", 1.1, 50, true),            // PF<1.2 → elenir
+                mk("ADAUSDT", "1h", "BB", 2.0, 40, false),            // profitable=false → elenir
+            ],
+        };
+        let seed = seed_symbol_strategy(&report, SeedRobustness::default());
+        assert_eq!(seed.len(), 1, "yalnız BTCUSDT robustluk barını geçer");
+        assert_eq!(seed.get("BTCUSDT").map(|s| s.as_str()), Some("ICT_COMPOSITE"),
+            "aynı sembolde en yüksek PF (1.5>1.3) kazanır");
+        assert!(!seed.contains_key("RAVEUSDT"), "16 işlem fluke elenir");
+        assert!(!seed.contains_key("ETHUSDT"), "PF 1.1 < 1.2 elenir");
     }
 
     #[test]

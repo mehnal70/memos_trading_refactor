@@ -79,6 +79,13 @@ pub struct ParameterStore {
     /// `config.interval`'e düşer (sıfır regresyon). [[project_adaptive_regime]].
     #[serde(default)]
     pub symbol_interval: HashMap<String, String>,
+    /// Per-sembol otonom STRATEJİ. Key = sembol, value = kanonik strateji adı
+    /// ("ICT_COMPOSITE"/"MA_CROSSOVER"...). edge_scan (offline survey, robust-filtreli seed)
+    /// + backtest job per-symbol WF/pooled-PF A/B'si doldurur. Canlı cycle `strategy_for` ile
+    /// per-symbol okur (precedence: symbol_strategy > global live_strategy > auto select_best).
+    /// Boş → mevcut davranış (global/auto), sıfır regresyon. [[project_edge_scan]].
+    #[serde(default)]
+    pub symbol_strategy: HashMap<String, String>,
 }
 
 /// Strateji niyetiyle hizalı default trail target'lar (yüzde, entry'den uzaklık).
@@ -129,6 +136,7 @@ impl Default for ParameterStore {
             leverage: LeverageParams::default(),
             strategy_params: HashMap::new(),
             symbol_interval: HashMap::new(),
+            symbol_strategy: HashMap::new(),
         }
     }
 }
@@ -200,6 +208,23 @@ impl ParameterStore {
         }
         if let Some(v) = parse_env_f64("LEVERAGE_VOL_FLOOR_PCT") {
             store.leverage.vol_floor_pct = v;
+        }
+        // edge_scan SEED (Part 3): EDGE_SEED_REPORT bir edge_sweep JSON'una işaret ederse,
+        // robustluk barını (EDGE_SEED_MIN_TRADES/EDGE_SEED_MIN_PF) geçen sembol→strateji
+        // adayları symbol_strategy'ye PRIOR olarak yüklenir. Online backtest job sonra doğrular/
+        // üzerine yazar. Boş/yok → no-op (sıfır regresyon). [[project_edge_scan]].
+        if let Some(path) = std::env::var("EDGE_SEED_REPORT").ok().filter(|s| !s.trim().is_empty()) {
+            let r = crate::robot::backtester::SeedRobustness {
+                min_trades: std::env::var("EDGE_SEED_MIN_TRADES").ok()
+                    .and_then(|v| v.parse().ok()).unwrap_or(30),
+                min_pf: parse_env_f64("EDGE_SEED_MIN_PF").unwrap_or(1.2),
+            };
+            let seed = crate::robot::backtester::seed_symbol_strategy_from_file(&path, r);
+            let n = seed.len();
+            store.symbol_strategy.extend(seed);
+            if n > 0 {
+                log::info!("🌱 edge seed: {} sembol×strateji symbol_strategy'ye yüklendi ({})", n, path);
+            }
         }
         store
     }
@@ -311,6 +336,15 @@ impl ParameterStore {
     /// (sıfır regresyon). Cycle dispatch + download tek-nokta bunu çağırır.
     pub fn interval_for(&self, symbol: &str, fallback: &str) -> String {
         self.symbol_interval.get(symbol).cloned().unwrap_or_else(|| fallback.to_string())
+    }
+
+    /// Bu sembol için otonom seçilmiş STRATEJİ; yoksa `None` (çağıran global/auto'ya düşer).
+    /// `symbol_strategy` map'i edge_scan seed + backtest job WF/PF A/B'si doldurur. Boş değer
+    /// (whitespace) güvenli şekilde None sayılır. Canlı cycle precedence'in 1. basamağı.
+    pub fn strategy_for(&self, symbol: &str) -> Option<String> {
+        self.symbol_strategy.get(symbol)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
 
     /// İlgili rejim için (override varsa o, yoksa base) TradeRiskParams.

@@ -362,8 +362,8 @@ impl Engine {
             commission_pct: 0.001, use_htf, edge_min_score: edge_min,
             ..Default::default()
         };
-        // Pool sembolleri + mevcut interval map (eligible; tek kısa lock).
-        let (iv_pool, iv_current) = {
+        // Pool sembolleri + mevcut interval/strateji map'leri (eligible; tek kısa lock).
+        let (iv_pool, iv_current, strat_current) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             let tuning = Arc::clone(&st.tuning);
             let mut pool: Vec<String> = Vec::new();
@@ -377,13 +377,20 @@ impl Engine {
             }
             let pinned = st.config.pinned_symbols.clone();
             for s in &pinned { add(s, &mut pool); }
-            let cur = st.brain.parameters.read().ok()
-                .map(|p| p.symbol_interval.clone()).unwrap_or_default();
-            (pool, cur)
+            let (cur_iv, cur_strat) = st.brain.parameters.read().ok()
+                .map(|p| (p.symbol_interval.clone(), p.symbol_strategy.clone())).unwrap_or_default();
+            (pool, cur_iv, cur_strat)
         };
+        // Per-symbol STRATEJİ A/B histerezisi + atama eşiği (PF birimi). edge_scan bulgusu:
+        // farklı semboller farklı strateji ister (BTC→ICT_COMPOSITE 1.53 vs EMA 0.68).
+        const STRAT_MARGIN: f64 = 0.10;     // yeni strateji mevcudu ≥0.10 PF geçmeli (flip-flop koruması)
+        const STRAT_MIN_SCORE: f64 = 1.0;   // yalnız PF≥1.0 (gerçek edge) per-symbol atanır; aksi global/auto
+
         // Lock DIŞI ağır hesap; sonra toplu yazım.
         let mut iv_results: Vec<(String, String)> = Vec::new(); // (symbol, chosen)
         let mut iv_log: Vec<String> = Vec::new();
+        let mut strat_results: Vec<(String, String)> = Vec::new(); // (symbol, chosen strateji)
+        let mut strat_log: Vec<String> = Vec::new();
         for sym in &iv_pool {
             let cur = iv_current.get(sym).cloned().unwrap_or_else(|| interval.clone());
             let (chosen, scored) = crate::robot::backtester::walk_forward::evaluate_symbol_interval(
@@ -402,11 +409,48 @@ impl Engine {
                 },
                 Some(&cur), IV_MARGIN,
             );
-            if let Some(best) = chosen {
-                if best != cur { iv_results.push((sym.clone(), best.clone())); }
+            if let Some(best) = &chosen {
+                if best != &cur { iv_results.push((sym.clone(), best.clone())); }
                 if !scored.is_empty() {
                     let sc: Vec<String> = scored.iter().map(|(c, s)| format!("{c}={s:.1}")).collect();
                     iv_log.push(format!("{sym}→{best}[{}]", sc.join(",")));
+                }
+            }
+
+            // ─── Per-symbol STRATEJİ seçimi (online self-discovery) ──────────────
+            // Sembolün EFEKTİF interval'inde (yeni seçildiyse o, yoksa mevcut) tüm strateji
+            // havuzunu pooled-PF ile skorla; param SABİT (iv_base = global best → strateji ekseni
+            // izole + ucuz). Yalnız PF≥STRAT_MIN_SCORE kazanan + margin'i geçen atanır.
+            let eff_iv = chosen.clone().unwrap_or_else(|| cur.clone());
+            let strat_candles = crate::persistence::reader::read_candles_market(&db_path, sym, &eff_iv, &market, 5000)
+                .unwrap_or_default();
+            if strat_candles.len() >= min_iv_bars {
+                let windows = crate::robot::backtester::walk_forward::wf_oos_windows(
+                    strat_candles.len(), wf_is, wf_oos, wf_step);
+                if !windows.is_empty() {
+                    let cur_strat = strat_current.get(sym).map(|s| s.as_str());
+                    let (s_chosen, s_scored) = crate::robot::backtester::walk_forward::evaluate_symbol_strategy(
+                        &strat_pool,
+                        |name| {
+                            let mut cfg = iv_base.clone();
+                            cfg.symbol = sym.clone();
+                            cfg.interval = eff_iv.clone();
+                            cfg.strategy_name = name.to_string();
+                            Some(crate::robot::backtester::walk_forward::score_config_over_windows(
+                                &cfg, &strat_candles, &windows))
+                        },
+                        cur_strat, STRAT_MARGIN, STRAT_MIN_SCORE,
+                    );
+                    if let Some(best) = s_chosen {
+                        if Some(best.as_str()) != cur_strat { strat_results.push((sym.clone(), best.clone())); }
+                        if !s_scored.is_empty() {
+                            // En iyi 3 skoru logla (havuz büyük olabilir).
+                            let mut top = s_scored.clone();
+                            top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                            let sc: Vec<String> = top.iter().take(3).map(|(c, s)| format!("{c}={s:.2}")).collect();
+                            strat_log.push(format!("{sym}@{eff_iv}→{best}[{}]", sc.join(",")));
+                        }
+                    }
                 }
             }
         }
@@ -462,12 +506,23 @@ impl Engine {
                 for (sym, iv) in &iv_results {
                     params.symbol_interval.insert(sym.clone(), iv.clone());
                 }
+                // Pool-wide otonom STRATEJİ kazananları (evaluate_symbol_strategy, PF≥1.0 + margin).
+                for (sym, strat) in &strat_results {
+                    params.symbol_strategy.insert(sym.clone(), strat.clone());
+                }
             }
             // Pool-wide otonom interval özeti — gözlemlenebilirlik (değişenler + tüm skorlar).
             if !iv_log.is_empty() {
                 st.push_log(format!(
                     "📐 auto-interval ({} sembol değerlendirildi, {} değişti): {}",
                     iv_log.len(), iv_results.len(), iv_log.join(" · "),
+                ));
+            }
+            // Pool-wide otonom strateji özeti (per-symbol edge: hangi sembol hangi stratejiyi seçti).
+            if !strat_log.is_empty() {
+                st.push_log(format!(
+                    "🧠 auto-strateji ({} sembol edge-li, {} değişti): {}",
+                    strat_log.len(), strat_results.len(), strat_log.join(" · "),
                 ));
             }
             // hyperopt_score WF skoruna mühürlenir — UI/legacy okuyucular için
