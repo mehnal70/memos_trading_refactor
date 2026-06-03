@@ -90,9 +90,14 @@ pub fn render_position_row(p: &PositionModel) -> Row<'static> {
     // Kaldıraç: 1.0 → spot davranışı (gri), >1 → kaldıraçlı (cyan vurgu).
     let lev_color = if p.leverage > 1.0 { Color::Cyan } else { Color::DarkGray };
 
+    // TF: pozisyonun açıldığı zaman dilimi (per-symbol; seed/symbol_interval ile global'den
+    // farklı olabilir). Boş (eski snapshot) → "—". Edge sembolleri 1d/4h burada görünür.
+    let tf_label = if p.interval.is_empty() { "—".to_string() } else { p.interval.clone() };
+
     Row::new(vec![
         Cell::from(p.symbol.clone()).style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from(p.trade_type.clone()),
+        Cell::from(tf_label).style(Style::default().fg(Color::LightCyan)),
         Cell::from(if p.is_long { "▲ LONG" } else { "▼ SHORT" }).style(Style::default().fg(color)),
         Cell::from(market_label).style(Style::default().fg(market_color)),
         Cell::from(format!("{:.1}x", p.leverage)).style(Style::default().fg(lev_color)),

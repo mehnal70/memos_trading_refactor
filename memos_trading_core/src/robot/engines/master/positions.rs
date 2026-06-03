@@ -438,6 +438,14 @@ impl Engine {
                 entry_price: entry, current_price: entry,
                 qty: qty_val, leverage: leverage_resolved,
                 market: st.config.market.clone(),
+                // Pozisyonun GERÇEK trade TF'i: mumlar per-symbol interval_c'den geldi
+                // (loop_core symbol_interval'i okur; seed Fix A 1d set edebilir). config.interval
+                // (global) DEĞİL — candle serisinin kendi interval'ı tek-doğru kaynak. Boşsa
+                // (eski/defaultlı candle) global'e düş.
+                interval: {
+                    let civ = last_candle.interval.clone();
+                    if civ.is_empty() { st.config.interval.clone() } else { civ }
+                },
                 // trade_type artık stratejik etiket (önceki "LONG"/"SHORT" zaten
                 // is_long ile aynı bilgiyi tekrar ediyordu); UI "Strateji" sütununda
                 // hangi karar mekanizmasının açtığını göstersin.

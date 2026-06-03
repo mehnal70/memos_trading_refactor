@@ -36,18 +36,19 @@ pub fn draw(f: &mut ratatui::Frame, area: Rect, snap: &MissionControl) {
             .collect();
 
         let table = Table::new(rows, [
-            Constraint::Percentage(13), // Sembol
+            Constraint::Percentage(12), // Sembol
             Constraint::Percentage(11), // Strateji
+            Constraint::Percentage(6),  // TF (zaman dilimi)
             Constraint::Percentage(8),  // Yön
-            Constraint::Percentage(8),  // Tür (spot/vadeli)
-            Constraint::Percentage(8),  // Kald.
-            Constraint::Percentage(12), // Giriş
-            Constraint::Percentage(12), // Fiyat
+            Constraint::Percentage(7),  // Tür (spot/vadeli)
+            Constraint::Percentage(7),  // Kald.
+            Constraint::Percentage(11), // Giriş
+            Constraint::Percentage(11), // Fiyat
             Constraint::Percentage(14), // PnL
-            Constraint::Percentage(14), // ROE%
+            Constraint::Percentage(13), // ROE%
         ])
         .header(
-            Row::new(vec!["Sembol", "Strateji", "Yön", "Tür", "Kald.", "Giriş", "Fiyat", "PnL", "ROE%"])
+            Row::new(vec!["Sembol", "Strateji", "TF", "Yön", "Tür", "Kald.", "Giriş", "Fiyat", "PnL", "ROE%"])
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         )
         .block(
@@ -68,7 +69,7 @@ pub fn draw(f: &mut ratatui::Frame, area: Rect, snap: &MissionControl) {
 mod tests {
     use super::*;
     use memos_trading_core::core::model::{
-        AiBrainSnapshot, ChartSnapshot, FinanceSnapshot, MissionControl, TradeTypeStats,
+        AiBrainSnapshot, ChartSnapshot, FinanceSnapshot, MissionControl, PositionModel, TradeTypeStats,
     };
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -133,5 +134,36 @@ mod tests {
         // Phase boş geçilirse rozet basılmaz ama ekran bozulmamalı.
         let r = render_string(&make_snap(""));
         assert!(r.contains("SERMAYE"), "header gövdesi yine basılmalı\n{}", r);
+    }
+
+    fn pos(symbol: &str, interval: &str) -> PositionModel {
+        PositionModel {
+            pos_id: String::new(), symbol: symbol.into(),
+            entry_price: 100.0, current_price: 101.0, qty: 1.0, leverage: 1.0,
+            market: "futures".into(), interval: interval.into(), is_long: true,
+            trade_type: "BB".into(), opened_at: "2026-06-03T00:00:00Z".into(),
+            stop_loss: 0.0, take_profit: 0.0, trailing_stop: 0.0,
+            max_favorable_price: 101.0, breakeven_activated: false, kind: None,
+        }
+    }
+
+    /// Açık pozisyon tablosu TF kolonunu (başlık + pozisyonun interval'ı) göstermeli
+    /// → operatör hangi sembolün hangi zaman diliminde işlendiğini görür (Item #3).
+    #[test]
+    fn position_table_shows_tf_column() {
+        let mut snap = make_snap("Executing");
+        snap.positions = vec![pos("BTCUSDT", "1d")];
+        let r = render_string(&snap);
+        assert!(r.contains(" TF "), "TF başlığı tabloda yok\n{}", r);
+        assert!(r.contains("1d"), "pozisyonun TF'i (1d) gösterilmeli\n{}", r);
+    }
+
+    /// interval boş (eski snapshot) → TF hücresi "—" basar, panik yok.
+    #[test]
+    fn position_table_tf_empty_shows_dash() {
+        let mut snap = make_snap("Executing");
+        snap.positions = vec![pos("ETHUSDT", "")];
+        let r = render_string(&snap);
+        assert!(r.contains("—"), "boş TF tire ile gösterilmeli\n{}", r);
     }
 }

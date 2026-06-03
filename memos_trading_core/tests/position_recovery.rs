@@ -25,7 +25,7 @@ fn mk_pos(symbol: &str) -> PositionModel {
         entry_price: 100.0,
         current_price: 100.0,
         qty: 1.0,
-        leverage: 1.0, market: "spot".into(),
+        leverage: 1.0, market: "spot".into(), interval: "1m".into(),
         is_long: true,
         trade_type: "scalp".into(),
         opened_at: "2026-01-01T00:00:00Z".into(),

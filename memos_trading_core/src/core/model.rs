@@ -311,6 +311,13 @@ pub struct PositionModel {
     /// pozisyonlar (serde default) → "spot" (geriye uyum: recovery snapshot'ları).
     #[serde(default = "default_position_market")]
     pub market: String,
+    /// Pozisyonun açıldığı zaman dilimi (per-symbol trade TF). edge_scan seed /
+    /// symbol_interval ile global config'ten farklı olabilir (örn. BTCUSDT 1d-BB).
+    /// Açılışta `candles.last().interval`'dan mühürlenir → TUI "TF" kolonu operatöre
+    /// hangi sembolün hangi TF'de işlendiğini gösterir. Eski serialize'lı pozisyonlar
+    /// (serde default) → "" (TUI'de "—"). [[project_edge_scan]].
+    #[serde(default)]
+    pub interval: String,
     pub is_long: bool,
     pub trade_type: String,
     pub opened_at: String,

@@ -102,7 +102,7 @@ fn position_pos_id_round_trip_via_position_id() {
         pos_id: pid_str.clone(),
         symbol: "BTCUSDT".into(),
         entry_price: 100.0, current_price: 100.0, qty: 1.0,
-        leverage: 1.0, market: "spot".into(), is_long: true, trade_type: "LONG".into(),
+        leverage: 1.0, market: "spot".into(), interval: "1m".into(), is_long: true, trade_type: "LONG".into(),
         opened_at: "2026-05-18T00:00:00Z".into(),
         stop_loss: 95.0, take_profit: 105.0, trailing_stop: 0.0,
         max_favorable_price: 100.0, breakeven_activated: false, kind: None,
