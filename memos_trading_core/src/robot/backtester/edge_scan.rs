@@ -362,12 +362,17 @@ where
 pub struct SeedRobustness {
     pub min_trades: usize,
     pub min_pf: f64,
+    /// ÜST sanity cap: PF bunu AŞARSA fluke kabul edilip ELENİR. 10-40 işlemlik küçük örneklemde
+    /// aşırı PF (örn. illikit-alt RAVEUSDT 1h PF 61, ya da tek-işlem 999) sürdürülebilir edge değil
+    /// fat-tail kazadır — yüksek PF cazibesine kapılıp böyle adayı canlıya seed etme. EDGE_SEED_MAX_PF
+    /// ile gevşet (devre dışı: çok büyük değer ver).
+    pub max_pf: f64,
     /// true → yalnız WF-onaylı (çoklu-pencere) satırlar seed'lenir (tek-holdout fluke'unu eler).
     pub require_wf_robust: bool,
 }
 
 impl Default for SeedRobustness {
-    fn default() -> Self { Self { min_trades: 30, min_pf: 1.2, require_wf_robust: true } }
+    fn default() -> Self { Self { min_trades: 30, min_pf: 1.2, max_pf: 25.0, require_wf_robust: true } }
 }
 
 /// Bir sembol için seed'lenen PLAN: (market, interval, strateji) ÜÇLÜSÜ. Edge bir (TF, strateji)
@@ -383,12 +388,15 @@ pub struct SeedEntry {
 }
 
 /// Bir rapordan robustluk barını geçen `sembol → SeedEntry(interval, strateji)` planı üretir.
-/// Aynı sembol birden çok seride geçerse EN YÜKSEK PF'li satır (TF+strateji birlikte) kazanır.
-/// Yalnız `profitable` + (require_wf_robust ise WF-onaylı) + bar'ı aşan satırlar. Saf → testli.
+/// Aynı sembol birden çok seride geçerse EN YÜKSEK PF'li satır (TF+strateji birlikte) kazanır
+/// (ama max_pf'i aşan fluke satırlar zaten elenmiştir → sembolün ikinci-iyi gerçek edge'i seçilir).
+/// Yalnız `profitable` + (require_wf_robust ise WF-onaylı) + [min_pf, max_pf] aralığı + bar'ı aşan
+/// satırlar. Saf → testli.
 pub fn seed_symbol_plan(report: &EdgeScanReport, r: SeedRobustness) -> HashMap<String, SeedEntry> {
     let mut best: HashMap<String, (SeedEntry, f64)> = HashMap::new();
     for row in &report.rows {
-        if !row.profitable || row.trades < r.min_trades || row.profit_factor < r.min_pf { continue; }
+        if !row.profitable || row.trades < r.min_trades { continue; }
+        if row.profit_factor < r.min_pf || row.profit_factor > r.max_pf { continue; }
         if r.require_wf_robust && !row.wf_robust { continue; }
         let e = best.entry(row.symbol.clone())
             .or_insert_with(|| (SeedEntry { market: String::new(), interval: String::new(), strategy: String::new() }, f64::NEG_INFINITY));
@@ -540,6 +548,38 @@ mod tests {
         let loose = SeedRobustness { require_wf_robust: false, ..SeedRobustness::default() };
         let seed2 = seed_symbol_plan(&report, loose);
         assert!(seed2.contains_key("XRPUSDT"), "WF şartı gevşeyince XRP girer");
+    }
+
+    #[test]
+    fn seed_max_pf_cap_drops_fluke_and_falls_back_to_real_edge() {
+        let mk = |sym: &str, iv: &str, strat: &str, pf: f64, trades: usize| EdgeRow {
+            exchange: "b".into(), market: "futures".into(), symbol: sym.into(), interval: iv.into(),
+            rows: 5000, gap_pct: 0.0, stale_days: 0.0, best_strategy: strat.into(),
+            take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
+            trades, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0, profitable: true,
+            wf: WfCrossCheck::default(), wf_robust: true,
+        };
+        let report = EdgeScanReport {
+            generated_at: "t".into(), db_path: "d".into(), market_filter: None,
+            series_candidates: 3, series_scanned: 3, series_skipped: 0, profitable_count: 3,
+            summary: vec![],
+            rows: vec![
+                // Aynı sembol: 1h fluke (PF 61 > cap) ELENMELİ → 4h gerçek edge (PF 3.0) seçilmeli.
+                mk("RAVEUSDT", "1h", "MA_CROSSOVER", 61.0, 40),
+                mk("RAVEUSDT", "4h", "DONCHIAN", 3.0, 40),
+                mk("SIRENUSDT", "1h", "DONCHIAN", 2.0, 40),
+            ],
+        };
+        let seed = seed_symbol_plan(&report, SeedRobustness::default()); // max_pf=25
+        let rave = seed.get("RAVEUSDT").expect("RAVE'nin gerçek (4h) edge'i kalmalı");
+        assert_eq!((rave.interval.as_str(), rave.strategy.as_str()), ("4h", "DONCHIAN"),
+            "PF 61 fluke elenince sembolün cap-altı ikinci edge'i seçilir (yüksek-PF cazibesine kapılmaz)");
+        assert!(seed.contains_key("SIRENUSDT"), "cap-altı sağlam edge etkilenmez");
+        // Cap'i gevşetince (max_pf çok büyük) fluke 1h geri kazanır → cap'in fiilen elediği doğrulanır.
+        let loose = SeedRobustness { max_pf: 1e9, ..SeedRobustness::default() };
+        let seed2 = seed_symbol_plan(&report, loose);
+        assert_eq!(seed2.get("RAVEUSDT").unwrap().interval.as_str(), "1h",
+            "cap kalkınca en yüksek PF (61, 1h) kazanır → cap'in elemesi ispatlanır");
     }
 
     #[test]

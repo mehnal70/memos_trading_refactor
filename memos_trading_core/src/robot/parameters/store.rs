@@ -218,6 +218,9 @@ impl ParameterStore {
                 min_trades: std::env::var("EDGE_SEED_MIN_TRADES").ok()
                     .and_then(|v| v.parse().ok()).unwrap_or(30),
                 min_pf: parse_env_f64("EDGE_SEED_MIN_PF").unwrap_or(1.2),
+                // ÜST sanity cap: PF>max_pf fluke (illikit-alt fat-tail) → elenir. Default 25.0;
+                // EDGE_SEED_MAX_PF ile gevşet (devre dışı için çok büyük değer).
+                max_pf: parse_env_f64("EDGE_SEED_MAX_PF").unwrap_or(25.0),
                 // Default: yalnız WF-onaylı seed (EDGE_SEED_REQUIRE_WF=0 ile gevşet).
                 require_wf_robust: !matches!(
                     std::env::var("EDGE_SEED_REQUIRE_WF").ok().as_deref(),
