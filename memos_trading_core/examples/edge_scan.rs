@@ -14,7 +14,10 @@
 //
 // Konum argümanları: market(all|futures|spot|...), intervals(csv|all), symbols(csv|all), limit.
 // Env: DB_PATH (default data/trader.db), EDGE_SCAN_OUT (rapor JSON yolu),
-//      EDGE_SCAN_MAX_SERIES (güvenli üst sınır, default 300).
+//      EDGE_SCAN_MAX_SERIES (güvenli üst sınır, default 300),
+//      EDGE_SCAN_EDGE_MIN (giriş edge kapısı, default 0.20). CANLI giriş hunisi rejim+ml'e göre
+//      0.30–0.55 YÜZEN eşik uyguladığından, seed adaylarını canlı-gerçekçi kapıda (örn. 0.45)
+//      yeniden doğrulamak için bunu yükselt → rapor PF'leri canlı-temsili olur (marjinal kuyruk elenir).
 //
 // Rapor JSON'a yazılır → tekrar koşularda karşılaştır/biriktir. PF MUTLAK değil; veri-sağlık
 // + holdout dürüstlüğü içinde "edge var mı" göstergesidir.
@@ -38,6 +41,11 @@ fn main() {
     let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "data/trader.db".to_string());
     let max_series: usize = std::env::var("EDGE_SCAN_MAX_SERIES").ok()
         .and_then(|s| s.parse().ok()).unwrap_or(300);
+    // Giriş edge kapısı: canlı-gerçekçi doğrulama için yükseltilebilir (default = EdgeScanConfig 0.20).
+    let edge_min: f64 = std::env::var("EDGE_SCAN_EDGE_MIN").ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|v: &f64| (0.0..=1.0).contains(v))
+        .unwrap_or_else(|| EdgeScanConfig::default().edge_min);
     let out_path = std::env::var("EDGE_SCAN_OUT").unwrap_or_else(|_| {
         format!("reports/edge_scan_{}.json", chrono::Utc::now().format("%Y%m%d_%H%M%S"))
     });
@@ -49,6 +57,7 @@ fn main() {
         interval_filter,
         candle_limit: limit,
         max_series,
+        edge_min,
         ..Default::default()
     };
 
