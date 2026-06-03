@@ -1,0 +1,70 @@
+# 1) Toplu ön-tespit (uzun)
+  ./scripts/edge_sweep.sh
+  # 2) Çıkan raporu seed olarak ver — engine robust adayları yükler, sonra kendi doğrular
+  EDGE_SEED_REPORT=reports/edge_sweep_<ts>.json   # (TUI/engine başlatırken)
+  
+  
+  EDGE_SEED_REPORT=reports/edge_sweep_20260602_231018.json EDGE_SEED_MIN_TRADES=15 \
+  AUTO_INTERVAL_CANDIDATES=1h,4h,1d REGIME_DIRECTIONAL=1 REGIME_ADAPTIVE_PCTL=0.90 \
+  ./run_rtc.sh --release
+  
+  
+  ══════ ÖZET (market × interval · en iyi PF) ══════
+  market    iv     taranan   kârlı  bestPF  en iyi
+  futures   1d          22      19  999.00  BNXUSDT (SUPERTREND)
+  spot      15m         12       1  999.00  TRUMPUSDT (RSI)
+  spot      1d           5       3  999.00  USDCUSDT (DONCHIAN)
+  spot      1h          30      14  999.00  ASTERUSDT (RSI)
+  spot      1m           9       0  999.00  BTCUSDC (MACD)
+  spot      5m           6       3  999.00  BCHUSDT (STOCH_RSI)
+  futures   1h          31      25   18.52  RAVEUSDT (MA_CROSSOVER)
+  futures   4h          25      16   17.88  HIGHUSDT (DONCHIAN)
+  spot      30m          3       1    2.02  ZECUSDT (SUPERTREND)
+  futures   1m           4       1    1.61  XPLUSDT (ICT_OB)
+  futures   15m          2       2    1.61  BEATUSDT (SMC)
+  futures   30m          2       2    1.51  BEATUSDT (EMA_CROSSOVER)
+  futures   5m           1       0    0.36  BTCUSDT (EMA_CROSSOVER)
+
+══════ SONUÇ (782 aday seri · 152 tarandı · 630 atlandı · 87 NET KÂRLI) ══════
+  #    market    symbol     iv    strateji         işl   win%     PF    wfPF  tutar%   WF✓
+  1    spot      BCHUSDT    5m    STOCH_RSI          1   100% 999.00≈    0.70     22%     —
+  2    spot      BTCUSDC    1m    MACD               1   100% 999.00≈    0.00      0%     —
+  3    futures   BNXUSDT    1d    SUPERTREND         1   100% 999.00≈    1.23     60%     ✅
+  4    spot      XPLUSDT    1m    EMA_CROSSOVER      1   100% 999.00≈    1.21     50%     ✅
+  5    spot      USDCUSDT   1d    DONCHIAN           1   100% 999.00≈    0.00      0%     —
+  6    spot      ASTERUSDT  1h    RSI                1   100% 999.00≈    0.00      0%     —
+  7    spot      TRUMPUSDT  15m   RSI                2   100% 999.00≈  100.00    100%     —
+  8    spot      AGIXUSDT   1m    SUPERTREND         1   100% 999.00≈    0.00      0%     —
+  9    futures   RAVEUSDT   1h    MA_CROSSOVER      16    50% 18.52✅   14.08     50%     ✅
+  10   futures   HIGHUSDT   4h    DONCHIAN          12    75% 17.88✅    2.91     38%     —
+  11   futures   RAVEUSDT   4h    ICT_OB            13    54% 10.39✅    0.69     25%     —
+  12   futures   BLESSUSDT  4h    ICT_FVG           12    75%  8.08✅    2.14     50%     ✅
+  13   futures   SIRENUSDT  1h    MACD              15    67%  7.14✅    1.58     58%     ✅
+  14   spot      FILUSDT    15m   BB                 4    50%  6.87≈    0.83     50%     —
+  15   futures   ORDIUSDT   4h    DONCHIAN          23    52%  6.70✅    3.29     33%     —
+  16   futures   ASTERUSDT  1h    BB                11    82%  6.43✅    1.58     78%     ✅
+  17   futures   PORTALUSDT 1h    ICT_FVG           12    25%  5.64✅    3.62     27%     —
+  18   futures   SUIUSDT    1d    BB                13    77%  5.45✅    3.60    100%     ✅
+  19   futures   HIGHUSDT   1h    DONCHIAN          13    46%  4.92✅    3.10     17%     —
+  20   spot      TRXUSDT    1h    SMC               18    44%  4.25✅    0.67     41%     —
+  21   futures   XRPUSDT    1d    BB                29    69%  4.15✅    2.48     76%     ✅
+  22   futures   ZECUSDT    1d    STOCH_RSI         23    57%  4.11✅    2.07     59%     ✅
+  23   spot      ETHUSDC    1d    MACD              12    83%  3.70✅    0.73     44%     —
+  24   futures   ETHWUSDT   1h    DONCHIAN          10    30%  3.46✅    2.83     50%     ✅
+  25   futures   MSTRUSDT   1h    DONCHIAN          10    50%  3.22✅    1.25     22%     —
+  26   futures   ALPHAUSDT  1d    DONCHIAN          13    46%  3.21✅    1.44     33%     —
+  27   futures   SOLUSDT    1d    EMA_CROSSOVER     12    58%  3.11✅    1.34     53%     ✅
+  28   spot      BNXUSDT    1h    ICT_COMPOSITE     11    36%  3.01✅    0.80     10%     —
+  29   spot      ORDIUSDT   1h    MA_CROSSOVER       2    50%  2.98≈    1.74     50%     —
+  30   futures   COAIUSDT   1h    STOCH_RSI         20    40%  2.97✅    0.87     29%     —
+  31   futures   ADAUSDT    1d    MA_CROSSOVER      17    59%  2.94✅    0.70     61%     —
+  32   futures   币安人生USDT   4h    ICT_OB            32    50%  2.77✅    0.74     29%     —
+  33   futures   BTCUSDC    1d    BB                10    40%  2.73✅    4.84    100%     ✅
+  34   futures   ORDIUSDT   1h    PRICE_ACTION      29    52%  2.55✅    1.66     50%     ✅
+  35   futures   XAGUSDT    1h    PRICE_ACTION      14    29%  2.53✅    0.96     42%     —
+  36   futures   DOGEUSDT   1d    DONCHIAN          25    68%  2.52✅    1.42     46%     —
+  37   futures   MSTRUSDT   4h    SUPERTREND        21    48%  2.47✅    1.88    100%     —
+  38   spot      ALPACAUSDT 1h    MA_CROSSOVER      35    46%  2.46✅    1.72     59%     ✅
+  39   futures   BCHUSDT    1d    EMA_CROSSOVER     19    58%  2.43✅    2.34     61%     ✅
+  40   spot      DOGEUSDT   1h    MA_CROSSOVER      31    61%  2.42✅    0.60     42%     —
+
