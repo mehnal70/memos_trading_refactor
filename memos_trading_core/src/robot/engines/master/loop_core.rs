@@ -35,6 +35,11 @@ impl Engine {
         Self::hydrate_account_state_from_db(&state);
         Self::hydrate_symbol_status_from_db(&state);
 
+        // 0c2. SEED REGISTRY-PRUNE: registry hydrate edildikten SONRA, force-pinned seed'lerden
+        //      açıkça dışlanmışları (delisted-skip / exchangeInfo non-TRADING) at → ölü seed canlıda
+        //      purge gürültüsü yapmasın. LENIENT (bilinmeyen korunur). report ÖNCESİ → log nihai seti.
+        Self::prune_seed_ineligible(&state);
+
         // 0d. EDGE SEED GÖRÜNÜRLÜĞÜ: EDGE_SEED_REPORT ile yüklenen per-symbol stratejileri
         //     TUI state-log paneline düşür (TUI'de logger backend yok → log::info! görünmez).
         Self::report_edge_seed(&state);

@@ -69,6 +69,36 @@ impl Engine {
     /// her boot'ta yetkili seed bütünlüğü okunur (panel önizlemesi 8'le sınırlı, TF'siz; dosya logu değil).
     /// EDGE_SEED_REPORT set ama 0 yüklendiyse "WF-onaylı aday yok" notu (sessiz-0 yerine görünür sinyal).
     /// [[project_edge_scan]].
+    /// 🌱→🚮 Boot'ta seed'i registry'den geçir: GERÇEKTEN dışlanmış (oturum-içi delisted-skip ya da
+    /// exchangeInfo'da açıkça TRADING-dışı: BREAK/HALT/delisted) seed sembolleri symbol_strategy +
+    /// symbol_interval'den at → force-pinned olup canlıda işlem görmeyecek/purge gürültüsü yapacak
+    /// sembol seed'i sürüklemesin (ALPACAUSDT-BREAK tipi). LENIENT: registry'de OLMAYAN (bilinmeyen)
+    /// sembol KORUNUR — registry eksik/bayatsa geçerli seed'i yanlış atmamak için (`is_symbol_tradeable`
+    /// bilinmeyene true döner → yalnız AÇIKÇA non-TRADING düşer). `report_edge_seed` ÖNCESİ çağrılır →
+    /// log nihai (prune sonrası) seti yansıtır. [[project_symbol_status_registry]] [[project_edge_scan]].
+    pub(crate) fn prune_seed_ineligible(state: &Arc<Mutex<AppState>>) {
+        let dropped: Vec<String> = {
+            let Ok(st) = state.lock() else { return };
+            let Ok(mut params) = st.brain.parameters.write() else { return };
+            if params.symbol_strategy.is_empty() { return; }
+            let drop: Vec<String> = params.symbol_strategy.keys()
+                .filter(|s| super::is_delisted_skipped(s) || !super::is_symbol_tradeable(s))
+                .cloned().collect();
+            for s in &drop {
+                params.symbol_strategy.remove(s);
+                params.symbol_interval.remove(s);
+            }
+            drop
+        };
+        if dropped.is_empty() { return; }
+        let mut sorted = dropped;
+        sorted.sort();
+        push_state_log(state, format!(
+            "🚮 edge seed: {} sembol registry-dışlandı (delisted/non-TRADING) → seed'den atıldı: {}",
+            sorted.len(), sorted.join(", ")));
+        log::info!("🚮 edge seed registry-prune: {} atıldı — {}", sorted.len(), sorted.join(", "));
+    }
+
     pub(crate) fn report_edge_seed(state: &Arc<Mutex<AppState>>) {
         let seed_path = std::env::var("EDGE_SEED_REPORT").ok().filter(|s| !s.trim().is_empty());
         // (sembol, interval, strateji) — TF'yi de taşı ki dosya logu Fix A'yı (BB 1d'de) teyit edebilsin.

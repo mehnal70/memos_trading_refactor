@@ -98,10 +98,10 @@ impl Engine {
             let mut last_error_summary_msg: String = String::new();
 
             loop {
-                let (symbols, interval, stop) = {
+                let (symbols, interval, market, stop) = {
                     let st = match st_px.lock() { Ok(s) => s, Err(_) => break };
                     if st.app_stop_signal.load(Ordering::Relaxed) {
-                        (vec![], String::new(), true)
+                        (vec![], String::new(), String::new(), true)
                     } else {
                         // Canlı feed'i olmayan borsa sembolleri (örn. BIST) Binance API'ye
                         // gönderilmez ("Veri Format Hatası" → ApiError anomaly). Market-agnostik
@@ -126,7 +126,7 @@ impl Engine {
                                 if !syms.contains(sym) { syms.push(sym.clone()); }
                             }
                         }
-                        (syms, st.config.interval.clone(), false)
+                        (syms, st.config.interval.clone(), st.config.market.clone(), false)
                     }
                 };
                 if stop { break; }
@@ -156,7 +156,11 @@ impl Engine {
                 let mut stale_skipped: Vec<String> = Vec::new();
                 for sym in &symbols {
                     if sym.is_empty() { continue; }
-                    match fetcher.fetch_latest(sym, &interval, 1).await {
+                    // MARKET-FARKINDA: engine market'inin endpoint'inden çek (futures→fapi). Eskiden
+                    // trait `fetch_latest` SPOT kısayoluydu → futures-only sembol (MYX/SIREN) spot'ta
+                    // "-1121 Invalid symbol" → sahte delisting purge. download job Faz 2'de geçmişti,
+                    // price-poll kalmıştı. [[project_symbol_status_registry]] [[feedback_market_agnostic]].
+                    match fetcher.fetch_latest_market(sym, &interval, &market, 1).await {
                         Ok(candles) => {
                             // Fetch döndü → sembol borsada var (delisted değil); sayacı sıfırla.
                             delisted_record_success(sym);
@@ -189,7 +193,11 @@ impl Engine {
                 let dl_threshold = delisted_detection_threshold();
                 let mut to_purge: Vec<(String, u32)> = Vec::new();
                 if dl_threshold > 0 {
-                    for (sym, _e) in &errors {
+                    for (sym, e) in &errors {
+                        // YALNIZ gerçek "sembol yok" (delisted/-1121/boş-veri) sayacı artırır;
+                        // GEÇİCİ hata (rate-limit/bağlantı/decode) GEÇERLİ sembolü purge etmesin
+                        // (boot fetch-patlamasında MYX/SIREN gibi TRADING sembol yanlış purge oluyordu).
+                        if !crate::robot::data_fetcher::binance::fetch_error_is_delisting(e) { continue; }
                         let n = delisted_record_failure(sym);
                         if n >= dl_threshold { to_purge.push((sym.clone(), n)); }
                     }

@@ -7,6 +7,19 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::time::Duration;
 
+/// Klines fetch hatası GERÇEK "sembol borsada yok" (delisted/geçersiz) sinyali taşıyorsa bu
+/// prefix'le başlar. DELISTED heuristic (price_poll) YALNIZ bu prefix'li hatada sayacı artırmalı —
+/// aksi halde boot fetch-patlamasındaki rate-limit (-1003) gibi GEÇİCİ hatalar GEÇERLİ sembolü
+/// (örn. MYX/SIREN futures'ta TRADING) yanlışlıkla purge ediyordu. Sınıflandırma tek-nokta:
+/// `fetch_klines_inner` basar, `fetch_error_is_delisting` okur. [[project_symbol_status_registry]].
+pub const DELISTING_ERR_PREFIX: &str = "Binance Sembol Yok";
+
+/// Bir klines fetch hata mesajı GERÇEK delisting/geçersiz-sembol mi (purge'e değer), yoksa
+/// GEÇİCİ mi (rate-limit/bağlantı/ambiguous decode → purge etme). [[project_symbol_status_registry]].
+pub fn fetch_error_is_delisting(err: &str) -> bool {
+    err.starts_with(DELISTING_ERR_PREFIX)
+}
+
 pub struct BinanceFetcher {
     client: reqwest::Client,
 }
@@ -111,7 +124,9 @@ impl BinanceFetcher {
     async fn fetch_klines(&self, url: &str, symbol: &str, interval: &str) -> Result<Vec<Candle>, String> {
         let candles = self.fetch_klines_inner(url, symbol, interval).await?;
         if candles.is_empty() {
-            return Err(format!("{} sembolü için geçerli mum verisi alınamadı", symbol));
+            // Boş klines = sembol var ama veri dönmüyor → gerçek delisting/geçersiz sinyali
+            // (DELISTING prefix'i → DELISTED heuristic sayar; geçici hatalardan ayrı tutulur).
+            return Err(format!("{DELISTING_ERR_PREFIX}: {symbol} (geçerli mum verisi alınamadı)"));
         }
         Ok(candles)
     }
@@ -119,13 +134,32 @@ impl BinanceFetcher {
     /// HTTP + parse çekirdeği — boş yanıtı HATA SAYMAZ (Ok(boş) döner). Pagination
     /// için gerekli (aralık-sonu boş yanıtı normal terminasyon, hata değil).
     async fn fetch_klines_inner(&self, url: &str, symbol: &str, interval: &str) -> Result<Vec<Candle>, String> {
-        let resp = self.client.get(url)
+        let body = self.client.get(url)
             .send()
             .await
             .map_err(|e| format!("Binance Bağlantı Hatası: {}", e))?
-            .json::<Vec<Vec<serde_json::Value>>>()
+            .text()
             .await
-            .map_err(|e| format!("Binance Veri Format Hatası: {}", e))?;
+            .map_err(|e| format!("Binance Bağlantı Hatası (gövde): {}", e))?;
+
+        // Yanıt klines dizisi mi, yoksa Binance hata objesi mi ({"code":..,"msg":..})? Decode
+        // hatasını körlemesine "format hatası" saymak yerine SINIFLANDIR: -1121 (Invalid symbol) =
+        // gerçek "sembol yok" → DELISTING prefix'i (purge sayılır); -1003/-1015 (rate-limit) ve
+        // diğerleri → GEÇİCİ (purge etme). [[project_symbol_status_registry]].
+        let resp: Vec<Vec<serde_json::Value>> = match serde_json::from_str(&body) {
+            Ok(arr) => arr,
+            Err(_) => {
+                if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&body) {
+                    let code = obj.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
+                    let msg = obj.get("msg").and_then(|m| m.as_str()).unwrap_or("");
+                    if code == -1121 {
+                        return Err(format!("{DELISTING_ERR_PREFIX}: {symbol} (code {code} {msg})"));
+                    }
+                    return Err(format!("Binance Geçici API Hatası: {symbol} (code {code} {msg})"));
+                }
+                return Err(format!("Binance Veri Format Hatası: yanıt klines değil ({symbol})"));
+            }
+        };
 
         let mut candles = Vec::with_capacity(resp.len());
 
@@ -185,6 +219,24 @@ impl MarketFetcher for BinanceFetcher {
     /// `fetch_latest_market` kullanmalı (download job Faz 2'de geçti).
     async fn fetch_latest(&self, symbol: &str, interval: &str, limit: usize) -> Result<Vec<Candle>, String> {
         self.fetch_latest_market(symbol, interval, "spot", limit).await
+    }
+}
+
+#[cfg(test)]
+mod error_class_tests {
+    use super::*;
+
+    #[test]
+    fn delisting_classification_separates_transient_from_symbol_gone() {
+        // GERÇEK "sembol yok" → delisting (DELISTED heuristic sayar).
+        assert!(fetch_error_is_delisting(
+            &format!("{DELISTING_ERR_PREFIX}: MYXUSDT (code -1121 Invalid symbol.)")));
+        assert!(fetch_error_is_delisting(
+            &format!("{DELISTING_ERR_PREFIX}: FOOUSDT (geçerli mum verisi alınamadı)")));
+        // GEÇİCİ hatalar → delisting DEĞİL (purge tetiklemez): rate-limit, bağlantı, decode.
+        assert!(!fetch_error_is_delisting("Binance Geçici API Hatası: MYXUSDT (code -1003 Too many requests.)"));
+        assert!(!fetch_error_is_delisting("Binance Bağlantı Hatası: timeout"));
+        assert!(!fetch_error_is_delisting("Binance Veri Format Hatası: yanıt klines değil (MYXUSDT)"));
     }
 }
 
