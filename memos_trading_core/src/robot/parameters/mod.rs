@@ -669,4 +669,61 @@ mod tests {
         // Diğer alanlar default'ta kalmalı
         assert_eq!(s.partial_fill.overfill_tolerance, 0.001);
     }
+
+    // ─── edge_scan seed: market-uyumu (Item #1) ──────────────────────────
+    //
+    // from_env, EDGE_SEED_REPORT'tan seed yüklerken engine market'ına (TRADE_MARKET)
+    // uymayan satırı eler → spot-only edge futures engine'e seed edilmez. Tek-kaynak:
+    // hem config.market hem seed filtresi env_or("TRADE_MARKET","spot")'ten türer.
+    #[test]
+    fn from_env_edge_seed_filters_by_engine_market() {
+        use crate::robot::backtester::{EdgeScanReport, EdgeRow, WfCrossCheck};
+        let mk = |market: &str, sym: &str, iv: &str, strat: &str| EdgeRow {
+            exchange: "binance".into(), market: market.into(), symbol: sym.into(),
+            interval: iv.into(), rows: 5000, gap_pct: 0.0, stale_days: 0.0,
+            best_strategy: strat.into(), take_profit_pct: 4.0, stop_loss_pct: 2.0,
+            max_position_size: 0.3, trades: 40, win_rate: 0.6, profit_factor: 1.5,
+            expectancy: 5.0, sharpe: 0.5, profitable: true,
+            wf: WfCrossCheck { windows: 6, profitable_windows: 5, pooled_pf: 1.4, trades: 40 },
+            wf_robust: true,
+        };
+        let report = EdgeScanReport {
+            generated_at: "t".into(), db_path: "d".into(), market_filter: None,
+            series_candidates: 2, series_scanned: 2, series_skipped: 0, profitable_count: 2,
+            summary: vec![],
+            rows: vec![
+                mk("futures", "BTCUSDT",   "1d", "BB"),           // engine market → girer
+                mk("spot",    "ALPACAUSDT","1h", "MA_CROSSOVER"), // spot edge → futures engine'de elenir
+            ],
+        };
+        let path = std::env::temp_dir()
+            .join(format!("edge_seed_market_{}.json", std::process::id()));
+        let p = path.to_string_lossy().to_string();
+        std::fs::write(&p, serde_json::to_string(&report).unwrap()).unwrap();
+
+        // TRADE_MARKET=futures → yalnız futures satırı yüklenmeli.
+        std::env::set_var("TRADE_MARKET", "futures");
+        std::env::set_var("EDGE_SEED_REPORT", &p);
+        let s = ParameterStore::from_env();
+        std::env::remove_var("EDGE_SEED_REPORT");
+        std::env::remove_var("TRADE_MARKET");
+        assert_eq!(s.symbol_strategy.get("BTCUSDT").map(String::as_str), Some("BB"),
+            "futures BTCUSDT seed'lenmeli");
+        assert_eq!(s.symbol_interval.get("BTCUSDT").map(String::as_str), Some("1d"),
+            "BTCUSDT seed TF'i 1d olmalı");
+        assert!(!s.symbol_strategy.contains_key("ALPACAUSDT"),
+            "spot ALPACAUSDT futures engine'de elenmeli");
+
+        // EDGE_SEED_IGNORE_MARKET=1 → çapraz-market seed (ikisi de girer).
+        std::env::set_var("TRADE_MARKET", "futures");
+        std::env::set_var("EDGE_SEED_REPORT", &p);
+        std::env::set_var("EDGE_SEED_IGNORE_MARKET", "1");
+        let s2 = ParameterStore::from_env();
+        std::env::remove_var("EDGE_SEED_IGNORE_MARKET");
+        std::env::remove_var("EDGE_SEED_REPORT");
+        std::env::remove_var("TRADE_MARKET");
+        let _ = std::fs::remove_file(&p);
+        assert!(s2.symbol_strategy.contains_key("BTCUSDT") && s2.symbol_strategy.contains_key("ALPACAUSDT"),
+            "IGNORE_MARKET ile her iki market de seed'lenir");
+    }
 }

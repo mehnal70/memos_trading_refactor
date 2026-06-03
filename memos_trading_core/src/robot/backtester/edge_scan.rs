@@ -370,11 +370,14 @@ impl Default for SeedRobustness {
     fn default() -> Self { Self { min_trades: 30, min_pf: 1.2, require_wf_robust: true } }
 }
 
-/// Bir sembol için seed'lenen PLAN: (interval, strateji) ÇİFTİ. Edge bir (TF, strateji)
+/// Bir sembol için seed'lenen PLAN: (market, interval, strateji) ÜÇLÜSÜ. Edge bir (TF, strateji)
 /// çiftidir (örn. BTCUSDT 1d-BB); ikisi BİRLİKTE taşınmalı — yoksa strateji yanlış TF'de
-/// koşar (BB'yi 1m'de = edge yok). ParameterStore.symbol_interval + symbol_strategy'ye yazılır.
+/// koşar (BB'yi 1m'de = edge yok). `market` de taşınır → seed yükleyici (store::from_env)
+/// engine market'ına uymayan satırı eler (spot-only edge futures engine'e seed edilmesin).
+/// ParameterStore.symbol_interval + symbol_strategy'ye yazılır.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeedEntry {
+    pub market: String,
     pub interval: String,
     pub strategy: String,
 }
@@ -388,9 +391,9 @@ pub fn seed_symbol_plan(report: &EdgeScanReport, r: SeedRobustness) -> HashMap<S
         if !row.profitable || row.trades < r.min_trades || row.profit_factor < r.min_pf { continue; }
         if r.require_wf_robust && !row.wf_robust { continue; }
         let e = best.entry(row.symbol.clone())
-            .or_insert_with(|| (SeedEntry { interval: String::new(), strategy: String::new() }, f64::NEG_INFINITY));
+            .or_insert_with(|| (SeedEntry { market: String::new(), interval: String::new(), strategy: String::new() }, f64::NEG_INFINITY));
         if row.profit_factor > e.1 {
-            *e = (SeedEntry { interval: row.interval.clone(), strategy: row.best_strategy.clone() }, row.profit_factor);
+            *e = (SeedEntry { market: row.market.clone(), interval: row.interval.clone(), strategy: row.best_strategy.clone() }, row.profit_factor);
         }
     }
     best.into_iter().map(|(sym, (entry, _))| (sym, entry)).collect()
@@ -497,8 +500,9 @@ mod tests {
         let seed = seed_symbol_plan_from_file(&p, SeedRobustness::default());
         let _ = std::fs::remove_file(&p);
         let e = seed.get("BTCUSDT").expect("BTCUSDT seed'lenmeli");
-        assert_eq!((e.interval.as_str(), e.strategy.as_str()), ("1h", "ICT_COMPOSITE"),
-            "rapor JSON seed loader'dan (interval+strateji) round-trip etmeli");
+        assert_eq!((e.market.as_str(), e.interval.as_str(), e.strategy.as_str()),
+            ("futures", "1h", "ICT_COMPOSITE"),
+            "rapor JSON seed loader'dan (market+interval+strateji) round-trip etmeli");
     }
 
     #[test]
@@ -526,8 +530,9 @@ mod tests {
         let seed = seed_symbol_plan(&report, SeedRobustness::default());
         assert_eq!(seed.len(), 1, "yalnız BTCUSDT tüm barları (trades+PF+WF) geçer");
         let btc = seed.get("BTCUSDT").expect("BTCUSDT seed'lenmeli");
-        // En yüksek PF satırı (1h ICT, 1.5 > 4h MACD 1.3) → interval+strateji birlikte taşınır.
-        assert_eq!((btc.interval.as_str(), btc.strategy.as_str()), ("1h", "ICT_COMPOSITE"));
+        // En yüksek PF satırı (1h ICT, 1.5 > 4h MACD 1.3) → market+interval+strateji birlikte taşınır.
+        assert_eq!((btc.market.as_str(), btc.interval.as_str(), btc.strategy.as_str()),
+            ("futures", "1h", "ICT_COMPOSITE"));
         assert!(!seed.contains_key("RAVEUSDT"), "16 işlem fluke elenir");
         assert!(!seed.contains_key("ETHUSDT"), "PF 1.1 < 1.2 elenir");
         assert!(!seed.contains_key("XRPUSDT"), "WF-onaysız (wf_robust=false) elenir");

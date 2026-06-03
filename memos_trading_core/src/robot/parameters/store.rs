@@ -226,13 +226,29 @@ impl ParameterStore {
             // Fix A: seed (TF, strateji) ÇİFTİni taşır → strateji DOĞRU TF'de koşar (BB'yi 1m'de
             // değil 1d'de). symbol_interval + symbol_strategy birlikte yüklenir. [[project_edge_scan]].
             let seed = crate::robot::backtester::seed_symbol_plan_from_file(&path, r);
-            let n = seed.len();
+            // Item #1: MARKET-UYUMU. config.market = env_or("TRADE_MARKET","spot") (tek-kaynak);
+            // engine yalnız o markette işlem açar → başka marketin edge'i (spot ALPACAUSDT'yi
+            // futures engine'e) seed edilmemeli (sembol orada işlem görmeyebilir/farklı enstrüman).
+            // EDGE_SEED_IGNORE_MARKET=1 ile devre dışı (operatör çapraz-market seed isterse).
+            let engine_market = crate::core::env::env_or("TRADE_MARKET", "spot");
+            let ignore_market = matches!(
+                std::env::var("EDGE_SEED_IGNORE_MARKET").ok().as_deref(),
+                Some("1") | Some("true") | Some("on"));
+            let mut loaded = 0usize;
+            let mut skipped_market = 0usize;
             for (sym, entry) in &seed {
+                if !ignore_market && !entry.market.eq_ignore_ascii_case(&engine_market) {
+                    skipped_market += 1;
+                    continue;
+                }
                 store.symbol_interval.insert(sym.clone(), entry.interval.clone());
                 store.symbol_strategy.insert(sym.clone(), entry.strategy.clone());
+                loaded += 1;
             }
-            if n > 0 {
-                log::info!("🌱 edge seed: {} sembol (interval+strateji) yüklendi ({})", n, path);
+            if loaded > 0 || skipped_market > 0 {
+                log::info!(
+                    "🌱 edge seed: {} sembol (market={}, interval+strateji) yüklendi, {} market-uyumsuz elendi ({})",
+                    loaded, engine_market, skipped_market, path);
             }
         }
         store
