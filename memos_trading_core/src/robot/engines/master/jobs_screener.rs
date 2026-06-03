@@ -27,10 +27,10 @@ impl Engine {
 
         log::info!("🔭 E2: Screener çalışıyor...");
 
-        // 1) State'ten yapı yapısı + kapasite + pinned + strateji + blocked + multi-TF.
+        // 1) State'ten yapı yapısı + kapasite + pinned + strateji + blocked + multi-TF + edge.
         let (db_path, market, interval, pinned, blocked, active_strategy, capital,
              max_workers, current_workers, multi_tf_enabled, multi_tf_min,
-             data_gate_enabled, health_th) = {
+             data_gate_enabled, health_th, edge_symbols) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             let strat = st.brain.live_strategy.read()
                 .map(|s| s.clone()).unwrap_or_else(|_| "MA_CROSSOVER".to_string());
@@ -41,10 +41,13 @@ impl Engine {
                 let cur: Vec<String> = o.workers.keys().cloned().collect();
                 (o.max_workers, cur)
             }).unwrap_or((16, vec![]));
-            // Multi-TF gate: sinyal yolundakiyle aynı param kaynağı (ParameterStore).
-            let (mtf_on, mtf_min) = st.brain.parameters.read().ok()
-                .map(|p| (p.multi_tf.enabled, p.multi_tf.min_required))
-                .unwrap_or((true, crate::robot::data_pipeline::HTF_MIN_REQUIRED));
+            // Multi-TF gate + WF-onaylı edge sembolleri: sinyal yoluyla aynı param kaynağı
+            // (ParameterStore). symbol_strategy = edge_scan seed + online keşif birleşimi →
+            // bu semboller screener composite'inde bonus alır (B1 pinleme'yi tamamlar).
+            let (mtf_on, mtf_min, edges) = st.brain.parameters.read().ok()
+                .map(|p| (p.multi_tf.enabled, p.multi_tf.min_required,
+                    p.symbol_strategy.keys().cloned().collect::<std::collections::HashSet<String>>()))
+                .unwrap_or((true, crate::robot::data_pipeline::HTF_MIN_REQUIRED, Default::default()));
             (
                 st.config.db_path.clone(),
                 st.config.market.clone(),
@@ -59,6 +62,7 @@ impl Engine {
                 mtf_min,
                 st.tuning.data_gate_enabled,
                 st.tuning.health_thresholds(),
+                edges,
             )
         };
 
@@ -72,6 +76,11 @@ impl Engine {
         // HTF bias delta — 0 veya multi_tf kapalıysa HTF yüklemeden saf tek-TF sıralama.
         let htf_bias_delta: f64 = env_parse("SCREENER_HTF_BIAS", 0.2);
         let htf_aware = multi_tf_enabled && htf_bias_delta > 0.0;
+        // WF-onaylı edge bonusu — symbol_strategy üyesi sembol composite'e additif bonus alır.
+        // Default 0.3 (HTF 0.2'nin üstü: çok-pencere WF-onaylı edge, tek SMA hizasından güçlü
+        // sinyal). 0.0 veya boş edge seti → etkisiz. [[project_edge_scan]] [[project_htf_selection]].
+        let edge_bonus_delta: f64 = env_parse("SCREENER_EDGE_BONUS", 0.3);
+        let edge_aware = edge_bonus_delta > 0.0 && !edge_symbols.is_empty();
 
         // 3) Aday havuzu — config.market + config.interval'a uyan SQLite sembolleri
         //    + env extras (dedupe). Market segmentasyonu sayesinde örn. futures
@@ -102,9 +111,10 @@ impl Engine {
         }
 
         push_state_log(state, format!(
-            "🔭 Screener: havuz={} aday (market={} interval={}), top_n={} max_workers={} strateji={} htf_bias={}",
+            "🔭 Screener: havuz={} aday (market={} interval={}), top_n={} max_workers={} strateji={} htf_bias={} edge_bonus={}",
             pool.len(), market, interval, top_n, max_workers, active_strategy,
             if htf_aware { format!("±{:.2}", htf_bias_delta) } else { "kapalı".to_string() },
+            if edge_aware { format!("+{:.2}×{}", edge_bonus_delta, edge_symbols.len()) } else { "kapalı".to_string() },
         ));
 
         // 4) Her aday için skor (paralel — rayon).
@@ -129,7 +139,9 @@ impl Engine {
                 Vec::new()
             };
             let htf_slice = if htf_vec.is_empty() { None } else { Some(htf_vec.as_slice()) };
-            let s = score_symbol(&candles, &active_strategy, 4.0, 2.0, 0.3, capital, htf_slice, htf_bias_delta);
+            // Edge bonusu: bu sembol WF-onaylı edge taşıyorsa (symbol_strategy üyesi) composite'e ekle.
+            let edge_bonus = if edge_aware && edge_symbols.contains(sym) { edge_bonus_delta } else { 0.0 };
+            let s = score_symbol(&candles, &active_strategy, 4.0, 2.0, 0.3, capital, htf_slice, htf_bias_delta, edge_bonus);
             if s.avg_volume < min_volume { return None; }
             Some((sym.clone(), s))
         }).collect();
@@ -178,8 +190,10 @@ impl Engine {
                         HtfBias::Bearish => "↓",
                         HtfBias::Neutral => "·",
                     };
+                    // 🌱 → bu sembol WF-onaylı edge bonusu aldı (symbol_strategy üyesi).
+                    let edge = if s.edge_bonus > 0.0 { "🌱" } else { "" };
                     format!(
-                        "{name}(c={:.2}{b} sh={:.2} wr={:.0}% n={})",
+                        "{name}{edge}(c={:.2}{b} sh={:.2} wr={:.0}% n={})",
                         s.composite, s.sharpe, s.win_rate, s.trades,
                     )
                 })

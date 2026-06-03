@@ -77,7 +77,8 @@ pub struct ScreenerScore {
     pub max_dd_pct:  f64, // backtest max drawdown (%)
     pub trades:      usize,
     pub htf_bias:    HtfBias, // seçim anındaki üst-TF hizası (telemetri + sıralama izi)
-    pub composite:   f64, // sıralama anahtarı (HTF-ayarlı); yüksek = iyi
+    pub edge_bonus:  f64, // WF-onaylı edge bonusu (symbol_strategy üyesi → composite'e additif)
+    pub composite:   f64, // sıralama anahtarı (HTF + edge ayarlı); yüksek = iyi
 }
 
 impl ScreenerScore {
@@ -89,7 +90,7 @@ impl ScreenerScore {
         Self {
             avg_volume, atr_pct,
             sharpe: 0.0, win_rate: 0.0, max_dd_pct: 0.0,
-            trades: 0, htf_bias: HtfBias::Neutral, composite: 0.0,
+            trades: 0, htf_bias: HtfBias::Neutral, edge_bonus: 0.0, composite: 0.0,
         }
     }
 }
@@ -102,6 +103,12 @@ impl ScreenerScore {
 /// `htf` verilirse (üst zaman dilimi mumları) ve `htf_bias_delta > 0` ise
 /// composite skoruna HTF trend hizası additif katılır → seçim üst-TF'yi görür.
 /// `htf=None` veya `delta=0.0` → legacy tek-TF davranış (etkisiz).
+///
+/// `edge_bonus > 0` ise (sembol WF-onaylı edge taşıyor → caller'ın symbol_strategy
+/// üyesi diye geçtiği bonus) composite'e additif eklenir → edge'li semboller seçimde
+/// öne çıkar (B1 pinleme'yi tamamlar: online-keşif edge sembolleri pinli değildir).
+/// HTF bias gibi yalnız gerçek-işlemli (≥3) skorlara uygulanır (0-işlemli sembol
+/// edge bonusuyla seçime itilmesin). `edge_bonus=0.0` → etkisiz (legacy).
 pub fn score_symbol(
     candles: &[Candle],
     strategy_name: &str,
@@ -111,6 +118,7 @@ pub fn score_symbol(
     initial_balance: f64,
     htf: Option<&[Candle]>,
     htf_bias_delta: f64,
+    edge_bonus: f64,
 ) -> ScreenerScore {
     let avg_volume = if candles.is_empty() {
         0.0
@@ -143,9 +151,9 @@ pub fn score_symbol(
     }
 
     let base = composite_score(res.sharpe_ratio, res.win_rate, res.max_drawdown_pct);
-    // HTF hizası yalnız gerçek skorlu (≥3 işlem) sembollere uygulanır.
+    // HTF hizası + edge bonusu yalnız gerçek skorlu (≥3 işlem) sembollere uygulanır.
     let bias = htf_bias(htf, HTF_BIAS_FAST, HTF_BIAS_SLOW);
-    let composite = base + htf_bias_adjustment(bias, htf_bias_delta);
+    let composite = base + htf_bias_adjustment(bias, htf_bias_delta) + edge_bonus;
     ScreenerScore {
         avg_volume, atr_pct,
         sharpe: res.sharpe_ratio,
@@ -153,6 +161,7 @@ pub fn score_symbol(
         max_dd_pct: res.max_drawdown_pct,
         trades: res.total_trades,
         htf_bias: bias,
+        edge_bonus,
         composite,
     }
 }
@@ -258,7 +267,7 @@ mod tests {
     #[test]
     fn score_empty_when_candles_too_few() {
         let c = cs(&[100.0; 10], 50.0);
-        let s = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0);
+        let s = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0, 0.0);
         assert_eq!(s.trades, 0);
         assert_eq!(s.composite, 0.0);
         assert_eq!(s.avg_volume, 50.0);
@@ -268,7 +277,7 @@ mod tests {
     #[test]
     fn score_records_volume_and_atr_even_with_no_trades() {
         let c = cs(&[100.0; 100], 200.0);
-        let s = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0);
+        let s = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0, 0.0);
         assert_eq!(s.avg_volume, 200.0);
         assert!(s.atr_pct >= 0.0);
     }
@@ -283,8 +292,8 @@ mod tests {
             volume: 100.0,
             ..Default::default()
         }).collect();
-        let a = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0);
-        let b = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0);
+        let a = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0, 0.0);
+        let b = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0, 0.0);
         assert_eq!(a, b);
     }
 
@@ -327,11 +336,11 @@ mod tests {
         let up: Vec<Candle> = cs(&(0..60).map(|i| 100.0 + i as f64).collect::<Vec<_>>(), 1.0);
         let down: Vec<Candle> = cs(&(0..60).map(|i| 160.0 - i as f64).collect::<Vec<_>>(), 1.0);
 
-        let base = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0);
+        let base = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0, 0.0);
         assert!(base.trades >= 3, "zig-zag yeterli işlem üretmeli (n={})", base.trades);
 
-        let bull = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, Some(&up), 0.3);
-        let bear = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, Some(&down), 0.3);
+        let bull = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, Some(&up), 0.3, 0.0);
+        let bear = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, Some(&down), 0.3, 0.0);
         assert_eq!(bull.htf_bias, HtfBias::Bullish);
         assert_eq!(bear.htf_bias, HtfBias::Bearish);
         assert!((bull.composite - (base.composite + 0.3)).abs() < 1e-9);
@@ -339,8 +348,43 @@ mod tests {
         assert!(bull.composite > bear.composite);
 
         // delta=0 → HTF verilse bile composite değişmez.
-        let zero = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, Some(&up), 0.0);
+        let zero = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, Some(&up), 0.0, 0.0);
         assert!((zero.composite - base.composite).abs() < 1e-9);
+    }
+
+    /// edge_bonus gerçek-işlemli skora additif eklenir (HTF ile bağımsız birikir);
+    /// edge_bonus=0 → etkisiz. WF-onaylı edge sembolü seçimde öne çıkar.
+    #[test]
+    fn score_applies_edge_bonus_to_real_trades() {
+        let closes: Vec<f64> = (0..200)
+            .map(|i| 100.0 + 8.0 * ((i as f64) * std::f64::consts::PI / 10.0).sin())
+            .collect();
+        let c = cs(&closes, 100.0);
+        let up: Vec<Candle> = cs(&(0..60).map(|i| 100.0 + i as f64).collect::<Vec<_>>(), 1.0);
+
+        let base = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0, 0.0);
+        assert!(base.trades >= 3);
+
+        // edge_bonus tek başına → tam +bonus.
+        let edged = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0, 0.3);
+        assert!((edged.edge_bonus - 0.3).abs() < 1e-9);
+        assert!((edged.composite - (base.composite + 0.3)).abs() < 1e-9);
+        assert!(edged.composite > base.composite);
+
+        // HTF bias + edge bonusu BİRLİKTE birikir (additif, bağımsız).
+        let both = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, Some(&up), 0.2, 0.3);
+        assert!((both.composite - (base.composite + 0.2 + 0.3)).abs() < 1e-9);
+    }
+
+    /// İşlemsiz (empty) sembol edge bonusuyla seçime itilmemeli: edge_bonus
+    /// gerçek-işlem kapısının ARDINDA uygulanır, empty skor 0.0 kalır.
+    #[test]
+    fn edge_bonus_not_applied_to_empty_score() {
+        let c = cs(&[100.0; 10], 50.0); // <50 mum → empty
+        let s = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0, 0.3);
+        assert_eq!(s.trades, 0);
+        assert_eq!(s.edge_bonus, 0.0, "empty skor edge bonusu taşımaz");
+        assert_eq!(s.composite, 0.0, "edge bonusu 0-işlemli sembolü seçime itmemeli");
     }
 
     // ── composite_score ────────────────────────────────────────────────
