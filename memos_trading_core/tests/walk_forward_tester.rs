@@ -43,6 +43,8 @@ fn cfg(strategy: &str, is: usize, oos: usize, step: usize) -> WalkForwardConfig 
         use_htf: false,
         edge_min_score: None,
         orderbook_sim: None,
+        atr_trail_mult: None,
+        breakeven_at_rr: None,
     }
 }
 
