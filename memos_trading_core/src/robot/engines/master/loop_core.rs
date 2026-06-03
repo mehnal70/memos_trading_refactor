@@ -480,8 +480,13 @@ impl Engine {
                         return;
                     }
                     if edge < edge_threshold {
-                        // Spam'i kısmak için sadece eşiğe yakın aday sinyalleri logla.
-                        if edge >= edge_log_floor {
+                        // Spam'i kısmak için: yalnız eşiğe yakın aday (edge≥floor) VE per-sembol
+                        // 60sn throttle. Aksi halde choppy rejimde aynı sembol (örn. seed TRX
+                        // edge≈0.40, eşik 0.45) her cycle (500ms) tekrar basıyordu → rejim-yön
+                        // ve risk bloklarıyla aynı throttle disiplini.
+                        if edge >= edge_log_floor
+                            && log_throttle_should_emit(symbol, "edge_weak_block", 60)
+                        {
                             push_state_log(state, format!(
                                 "📊 {} {} edge={:.2} eşik={:.2} ⇒ REDDEDİLDİ (zayıf edge, strat={})",
                                 symbol, signal_label, edge, edge_threshold, strategy_name,
