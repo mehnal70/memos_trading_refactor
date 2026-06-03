@@ -110,6 +110,12 @@ pub struct EdgeRow {
     pub profit_factor: f64,
     pub expectancy: f64,
     pub sharpe: f64,
+    /// Serinin günlük quote-volume ortalaması (USDT-yaklaşık turnover) — market-agnostik
+    /// "majörlük"/likidite ölçütü. Seed bar'ı (min_daily_quote_volume) illikit-alt seri'leri
+    /// (canlı feed'de purge edilen MYX/SIREN tipi) bununla eler. serde(default): eski raporda
+    /// alan yok → 0.0 → qvol kapısı NO-OP (sıfır regresyon; yalnız taze rapor + env aktive eder).
+    #[serde(default)]
+    pub avg_daily_quote_volume: f64,
     /// PF≥1.0 VE işlem≥min_trades → net kârlı edge (tek-holdout).
     pub profitable: bool,
     /// Kazanan config'in çoklu-pencere WF çapraz-kontrolü (tek-holdout fluke'una karşı).
@@ -192,6 +198,8 @@ pub fn scan_one_series(cfg: &EdgeScanConfig, series: &CandleSeriesRef, candles: 
     let health = CandleHealth::from_candles(candles, &series.interval);
     if health.gap_pct > cfg.max_gap_pct { return None; }
     let stale_days = health.stale_secs as f64 / 86_400.0;
+    // Likidite (majörlük) ölçütü — seri-seviyesi, strateji-bağımsız → döngü öncesi bir kez.
+    let qvol = avg_daily_quote_volume(candles, &series.interval);
 
     // Holdout split.
     let split = (n * cfg.holdout_is_pct.min(95).max(50)) / 100;
@@ -246,6 +254,7 @@ pub fn scan_one_series(cfg: &EdgeScanConfig, series: &CandleSeriesRef, candles: 
             profit_factor: r.profit_factor,
             expectancy,
             sharpe: r.sharpe_ratio,
+            avg_daily_quote_volume: qvol,
             profitable: r.profit_factor >= 1.0 && r.total_trades >= cfg.min_trades,
             wf: WfCrossCheck::default(),
             wf_robust: false,
@@ -295,6 +304,17 @@ fn is_better(cand: &EdgeRow, best: Option<&EdgeRow>, min_trades: usize) -> bool 
             }
         }
     }
+}
+
+/// Serinin günlük quote-volume (USDT-yaklaşık turnover) ortalaması — market-agnostik likidite/
+/// "majörlük" ölçütü. `close×volume` bir mumun quote-volume'ü; interval ile GÜNLÜĞE normalize
+/// edilir → 1h/4h/1d kıyaslanabilir (aksi halde 1d mumu 1h'ten 24× büyük görünür). Majörler
+/// (BTC/ETH/AVAX) yüksek, illikit-alt (MYX/SIREN) düşük döner. Saf → testli. [[feedback_market_agnostic]].
+pub fn avg_daily_quote_volume(candles: &[crate::core::types::Candle], interval: &str) -> f64 {
+    if candles.is_empty() { return 0.0; }
+    let per_candle: f64 = candles.iter().map(|c| c.close * c.volume).sum::<f64>() / candles.len() as f64;
+    let secs = crate::robot::data_pipeline::DataNormalizer::parse_interval(interval).max(1) as f64;
+    per_candle * (86_400.0 / secs)
 }
 
 /// Bir CandleSeriesRef filtreyi geçiyor mu (sembol/interval/min_rows). Saf → testli.
@@ -369,10 +389,17 @@ pub struct SeedRobustness {
     pub max_pf: f64,
     /// true → yalnız WF-onaylı (çoklu-pencere) satırlar seed'lenir (tek-holdout fluke'unu eler).
     pub require_wf_robust: bool,
+    /// MAJÖR (likidite) tabanı: serinin günlük quote-volume'ü bunun ALTINDAysa seed'lenmez.
+    /// Canlı feed'de purge edilen illikit-alt edge'leri (MYX/SIREN tipi) ELE → seed canlı-tradeable
+    /// majörlere daralır. Default 0.0 = KAPALI (eski rapor + sıfır regresyon); EDGE_SEED_MIN_QVOL
+    /// (USDT/gün) + TAZE rapor (avg_daily_quote_volume'lı) ile aktive. [[feedback_market_agnostic]].
+    pub min_daily_quote_volume: f64,
 }
 
 impl Default for SeedRobustness {
-    fn default() -> Self { Self { min_trades: 30, min_pf: 1.2, max_pf: 25.0, require_wf_robust: true } }
+    fn default() -> Self {
+        Self { min_trades: 30, min_pf: 1.2, max_pf: 25.0, require_wf_robust: true, min_daily_quote_volume: 0.0 }
+    }
 }
 
 /// Bir sembol için seed'lenen PLAN: (market, interval, strateji) ÜÇLÜSÜ. Edge bir (TF, strateji)
@@ -390,14 +417,16 @@ pub struct SeedEntry {
 /// Bir rapordan robustluk barını geçen `sembol → SeedEntry(interval, strateji)` planı üretir.
 /// Aynı sembol birden çok seride geçerse EN YÜKSEK PF'li satır (TF+strateji birlikte) kazanır
 /// (ama max_pf'i aşan fluke satırlar zaten elenmiştir → sembolün ikinci-iyi gerçek edge'i seçilir).
-/// Yalnız `profitable` + (require_wf_robust ise WF-onaylı) + [min_pf, max_pf] aralığı + bar'ı aşan
-/// satırlar. Saf → testli.
+/// Yalnız `profitable` + (require_wf_robust ise WF-onaylı) + [min_pf, max_pf] aralığı +
+/// (min_daily_quote_volume>0 ise likidite/majör tabanını aşan) bar'ı geçen satırlar. Saf → testli.
 pub fn seed_symbol_plan(report: &EdgeScanReport, r: SeedRobustness) -> HashMap<String, SeedEntry> {
     let mut best: HashMap<String, (SeedEntry, f64)> = HashMap::new();
     for row in &report.rows {
         if !row.profitable || row.trades < r.min_trades { continue; }
         if row.profit_factor < r.min_pf || row.profit_factor > r.max_pf { continue; }
         if r.require_wf_robust && !row.wf_robust { continue; }
+        // MAJÖR kapısı: illikit-alt seri (canlı feed'de purge edilen) seed'lenmesin. >0 ise aktif.
+        if r.min_daily_quote_volume > 0.0 && row.avg_daily_quote_volume < r.min_daily_quote_volume { continue; }
         let e = best.entry(row.symbol.clone())
             .or_insert_with(|| (SeedEntry { market: String::new(), interval: String::new(), strategy: String::new() }, f64::NEG_INFINITY));
         if row.profit_factor > e.1 {
@@ -447,7 +476,8 @@ mod tests {
             exchange: "b".into(), market: "f".into(), symbol: "S".into(), interval: "1h".into(),
             rows: 500, gap_pct: 0.0, stale_days: 0.0, best_strategy: "X".into(),
             take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
-            trades, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0, profitable: false,
+            trades, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0,
+            avg_daily_quote_volume: 1e9, profitable: false,
             wf: WfCrossCheck::default(), wf_robust: false,
         };
         // Yeterli-işlemli düşük-PF, az-işlemli yüksek-PF'i yener (fluke koruması).
@@ -465,7 +495,8 @@ mod tests {
             exchange: "b".into(), market: market.into(), symbol: sym.into(), interval: iv.into(),
             rows: 500, gap_pct: 0.0, stale_days: 0.0, best_strategy: "X".into(),
             take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
-            trades: 20, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0, profitable,
+            trades: 20, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0,
+            avg_daily_quote_volume: 1e9, profitable,
             wf: WfCrossCheck::default(), wf_robust: false,
         };
         let rows = vec![
@@ -496,7 +527,7 @@ mod tests {
                 interval: "1h".into(), rows: 5000, gap_pct: 0.0, stale_days: 0.0,
                 best_strategy: "ICT_COMPOSITE".into(), take_profit_pct: 6.0, stop_loss_pct: 1.0,
                 max_position_size: 0.3, trades: 40, win_rate: 0.4, profit_factor: 1.5,
-                expectancy: 5.0, sharpe: 0.5, profitable: true,
+                expectancy: 5.0, sharpe: 0.5, avg_daily_quote_volume: 1e9, profitable: true,
                 wf: WfCrossCheck { windows: 6, profitable_windows: 5, pooled_pf: 1.4, trades: 40 },
                 wf_robust: true,
             }],
@@ -519,7 +550,8 @@ mod tests {
             exchange: "b".into(), market: "futures".into(), symbol: sym.into(), interval: iv.into(),
             rows: 5000, gap_pct: 0.0, stale_days: 0.0, best_strategy: strat.into(),
             take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
-            trades, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0, profitable,
+            trades, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0,
+            avg_daily_quote_volume: 1e9, profitable,
             wf: WfCrossCheck::default(), wf_robust,
         };
         let report = EdgeScanReport {
@@ -556,7 +588,8 @@ mod tests {
             exchange: "b".into(), market: "futures".into(), symbol: sym.into(), interval: iv.into(),
             rows: 5000, gap_pct: 0.0, stale_days: 0.0, best_strategy: strat.into(),
             take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
-            trades, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0, profitable: true,
+            trades, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0,
+            avg_daily_quote_volume: 1e9, profitable: true,
             wf: WfCrossCheck::default(), wf_robust: true,
         };
         let report = EdgeScanReport {
@@ -580,6 +613,53 @@ mod tests {
         let seed2 = seed_symbol_plan(&report, loose);
         assert_eq!(seed2.get("RAVEUSDT").unwrap().interval.as_str(), "1h",
             "cap kalkınca en yüksek PF (61, 1h) kazanır → cap'in elemesi ispatlanır");
+    }
+
+    #[test]
+    fn avg_daily_quote_volume_normalizes_by_interval() {
+        // close=100, volume=10 → mum-başı quote-vol=1000. 1h: günde 24 mum → 24_000/gün.
+        let mk = |iv: &str, n: usize| -> Vec<Candle> {
+            (0..n).map(|i| Candle {
+                timestamp: Utc.timestamp_opt(i as i64 * 3600, 0).single().unwrap(),
+                open: 100.0, high: 100.0, low: 100.0, close: 100.0, volume: 10.0,
+                symbol: "S".into(), interval: iv.into(),
+            }).collect()
+        };
+        let h1 = avg_daily_quote_volume(&mk("1h", 5), "1h");
+        assert!((h1 - 24_000.0).abs() < 1e-6, "1h: 1000×24=24000/gün, got {h1}");
+        // Aynı mum-başı hacim 1d'de günde 1 mum → 1000/gün (interval normalizasyonu kanıtı).
+        let d1 = avg_daily_quote_volume(&mk("1d", 5), "1d");
+        assert!((d1 - 1_000.0).abs() < 1e-6, "1d: 1000×1=1000/gün, got {d1}");
+        assert_eq!(avg_daily_quote_volume(&[], "1h"), 0.0, "boş → 0");
+    }
+
+    #[test]
+    fn seed_min_qvol_filters_illiquid_keeps_majors() {
+        let mk = |sym: &str, qvol: f64| EdgeRow {
+            exchange: "b".into(), market: "futures".into(), symbol: sym.into(), interval: "1h".into(),
+            rows: 5000, gap_pct: 0.0, stale_days: 0.0, best_strategy: "DONCHIAN".into(),
+            take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
+            trades: 40, win_rate: 0.5, profit_factor: 1.5, expectancy: 0.0, sharpe: 0.0,
+            avg_daily_quote_volume: qvol, profitable: true,
+            wf: WfCrossCheck::default(), wf_robust: true,
+        };
+        let report = EdgeScanReport {
+            generated_at: "t".into(), db_path: "d".into(), market_filter: None,
+            series_candidates: 2, series_scanned: 2, series_skipped: 0, profitable_count: 2,
+            summary: vec![],
+            rows: vec![
+                mk("AVAXUSDT", 500_000_000.0), // majör: 500M/gün → kalır
+                mk("MYXUSDT", 2_000_000.0),    // illikit-alt: 2M/gün → elenir
+            ],
+        };
+        // Kapı 0.0 (default) → ikisi de geçer (sıfır regresyon).
+        assert_eq!(seed_symbol_plan(&report, SeedRobustness::default()).len(), 2);
+        // Majör tabanı 50M/gün → yalnız AVAX kalır, MYX elenir.
+        let major = SeedRobustness { min_daily_quote_volume: 50_000_000.0, ..SeedRobustness::default() };
+        let seed = seed_symbol_plan(&report, major);
+        assert_eq!(seed.len(), 1, "yalnız majör (AVAX) seed'lenir");
+        assert!(seed.contains_key("AVAXUSDT") && !seed.contains_key("MYXUSDT"),
+            "illikit-alt (MYX) majör tabanının altında → elenir (canlı purge gürültüsü kesilir)");
     }
 
     #[test]

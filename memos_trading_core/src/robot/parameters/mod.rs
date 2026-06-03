@@ -683,7 +683,7 @@ mod tests {
             interval: iv.into(), rows: 5000, gap_pct: 0.0, stale_days: 0.0,
             best_strategy: strat.into(), take_profit_pct: 4.0, stop_loss_pct: 2.0,
             max_position_size: 0.3, trades: 40, win_rate: 0.6, profit_factor: 1.5,
-            expectancy: 5.0, sharpe: 0.5, profitable: true,
+            expectancy: 5.0, sharpe: 0.5, avg_daily_quote_volume: 1e9, profitable: true,
             wf: WfCrossCheck { windows: 6, profitable_windows: 5, pooled_pf: 1.4, trades: 40 },
             wf_robust: true,
         };

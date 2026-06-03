@@ -18,6 +18,8 @@
 //      EDGE_SCAN_EDGE_MIN (giriş edge kapısı, default 0.20). CANLI giriş hunisi rejim+ml'e göre
 //      0.30–0.55 YÜZEN eşik uyguladığından, seed adaylarını canlı-gerçekçi kapıda (örn. 0.45)
 //      yeniden doğrulamak için bunu yükselt → rapor PF'leri canlı-temsili olur (marjinal kuyruk elenir).
+//      Rapor her satırın günlük quote-volume'ünü (qvol/gün) taşır → seed'i MAJÖRLERE daraltmak için
+//      EDGE_SEED_MIN_QVOL (USDT/gün) ayarla (illikit-alt edge'ler canlı feed'de purge ediliyordu).
 //
 // Rapor JSON'a yazılır → tekrar koşularda karşılaştır/biriktir. PF MUTLAK değil; veri-sağlık
 // + holdout dürüstlüğü içinde "edge var mı" göstergesidir.
@@ -91,15 +93,20 @@ fn main() {
     if report.rows.is_empty() {
         println!("  Taranabilir seri yok — filtre çok dar ya da veri yetersiz/gappy.");
     } else {
-        println!("  {:<4} {:<9} {:<10} {:<5} {:<14} {:>5} {:>6} {:>6} {:>7} {:>7} {:>5}",
-            "#", "market", "symbol", "iv", "strateji", "işl", "win%", "PF", "wfPF", "tutar%", "WF✓");
+        println!("  {:<4} {:<9} {:<10} {:<5} {:<14} {:>5} {:>6} {:>6} {:>7} {:>7} {:>5} {:>9}",
+            "#", "market", "symbol", "iv", "strateji", "işl", "win%", "PF", "wfPF", "tutar%", "WF✓", "qvol/gün");
         for (i, r) in report.rows.iter().take(40).enumerate() {
             let flag = if r.profitable { "✅" } else if r.profit_factor >= 0.9 { "≈" } else { "❌" };
             let wf_flag = if r.wf_robust { "✅" } else { "—" };
-            println!("  {:<4} {:<9} {:<10} {:<5} {:<14} {:>5} {:>5.0}% {:>5.2}{} {:>7.2} {:>6.0}% {:>5}",
+            // qvol kısa-form: milyon (M) / milyar (B) → majör tabanını (EDGE_SEED_MIN_QVOL) kalibre etmek için.
+            let q = r.avg_daily_quote_volume;
+            let qstr = if q >= 1e9 { format!("{:.1}B", q / 1e9) }
+                       else if q >= 1e6 { format!("{:.0}M", q / 1e6) }
+                       else { format!("{:.0}", q) };
+            println!("  {:<4} {:<9} {:<10} {:<5} {:<14} {:>5} {:>5.0}% {:>5.2}{} {:>7.2} {:>6.0}% {:>5} {:>9}",
                 i + 1, r.market, r.symbol, r.interval, r.best_strategy,
                 r.trades, r.win_rate, r.profit_factor, flag,
-                r.wf.pooled_pf, r.wf.consistency() * 100.0, wf_flag);
+                r.wf.pooled_pf, r.wf.consistency() * 100.0, wf_flag, qstr);
         }
         if report.rows.len() > 40 { println!("  … ({} satır daha JSON'da)", report.rows.len() - 40); }
     }
