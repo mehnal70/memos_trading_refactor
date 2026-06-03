@@ -9,6 +9,16 @@
   ./run_rtc.sh --release
   
   
+   EDGE_SCAN_EDGE_MIN=0.45 ./scripts/edge_sweep.sh futures 1h,4h,1d \
+    RAVEUSDT,SIRENUSDT,XRPUSDT,ZECUSDT,ORDIUSDT,BCHUSDT,STORJUSDT,ETHUSDT,AVAXUSDT,ONTUSDT,TRXUSDT,MYXUSDT
+    
+    EDGE_SEED_REPORT=reports/edge_sweep_20260603_193532.json EDGE_SEED_MIN_TRADES=15 \
+  TRADE_MARKET=futures AUTO_INTERVAL_CANDIDATES=1h,4h,1d \
+  ./run_rtc.sh --release
+
+    
+    
+  
   ══════ ÖZET (market × interval · en iyi PF) ══════
   market    iv     taranan   kârlı  bestPF  en iyi
   futures   1d          22      19  999.00  BNXUSDT (SUPERTREND)
@@ -67,4 +77,96 @@
   38   spot      ALPACAUSDT 1h    MA_CROSSOVER      35    46%  2.46✅    1.72     59%     ✅
   39   futures   BCHUSDT    1d    EMA_CROSSOVER     19    58%  2.43✅    2.34     61%     ✅
   40   spot      DOGEUSDT   1h    MA_CROSSOVER      31    61%  2.42✅    0.60     42%     —
+  
+  
+  
+  
+  
+  --------------------------------------------------------------------------------------------------
+  
+  
+  EDGE_SCAN_EDGE_MIN=0.45 ./scripts/edge_sweep.sh futures 1h,4h,1d \
+    RAVEUSDT,SIRENUSDT,XRPUSDT,ZECUSDT,ORDIUSDT,BCHUSDT,STORJUSDT,ETHUSDT,AVAXUSDT,ONTUSDT,TRXUSDT,MYXUSDT
+🔬 edge_sweep · market=futures · interval=1h,4h,1d · symbol=RAVEUSDT,SIRENUSDT,XRPUSDT,ZECUSDT,ORDIUSDT,BCHUSDT,STORJUSDT,ETHUSDT,AVAXUSDT,ONTUSDT,TRXUSDT,MYXUSDT · limit=5000
+   db=data/trader.db · max_series=5000 · rapor=reports/edge_sweep_20260603_193532.json
+   (release derleniyor; ardından tarama — uzun sürebilir, ilerleme akacak)
+
+
+🔬 edge_scan · db=data/trader.db · market=futures · interval=1h,4h,1d · symbol=RAVEUSDT,SIRENUSDT,XRPUSDT,ZECUSDT,ORDIUSDT,BCHUSDT,STORJUSDT,ETHUSDT,AVAXUSDT,ONTUSDT,TRXUSDT,MYXUSDT · limit=5000 · max_series=5000
+   edge≥0.45 · breakeven@RR 1 · holdout %70 IS / OOS · canlı-temsili trailing · min işlem 10
+   (seri sayısına göre dakikalar sürebilir; strateji havuzu × TP/SL/PS ızgarası optimize ediliyor)
+
+  [1/32] futures AVAXUSDT 1h (4508 bar)…
+  [2/32] futures BCHUSDT 1h (3423 bar)…
+  [3/32] futures ETHUSDT 1h (2859 bar)…
+  [4/32] futures ORDIUSDT 1h (2611 bar)…
+  [5/32] futures ETHUSDT 1d (2381 bar)…
+  [6/32] futures BCHUSDT 1d (2359 bar)…
+  [7/32] futures RAVEUSDT 1h (2351 bar)…
+  [8/32] futures XRPUSDT 1d (2341 bar)…
+  [9/32] futures TRXUSDT 1d (2332 bar)…
+  [10/32] futures ZECUSDT 1d (2311 bar)…
+  [11/32] futures ONTUSDT 1d (2305 bar)…
+  [12/32] futures STORJUSDT 1d (2087 bar)…
+  [13/32] futures AVAXUSDT 1d (2080 bar)…
+  [14/32] futures ORDIUSDT 4h (1783 bar)…
+  [15/32] futures STORJUSDT 1h (1558 bar)…
+  [16/32] futures SIRENUSDT 1h (1554 bar)…
+  [17/32] futures MYXUSDT 1h (1530 bar)…
+  [18/32] futures ONTUSDT 1h (1526 bar)…
+  [19/32] futures MYXUSDT 4h (1505 bar)…
+  [20/32] futures TRXUSDT 1h (1333 bar)…
+  [21/32] futures ZECUSDT 1h (1207 bar)…
+  [22/32] futures XRPUSDT 1h (828 bar)…
+  [23/32] futures RAVEUSDT 4h (790 bar)…
+  [24/32] futures ETHUSDT 4h (637 bar)…
+  [25/32] futures BCHUSDT 4h (567 bar)…
+  [26/32] futures ONTUSDT 4h (567 bar)…
+  [27/32] futures STORJUSDT 4h (567 bar)…
+  [28/32] futures XRPUSDT 4h (567 bar)…
+  [29/32] futures ZECUSDT 4h (567 bar)…
+  [30/32] futures AVAXUSDT 4h (522 bar)…
+  [31/32] futures TRXUSDT 4h (522 bar)…
+  [32/32] futures ORDIUSDT 1d (501 bar)…
+
+══════ ÖZET (market × interval · en iyi PF) ══════
+  market    iv     taranan   kârlı  bestPF  en iyi
+  futures   1d           9       8  999.00  ORDIUSDT (MA_CROSSOVER)
+  futures   4h          11       3  999.00  STORJUSDT (STOCH_RSI)
+  futures   1h           6       3   61.12  RAVEUSDT (MA_CROSSOVER)
+
+══════ SONUÇ (32 aday seri · 26 tarandı · 6 atlandı · 14 NET KÂRLI) ══════
+  #    market    symbol     iv    strateji         işl   win%     PF    wfPF  tutar%   WF✓
+  1    futures   STORJUSDT  4h    STOCH_RSI          1   100% 999.00≈  100.00    100%     —
+  2    futures   TRXUSDT    4h    MA_CROSSOVER       2   100% 999.00≈    3.05     50%     —
+  3    futures   ORDIUSDT   1d    MA_CROSSOVER       1   100% 999.00≈  100.00    100%     —
+  4    futures   RAVEUSDT   1h    MA_CROSSOVER      11    64% 61.12✅   25.76     67%     ✅
+  5    futures   RAVEUSDT   4h    ICT_OB            12    50% 10.37✅    0.36     25%     —
+  6    futures   MYXUSDT    4h    PRICE_ACTION      10    40%  4.64✅    1.10     36%     —
+  7    futures   ZECUSDT    1d    MACD              15    47%  4.33✅    2.84     41%     —
+  8    futures   ORDIUSDT   4h    DONCHIAN          24    50%  4.16✅    3.06     36%     —
+  9    futures   BCHUSDT    1d    EMA_CROSSOVER     10    60%  2.93✅    3.81     57%     ✅
+  10   futures   XRPUSDT    4h    ICT_OB             4    50%  2.76≈    3.70    100%     —
+  11   futures   TRXUSDT    1d    PRICE_ACTION      28    54%  2.10✅    1.56     45%     —
+  12   futures   SIRENUSDT  1h    DONCHIAN          17    71%  2.07✅    4.90     91%     ✅
+  13   futures   STORJUSDT  1d    DONCHIAN          16    56%  1.95✅    1.19     47%     —
+  14   futures   ONTUSDT    1d    PRICE_ACTION      26    62%  1.88✅    1.12     39%     —
+  15   futures   AVAXUSDT   1d    ICT_OB            34    56%  1.68✅    1.25     56%     ✅
+  16   futures   MYXUSDT    1h    DONCHIAN          16    62%  1.62✅    1.68     50%     ✅
+  17   futures   XRPUSDT    1d    DONCHIAN          30    57%  1.47✅    1.05     28%     —
+  18   futures   ETHUSDT    1d    ICT_OB            33    39%  1.30✅    0.78     42%     —
+  19   futures   AVAXUSDT   1h    PRICE_ACTION      34    35%  0.84❌    0.71     38%     —
+  20   futures   BCHUSDT    1h    ICT_OB            26    27%  0.83❌    0.71     32%     —
+  21   futures   ORDIUSDT   1h    PRICE_ACTION      23    43%  0.58❌    1.69     45%     —
+  22   futures   ONTUSDT    4h    SUPERTREND         9    44%  0.51❌    0.44      0%     —
+  23   futures   ZECUSDT    4h    SUPERTREND        12    17%  0.48❌    2.40    100%     —
+  24   futures   AVAXUSDT   4h    ICT_OB             6    17%  0.15❌    0.73     50%     —
+  25   futures   ETHUSDT    4h    MA_CROSSOVER       0     0%  0.00❌    0.42     50%     —
+  26   futures   BCHUSDT    4h    MA_CROSSOVER       0     0%  0.00❌  100.00    100%     —
+
+📄 Rapor: reports/edge_sweep_20260603_193532.json
+
+→ NET KÂRLI (holdout PF≥1.0, işlem≥10): 14 · WF-ONAYLI (çoklu-pencere tutarlı): 5
+  Seed yalnız WF-ONAYLI satırları alır (fluke eler). Başlatırken: EDGE_SEED_REPORT=reports/edge_sweep_20260603_193532.json
+
 
