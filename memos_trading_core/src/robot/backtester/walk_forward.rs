@@ -547,15 +547,37 @@ where
     (choice, scored)
 }
 
+/// Per-sembol otonom strateji seçiminin verdikti. Eski `Option<String>` sözleşmesi "mevcut yok +
+/// edge yok" (no-op) ile "mevcut vardı + edge ÇÜRÜDÜ" (kaldırılmalı) durumlarını `None`'da
+/// birleştiriyordu → çürüyen seed/keşif `symbol_strategy`'de kalıcı kalıyor, ölü edge canlı trade'i
+/// ve screener bonusunu sürdürüyordu. 3-durumlu karar bu boşluğu kapatır. [[project_edge_scan]].
+#[derive(Debug, Clone, PartialEq)]
+pub enum StrategyChoice {
+    /// Değişiklik yok: hiç aday yok, ya da mevcut atama hâlâ en iyi + edge'li → çağıran ne
+    /// yapıyorsa sürsün (mevcut yoksa global/auto, varsa korunur). Yazma gerektirmez.
+    Keep,
+    /// Gerçek edge'li (PF ≥ min_score) stratejiyi ata (mevcut yoktu, ya da margin'le geçildi,
+    /// ya da çürüyen mevcudun yerine geçti).
+    Assign(String),
+    /// Mevcut per-symbol atama artık min_score'u geçmiyor VE yerini alacak edge'li aday da yok →
+    /// KALDIR (sembol global/auto'ya döner; ölü edge canlıyı sürüklemeyi bırakır).
+    Demote,
+}
+
 /// Per-sembol otonom STRATEJİ seçimi (otonom `symbol_strategy` girdisi). `evaluate_symbol_interval`'in
 /// strateji-ekseni kardeşi: aday strateji adlarını `score(name) -> Option<f64>` (pooled PF) ile
-/// skorlar, `pick_best_with_margin` ile mevcut `current`'i `margin` ile geçeni seçer. Mumlar SABİT
-/// (tek seri); yalnız strateji değişir → `load` adımı YOK. `min_score` altındaki kazanan ELENİR
-/// (None) → yalnız GERÇEK edge'li strateji per-symbol atanır, aksi halde çağıran global/auto'da
-/// kalır (gürültüde override yok). Döner: (seçim, tüm skorlar). [[project_edge_scan]].
+/// skorlar. Mumlar SABİT (tek seri); yalnız strateji değişir → `load` adımı YOK.
+///
+/// Karar mantığı:
+///   - Mevcut atama YOK ya da hâlâ edge'li (≥min_score): `pick_best_with_margin` (flip-flop
+///     koruması) → kazanan ≥min_score ise (ve mevcuttan farklıysa) `Assign`, değilse `Keep`.
+///   - Mevcut atama ÇÜRÜDÜ (skoru min_score altına düştü/skorlanamadı): flip-flop margin'i ölü
+///     seed'i KORUMAZ → edge'li (≥min_score) en iyi aday varsa ona geç (`Assign`), yoksa `Demote`.
+///
+/// Döner: (karar, tüm skorlar — log/snapshot için). [[project_edge_scan]].
 pub fn evaluate_symbol_strategy<S>(
     candidates: &[String], score: S, current: Option<&str>, margin: f64, min_score: f64,
-) -> (Option<String>, Vec<(String, f64)>)
+) -> (StrategyChoice, Vec<(String, f64)>)
 where
     S: Fn(&str) -> Option<f64>,
 {
@@ -563,14 +585,38 @@ where
     for c in candidates {
         if let Some(s) = score(c) { scored.push((c.clone(), s)); }
     }
-    if scored.is_empty() { return (None, scored); }
+    // Skorlanacak aday yok → veriden hüküm çıkmaz; ÇÜRÜME kararı verme (mevcut neyse kalsın).
+    if scored.is_empty() { return (StrategyChoice::Keep, scored); }
+
+    // Mevcut atamanın güncel skoru (listede yoksa → çürümüş/skorlanamaz sayılır).
+    let cur_score = current.and_then(|cur| scored.iter().find(|(n, _)| n == cur).map(|(_, s)| *s));
+    let decayed = current.is_some() && cur_score.is_none_or(|s| s < min_score);
+
+    if decayed {
+        // Ölü seed'i margin korumaz: edge'li en iyi aday varsa ona geç, yoksa KALDIR.
+        let best = scored.iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let decision = match best {
+            Some((name, s)) if *s >= min_score => StrategyChoice::Assign(name.clone()),
+            _ => StrategyChoice::Demote,
+        };
+        return (decision, scored);
+    }
+
+    // Mevcut yok ya da hâlâ edge'li → margin disiplini (flip-flop koruması).
     let cur = current.map(|s| s.to_string());
-    let choice = pick_best_with_margin(&scored, cur.as_ref(), margin);
-    // Kazananın skoru min_score'u geçmiyorsa atama yapma (gerçek edge yok → global/auto kalsın).
-    let ok = choice.as_ref()
-        .and_then(|c| scored.iter().find(|(n, _)| n == c).map(|(_, s)| *s >= min_score))
-        .unwrap_or(false);
-    (if ok { choice } else { None }, scored)
+    let decision = match pick_best_with_margin(&scored, cur.as_ref(), margin) {
+        Some(name) => {
+            let s = scored.iter().find(|(n, _)| *n == name).map(|(_, s)| *s).unwrap_or(f64::NEG_INFINITY);
+            if s < min_score || current == Some(name.as_str()) {
+                StrategyChoice::Keep // edge yok (mevcut da yok), ya da mevcut zaten en iyi → yazma yok
+            } else {
+                StrategyChoice::Assign(name)
+            }
+        }
+        None => StrategyChoice::Keep,
+    };
+    (decision, scored)
 }
 
 /// Per-rejim YÖN DİSİPLİNİ A/B'si (otonom `RegimePolicy.regime_directional` girdisi).
@@ -997,19 +1043,47 @@ mod tests {
         let score = |name: &str| -> Option<f64> {
             match name { "EMA" => Some(0.68), "ICT" => Some(1.53), _ => None }
         };
-        // current yok, min_score=1.0 → en iyi ICT (1.53 ≥ 1.0) seçilir; RSI atlanır.
+        // current yok, min_score=1.0 → en iyi ICT (1.53 ≥ 1.0) atanır; RSI atlanır.
         let (choice, scored) = evaluate_symbol_strategy(&pool, score, None, 0.10, 1.0);
-        assert_eq!(choice, Some("ICT".to_string()));
+        assert_eq!(choice, StrategyChoice::Assign("ICT".to_string()));
         assert_eq!(scored.len(), 2, "RSI skorlanamadı → atlanmalı");
 
-        // Tüm adaylar PF<1.0 ise (min_score) → None (gürültüde per-symbol override yok).
+        // Tüm adaylar PF<1.0 + mevcut YOK → Keep (gürültüde per-symbol override yok).
         let weak = |name: &str| -> Option<f64> { match name { "EMA" => Some(0.7), "ICT" => Some(0.9), _ => None } };
         let (none_choice, _) = evaluate_symbol_strategy(&pool, weak, None, 0.10, 1.0);
-        assert_eq!(none_choice, None, "edge yokken (PF<1.0) atama yapılmamalı");
+        assert_eq!(none_choice, StrategyChoice::Keep, "edge yokken (PF<1.0) atama yapılmamalı");
 
-        // current=ICT(1.53), aday EMA daha düşük → margin'le ICT korunur (flip-flop yok).
+        // current=ICT(1.53), aday EMA daha düşük → margin'le ICT korunur, yazma yok → Keep.
         let (hold, _) = evaluate_symbol_strategy(&pool, score, Some("ICT"), 0.10, 1.0);
-        assert_eq!(hold, Some("ICT".to_string()));
+        assert_eq!(hold, StrategyChoice::Keep, "mevcut zaten en iyi + edge'li → Keep (flip-flop yok)");
+    }
+
+    #[test]
+    fn evaluate_symbol_strategy_demotes_decayed_current() {
+        let pool = vec!["EMA".to_string(), "ICT".to_string()];
+        // Çürüme: seed=EMA artık 0.7 (<1.0), tek alternatif ICT=0.9 de edge'siz → DEMOTE (kaldır).
+        let decayed = |name: &str| -> Option<f64> { match name { "EMA" => Some(0.7), "ICT" => Some(0.9), _ => None } };
+        let (d, _) = evaluate_symbol_strategy(&pool, decayed, Some("EMA"), 0.10, 1.0);
+        assert_eq!(d, StrategyChoice::Demote,
+            "çürüyen mevcut + edge'li aday yok → KALDIR (ölü seed canlıyı sürüklemesin)");
+
+        // Çürüyen seed ama edge'li alternatif var → margin'i beklemeden o stratejiye GEÇ.
+        // EMA(seed)=0.7<1.0 çürüdü; ICT=1.4≥1.0 → flip-flop margin ölü seed'i korumaz → Assign(ICT).
+        let migrate = |name: &str| -> Option<f64> { match name { "EMA" => Some(0.7), "ICT" => Some(1.4), _ => None } };
+        let (m, _) = evaluate_symbol_strategy(&pool, migrate, Some("EMA"), 0.10, 1.0);
+        assert_eq!(m, StrategyChoice::Assign("ICT".to_string()),
+            "çürüyen seed yerine edge'li adaya margin'siz geçilir");
+
+        // Mevcut listede hiç skorlanamadı (None) → çürümüş sayılır; edge'li aday yoksa Demote.
+        let cur_unscorable = |name: &str| -> Option<f64> { match name { "ICT" => Some(0.8), _ => None } };
+        let (u, _) = evaluate_symbol_strategy(&pool, cur_unscorable, Some("EMA"), 0.10, 1.0);
+        assert_eq!(u, StrategyChoice::Demote, "skorlanamayan mevcut + edge yok → Demote");
+
+        // Aday hiç skorlanamadı (boş scored) → veriden hüküm çıkmaz → Keep (yanlışlıkla demote etme).
+        let empty = |_: &str| -> Option<f64> { None };
+        let (k, scored) = evaluate_symbol_strategy(&pool, empty, Some("EMA"), 0.10, 1.0);
+        assert_eq!(k, StrategyChoice::Keep, "skor yokken çürüme kararı verilmez");
+        assert!(scored.is_empty());
     }
 
     #[test]

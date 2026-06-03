@@ -387,7 +387,8 @@ impl Engine {
         // Lock DIŞI ağır hesap; sonra toplu yazım.
         let mut iv_results: Vec<(String, String)> = Vec::new(); // (symbol, chosen)
         let mut iv_log: Vec<String> = Vec::new();
-        let mut strat_results: Vec<(String, String)> = Vec::new(); // (symbol, chosen strateji)
+        // (symbol, karar): Some(strateji)=ata, None=KALDIR (çürüyen seed/keşif → global/auto'ya dön).
+        let mut strat_results: Vec<(String, Option<String>)> = Vec::new();
         let mut strat_log: Vec<String> = Vec::new();
         for sym in &iv_pool {
             let cur = iv_current.get(sym).cloned().unwrap_or_else(|| interval.clone());
@@ -427,7 +428,8 @@ impl Engine {
                     strat_candles.len(), wf_is, wf_oos, wf_step);
                 if !windows.is_empty() {
                     let cur_strat = strat_current.get(sym).map(|s| s.as_str());
-                    let (s_chosen, s_scored) = crate::robot::backtester::walk_forward::evaluate_symbol_strategy(
+                    use crate::robot::backtester::walk_forward::StrategyChoice;
+                    let (s_choice, s_scored) = crate::robot::backtester::walk_forward::evaluate_symbol_strategy(
                         &strat_pool,
                         |name| {
                             let mut cfg = iv_base.clone();
@@ -439,15 +441,23 @@ impl Engine {
                         },
                         cur_strat, STRAT_MARGIN, STRAT_MIN_SCORE,
                     );
-                    if let Some(best) = s_chosen {
-                        if Some(best.as_str()) != cur_strat { strat_results.push((sym.clone(), best.clone())); }
-                        if !s_scored.is_empty() {
-                            // En iyi 3 skoru logla (havuz büyük olabilir).
-                            let mut top = s_scored.clone();
-                            top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                            let sc: Vec<String> = top.iter().take(3).map(|(c, s)| format!("{c}={s:.2}")).collect();
-                            strat_log.push(format!("{sym}@{eff_iv}→{best}[{}]", sc.join(",")));
+                    // En iyi 3 skor (havuz büyük olabilir) — gözlemlenebilirlik.
+                    let top3 = || {
+                        let mut top = s_scored.clone();
+                        top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        top.into_iter().take(3).map(|(c, s)| format!("{c}={s:.2}")).collect::<Vec<_>>().join(",")
+                    };
+                    match s_choice {
+                        StrategyChoice::Assign(best) => {
+                            strat_results.push((sym.clone(), Some(best.clone())));
+                            strat_log.push(format!("{sym}@{eff_iv}→{best}[{}]", top3()));
                         }
+                        // Çürüme: mevcut atama min_score'u kaybetti + edge'li aday yok → KALDIR.
+                        StrategyChoice::Demote => {
+                            strat_results.push((sym.clone(), None));
+                            strat_log.push(format!("{sym}@{eff_iv}→⊘demote[{}]", top3()));
+                        }
+                        StrategyChoice::Keep => {}
                     }
                 }
             }
@@ -504,9 +514,13 @@ impl Engine {
                 for (sym, iv) in &iv_results {
                     params.symbol_interval.insert(sym.clone(), iv.clone());
                 }
-                // Pool-wide otonom STRATEJİ kazananları (evaluate_symbol_strategy, PF≥1.0 + margin).
+                // Pool-wide otonom STRATEJİ kararları: Some→ata (PF≥1.0 + margin), None→KALDIR
+                // (çürüyen seed/keşif → sembol global/auto'ya döner).
                 for (sym, strat) in &strat_results {
-                    params.symbol_strategy.insert(sym.clone(), strat.clone());
+                    match strat {
+                        Some(s) => { params.symbol_strategy.insert(sym.clone(), s.clone()); }
+                        None => { params.symbol_strategy.remove(sym); }
+                    }
                 }
             }
             // Pool-wide otonom interval özeti — gözlemlenebilirlik (değişenler + tüm skorlar).
@@ -516,10 +530,10 @@ impl Engine {
                     iv_log.len(), iv_results.len(), iv_log.join(" · "),
                 ));
             }
-            // Pool-wide otonom strateji özeti (per-symbol edge: hangi sembol hangi stratejiyi seçti).
+            // Pool-wide otonom strateji özeti (per-symbol: hangi sembol edge aldı/çürüyüp demote oldu).
             if !strat_log.is_empty() {
                 st.push_log(format!(
-                    "🧠 auto-strateji ({} sembol edge-li, {} değişti): {}",
+                    "🧠 auto-strateji ({} sembol karar, {} değişti): {}",
                     strat_log.len(), strat_results.len(), strat_log.join(" · "),
                 ));
             }
