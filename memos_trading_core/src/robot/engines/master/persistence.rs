@@ -61,27 +61,45 @@ impl Engine {
         }
     }
 
-    /// 🌱 edge_scan SEED görünürlüğü (TUI state-log). `ParameterStore.symbol_strategy` boot'ta
-    /// YALNIZ seed'den dolar (ParameterStore tek-kaynak `from_env`, disk reload yok; backtest job
+    /// 🌱 edge_scan SEED görünürlüğü (TUI state-log + kalıcı dosya logu). `ParameterStore.symbol_strategy`
+    /// boot'ta YALNIZ seed'den dolar (ParameterStore tek-kaynak `from_env`, disk reload yok; backtest job
     /// henüz koşmadı) → buradaki sayım = seed'lenen sembol sayısı. TUI'de logger backend yok →
-    /// `log::info!` görünmez; bu state-log paneline düşer (rtc_tui + headless ortak). EDGE_SEED_REPORT
-    /// set ama 0 yüklendiyse "WF-onaylı aday yok" notu (sessiz-0 yerine görünür sinyal). [[project_edge_scan]].
+    /// `push_state_log` paneli sağlar (bellek-içi ring; rtc_tui + headless ortak). AYRICA `log::info!` ile
+    /// TF'li TAM liste `robotic_trading.log`'a düşer → ring kaymadan kalıcı kalır, `grep "edge seed"` ile
+    /// her boot'ta yetkili seed bütünlüğü okunur (panel önizlemesi 8'le sınırlı, TF'siz; dosya logu değil).
+    /// EDGE_SEED_REPORT set ama 0 yüklendiyse "WF-onaylı aday yok" notu (sessiz-0 yerine görünür sinyal).
+    /// [[project_edge_scan]].
     pub(crate) fn report_edge_seed(state: &Arc<Mutex<AppState>>) {
         let seed_path = std::env::var("EDGE_SEED_REPORT").ok().filter(|s| !s.trim().is_empty());
-        let entries: Vec<(String, String)> = match state.lock() {
+        // (sembol, interval, strateji) — TF'yi de taşı ki dosya logu Fix A'yı (BB 1d'de) teyit edebilsin.
+        let mut entries: Vec<(String, String, String)> = match state.lock() {
             Ok(st) => st.brain.parameters.read().ok()
-                .map(|p| p.symbol_strategy.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                .map(|p| p.symbol_strategy.iter()
+                    .map(|(sym, strat)| (
+                        sym.clone(),
+                        p.symbol_interval.get(sym).cloned().unwrap_or_else(|| "?".into()),
+                        strat.clone(),
+                    ))
+                    .collect())
                 .unwrap_or_default(),
             Err(_) => return,
         };
+        entries.sort(); // deterministik dosya logu (sembol alfabetik).
         if !entries.is_empty() {
-            let mut preview: Vec<String> = entries.iter().take(8).map(|(s, st)| format!("{s}→{st}")).collect();
+            // Panel: kısa önizleme (ilk 8 sembol→strateji, bellek-içi).
+            let mut preview: Vec<String> =
+                entries.iter().take(8).map(|(s, _iv, st)| format!("{s}→{st}")).collect();
             if entries.len() > 8 { preview.push(format!("+{} daha", entries.len() - 8)); }
             push_state_log(state, format!(
                 "🌱 edge seed: {} sembol→strateji yüklendi ({})", entries.len(), preview.join(", ")));
+            // Dosya logu: TF'li TAM liste (kalıcı; ring kaymadan grep'lenebilir).
+            let full: Vec<String> =
+                entries.iter().map(|(s, iv, st)| format!("{s} {iv}/{st}")).collect();
+            log::info!("🌱 edge seed: {} aday yüklendi — {}", entries.len(), full.join(", "));
         } else if let Some(path) = seed_path {
             push_state_log(state, format!(
                 "🌱 edge seed: '{}' okundu ama 0 WF-onaylı aday → symbol_strategy boş (global/auto sürer)", path));
+            log::info!("🌱 edge seed: '{}' okundu ama 0 WF-onaylı aday → symbol_strategy boş", path);
         }
         // EDGE_SEED_REPORT yokken ve map boşken: log YOK (gürültüsüz).
     }
