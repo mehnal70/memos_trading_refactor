@@ -70,3 +70,6 @@ memos_trading_core/.env
 *.pem
 credentials.json
 secrets.json
+
+# launcher yerel tercih dosyası
+scripts/.launch.conf
