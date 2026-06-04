@@ -426,6 +426,19 @@ pub struct SeedEntry {
 /// bu izleri sırayla dener; tek-pozisyon invariantı korunur (flat'ken ilk tetikleyen açar). Yalnız
 /// `profitable` + (require_wf_robust ise WF✓) + [min_pf,max_pf] + (min_qvol>0 ise likidite tabanı)
 /// barını geçen satırlar. Market filtresi (engine market'ına uyum) çağıran (store) tarafında. Saf → testli.
+/// Bir edge_scan satırı seed robustluk barını geçiyor mu (per-row predikat — TEK KAYNAK;
+/// seed_symbol_multi_plan + çoklu-TF A/B harness ortak kullanır). profitable + işlem≥min +
+/// PF∈[min,max] + (WF şartı) + (qvol tabanı). Saf → testli.
+pub fn passes_seed_bar(row: &EdgeRow, r: &SeedRobustness) -> bool {
+    row.profitable
+        && row.trades >= r.min_trades
+        && row.profit_factor >= r.min_pf
+        && row.profit_factor <= r.max_pf
+        && (!r.require_wf_robust || row.wf_robust)
+        // MAJÖR kapısı: illikit-alt seri (canlı feed'de purge edilen) seed'lenmesin. >0 ise aktif.
+        && (r.min_daily_quote_volume <= 0.0 || row.avg_daily_quote_volume >= r.min_daily_quote_volume)
+}
+
 pub fn seed_symbol_multi_plan(report: &EdgeScanReport, r: SeedRobustness, max_tracks: usize)
     -> HashMap<String, Vec<SeedEntry>>
 {
@@ -434,11 +447,7 @@ pub fn seed_symbol_multi_plan(report: &EdgeScanReport, r: SeedRobustness, max_tr
     type SymEdges = HashMap<EdgeKey, (SeedEntry, f64)>;
     let mut acc: HashMap<String, SymEdges> = HashMap::new();
     for row in &report.rows {
-        if !row.profitable || row.trades < r.min_trades { continue; }
-        if row.profit_factor < r.min_pf || row.profit_factor > r.max_pf { continue; }
-        if r.require_wf_robust && !row.wf_robust { continue; }
-        // MAJÖR kapısı: illikit-alt seri (canlı feed'de purge edilen) seed'lenmesin. >0 ise aktif.
-        if r.min_daily_quote_volume > 0.0 && row.avg_daily_quote_volume < r.min_daily_quote_volume { continue; }
+        if !passes_seed_bar(row, &r) { continue; }
         let key = (row.market.clone(), row.interval.clone(), row.best_strategy.clone());
         let e = acc.entry(row.symbol.clone()).or_default()
             .entry(key)
