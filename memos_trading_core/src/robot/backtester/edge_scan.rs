@@ -419,27 +419,56 @@ pub struct SeedEntry {
     pub strategy: String,
 }
 
-/// Bir rapordan robustluk barını geçen `sembol → SeedEntry(interval, strateji)` planı üretir.
-/// Aynı sembol birden çok seride geçerse EN YÜKSEK PF'li satır (TF+strateji birlikte) kazanır
-/// (ama max_pf'i aşan fluke satırlar zaten elenmiştir → sembolün ikinci-iyi gerçek edge'i seçilir).
-/// Yalnız `profitable` + (require_wf_robust ise WF-onaylı) + [min_pf, max_pf] aralığı +
-/// (min_daily_quote_volume>0 ise likidite/majör tabanını aşan) bar'ı geçen satırlar. Saf → testli.
-pub fn seed_symbol_plan(report: &EdgeScanReport, r: SeedRobustness) -> HashMap<String, SeedEntry> {
-    let mut best: HashMap<String, (SeedEntry, f64)> = HashMap::new();
+/// Çoklu-iz seed: her sembol için robustluk barını geçen TÜM (market,TF,strateji) edge'lerini tutar
+/// (tek-edge `seed_symbol_plan`'ın çoklu hali — Approach A çoklu-TF düzeneği [[project_edge_scan]]).
+/// Aynı (market,TF,strateji) birden çok seride → en yüksek PF ile dedup; sonuç PF AZALAN sıralı,
+/// `max_tracks` (≥1) ile bounded ([[feedback_modular_dry_perf]] pool döngüsünü sınırlı tut). Engine
+/// bu izleri sırayla dener; tek-pozisyon invariantı korunur (flat'ken ilk tetikleyen açar). Yalnız
+/// `profitable` + (require_wf_robust ise WF✓) + [min_pf,max_pf] + (min_qvol>0 ise likidite tabanı)
+/// barını geçen satırlar. Market filtresi (engine market'ına uyum) çağıran (store) tarafında. Saf → testli.
+pub fn seed_symbol_multi_plan(report: &EdgeScanReport, r: SeedRobustness, max_tracks: usize)
+    -> HashMap<String, Vec<SeedEntry>>
+{
+    // sembol → ((market,interval,strategy) → (SeedEntry, en iyi PF)) ile dedup.
+    type EdgeKey = (String, String, String);
+    type SymEdges = HashMap<EdgeKey, (SeedEntry, f64)>;
+    let mut acc: HashMap<String, SymEdges> = HashMap::new();
     for row in &report.rows {
         if !row.profitable || row.trades < r.min_trades { continue; }
         if row.profit_factor < r.min_pf || row.profit_factor > r.max_pf { continue; }
         if r.require_wf_robust && !row.wf_robust { continue; }
         // MAJÖR kapısı: illikit-alt seri (canlı feed'de purge edilen) seed'lenmesin. >0 ise aktif.
         if r.min_daily_quote_volume > 0.0 && row.avg_daily_quote_volume < r.min_daily_quote_volume { continue; }
-        let e = best.entry(row.symbol.clone())
+        let key = (row.market.clone(), row.interval.clone(), row.best_strategy.clone());
+        let e = acc.entry(row.symbol.clone()).or_default()
+            .entry(key)
             .or_insert_with(|| (SeedEntry { market: String::new(), interval: String::new(), strategy: String::new() }, f64::NEG_INFINITY));
         if row.profit_factor > e.1 {
             *e = (SeedEntry { market: row.market.clone(), interval: row.interval.clone(), strategy: row.best_strategy.clone() }, row.profit_factor);
         }
     }
-    best.into_iter().map(|(sym, (entry, _))| (sym, entry)).collect()
+    acc.into_iter().map(|(sym, m)| {
+        let mut v: Vec<(SeedEntry, f64)> = m.into_values().collect();
+        // PF azalan (yüksek-PF "çapa" edge önce; eşitlikte deterministik (TF,strateji) sıralaması).
+        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| (a.0.interval.as_str(), a.0.strategy.as_str()).cmp(&(b.0.interval.as_str(), b.0.strategy.as_str()))));
+        v.truncate(max_tracks.max(1));
+        (sym, v.into_iter().map(|(e, _)| e).collect())
+    }).collect()
 }
+
+/// Bir rapordan robustluk barını geçen `sembol → SeedEntry(interval, strateji)` planı (tek-edge,
+/// sembol başına EN YÜKSEK PF). `seed_symbol_multi_plan(.., 1)`'e delege eder (TEK KAYNAK; filtre
+/// mantığı tek yerde). Saf → testli.
+pub fn seed_symbol_plan(report: &EdgeScanReport, r: SeedRobustness) -> HashMap<String, SeedEntry> {
+    seed_symbol_multi_plan(report, r, 1).into_iter()
+        .filter_map(|(sym, mut tracks)| if tracks.is_empty() { None } else { Some((sym, tracks.remove(0))) })
+        .collect()
+}
+
+/// Çoklu-iz seed için sembol başına azami iz (TF,strateji) sayısı — pool döngüsü bounded kalsın
+/// (track başına ayrı mum yükü). EDGE_SEED_MAX_TRACKS ile aşılır.
+pub const SEED_MAX_TRACKS_DEFAULT: usize = 3;
 
 /// JSON rapor DOSYASINDAN seed planı (dosya yok/parse hatası → boş, sessiz). Boot'ta
 /// `EDGE_SEED_REPORT` env'i bu yola işaret ederse symbol_interval + symbol_strategy'ye yüklenir.
@@ -447,6 +476,18 @@ pub fn seed_symbol_plan_from_file(path: &str, r: SeedRobustness) -> HashMap<Stri
     let Ok(txt) = std::fs::read_to_string(path) else { return HashMap::new() };
     match serde_json::from_str::<EdgeScanReport>(&txt) {
         Ok(report) => seed_symbol_plan(&report, r),
+        Err(_) => HashMap::new(),
+    }
+}
+
+/// JSON rapor DOSYASINDAN çoklu-iz seed planı (dosya yok/parse hatası → boş, sessiz).
+/// `EDGE_SEED_MULTI_TF` açıkken boot'ta symbol_tracks'e yüklenir [[project_edge_scan]].
+pub fn seed_symbol_multi_plan_from_file(path: &str, r: SeedRobustness, max_tracks: usize)
+    -> HashMap<String, Vec<SeedEntry>>
+{
+    let Ok(txt) = std::fs::read_to_string(path) else { return HashMap::new() };
+    match serde_json::from_str::<EdgeScanReport>(&txt) {
+        Ok(report) => seed_symbol_multi_plan(&report, r, max_tracks),
         Err(_) => HashMap::new(),
     }
 }
@@ -608,7 +649,7 @@ mod tests {
                 mk("SIRENUSDT", "1h", "DONCHIAN", 2.0, 40),
             ],
         };
-        let seed = seed_symbol_plan(&report, SeedRobustness::default()); // max_pf=25
+        let seed = seed_symbol_plan(&report, SeedRobustness::default()); // max_pf=10 (default)
         let rave = seed.get("RAVEUSDT").expect("RAVE'nin gerçek (4h) edge'i kalmalı");
         assert_eq!((rave.interval.as_str(), rave.strategy.as_str()), ("4h", "DONCHIAN"),
             "PF 61 fluke elenince sembolün cap-altı ikinci edge'i seçilir (yüksek-PF cazibesine kapılmaz)");
@@ -618,6 +659,46 @@ mod tests {
         let seed2 = seed_symbol_plan(&report, loose);
         assert_eq!(seed2.get("RAVEUSDT").unwrap().interval.as_str(), "1h",
             "cap kalkınca en yüksek PF (61, 1h) kazanır → cap'in elemesi ispatlanır");
+    }
+
+    #[test]
+    fn seed_multi_plan_keeps_all_validated_tf_edges_bounded_and_sorted() {
+        let mk = |sym: &str, iv: &str, strat: &str, pf: f64| EdgeRow {
+            exchange: "b".into(), market: "futures".into(), symbol: sym.into(), interval: iv.into(),
+            rows: 5000, gap_pct: 0.0, stale_days: 0.0, best_strategy: strat.into(),
+            take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
+            trades: 40, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0,
+            avg_daily_quote_volume: 1e9, profitable: true,
+            wf: WfCrossCheck::default(), wf_robust: true,
+        };
+        // ZEC-benzeri: 4 WF✓ edge (biri PF-cap üstü fluke) + tek-edge bir sembol.
+        let report = EdgeScanReport {
+            generated_at: "t".into(), db_path: "d".into(), market_filter: None,
+            series_candidates: 5, series_scanned: 5, series_skipped: 0, profitable_count: 5,
+            summary: vec![],
+            rows: vec![
+                mk("ZECUSDT", "1d", "STOCH_RSI", 4.42),
+                mk("ZECUSDT", "1h", "MACD", 2.27),
+                mk("ZECUSDT", "30m", "SUPERTREND", 2.02),
+                mk("ZECUSDT", "5m", "RSI", 50.0),   // fluke (>max_pf=10) → elenmeli, ize girmemeli
+                mk("XRPUSDT", "1d", "MACD", 4.63),
+            ],
+        };
+        let r = SeedRobustness::default(); // max_pf=10
+        let multi = seed_symbol_multi_plan(&report, r.clone(), SEED_MAX_TRACKS_DEFAULT);
+        let zec = multi.get("ZECUSDT").expect("ZEC çoklu-iz");
+        // Fluke 5m elenir → 3 gerçek edge; PF AZALAN sıralı (1d > 1h > 30m).
+        assert_eq!(zec.len(), 3, "cap-altı 3 WF✓ edge tutulur (fluke 5m elenir)");
+        assert_eq!(zec.iter().map(|e| (e.interval.as_str(), e.strategy.as_str())).collect::<Vec<_>>(),
+            vec![("1d","STOCH_RSI"), ("1h","MACD"), ("30m","SUPERTREND")], "PF azalan sıra");
+        assert_eq!(multi.get("XRPUSDT").map(|v| v.len()), Some(1), "tek-edge sembol → tek iz");
+        // max_tracks=2 → yalnız en iyi 2 iz (bounded).
+        let capped = seed_symbol_multi_plan(&report, r.clone(), 2);
+        assert_eq!(capped.get("ZECUSDT").unwrap().len(), 2, "max_tracks ile bounded");
+        // Tek-edge seed_symbol_plan = çoklu'nun top-1'i (DRY delegasyon kanıtı).
+        let single = seed_symbol_plan(&report, r);
+        assert_eq!((single["ZECUSDT"].interval.as_str(), single["ZECUSDT"].strategy.as_str()),
+            ("1d","STOCH_RSI"), "tek-plan = çoklu top-1");
     }
 
     #[test]

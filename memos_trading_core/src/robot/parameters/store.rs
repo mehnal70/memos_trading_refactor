@@ -86,6 +86,14 @@ pub struct ParameterStore {
     /// Boş → mevcut davranış (global/auto), sıfır regresyon. [[project_edge_scan]].
     #[serde(default)]
     pub symbol_strategy: HashMap<String, String>,
+    /// 🪢 Per-sembol ÇOKLU-İZ edge'leri (Approach A çoklu-TF düzeneği). Key = sembol, value =
+    /// PF-azalan (interval, strateji) WF-onaylı edge listesi (örn. ZEC → [(1d,STOCH_RSI),(1h,MACD),
+    /// (30m,SUPERTREND)]). `EDGE_SEED_MULTI_TF` açıkken seed çoklu-plandan doldurur; cycle her izi
+    /// sırayla dener (tek-pozisyon invariantı: flat'ken ilk tetikleyen açar → hızlı TF frekansı artırır,
+    /// 1d çapa-edge korunur). Boş → tek-edge davranış (symbol_strategy/_interval), sıfır regresyon.
+    /// İlk iz `symbol_interval`/`symbol_strategy` ile tutarlıdır (anchor). [[project_edge_scan]].
+    #[serde(default)]
+    pub symbol_tracks: HashMap<String, Vec<(String, String)>>,
 }
 
 /// Strateji niyetiyle hizalı default trail target'lar (yüzde, entry'den uzaklık).
@@ -137,6 +145,7 @@ impl Default for ParameterStore {
             strategy_params: HashMap::new(),
             symbol_interval: HashMap::new(),
             symbol_strategy: HashMap::new(),
+            symbol_tracks: HashMap::new(),
         }
     }
 }
@@ -260,6 +269,35 @@ impl ParameterStore {
                     "🌱 edge seed: {} sembol (market={}, interval+strateji) yüklendi, {} market-uyumsuz elendi ({})",
                     loaded, engine_market, skipped_market, path);
             }
+            // 🪢 ÇOKLU-İZ (Approach A): EDGE_SEED_MULTI_TF açıkken sembol başına TÜM WF-onaylı
+            // (TF,strateji) edge'lerini symbol_tracks'e yükle (market-filtreli; ilk iz = tek-seed
+            // anchor'ı ile tutarlı). Yalnız >1 iz taşıyan sembol kaydedilir (tek-izli zaten
+            // symbol_strategy'de). Kapalı → boş = tek-edge davranış, sıfır regresyon. [[project_edge_scan]].
+            let multi_tf = matches!(
+                std::env::var("EDGE_SEED_MULTI_TF").ok().as_deref(),
+                Some("1") | Some("true") | Some("on"));
+            if multi_tf {
+                let max_tracks = std::env::var("EDGE_SEED_MAX_TRACKS").ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(crate::robot::backtester::SEED_MAX_TRACKS_DEFAULT);
+                let multi = crate::robot::backtester::seed_symbol_multi_plan_from_file(&path, r, max_tracks);
+                let mut tracks_total = 0usize;
+                for (sym, entries) in &multi {
+                    let tracks: Vec<(String, String)> = entries.iter()
+                        .filter(|e| ignore_market || e.market.eq_ignore_ascii_case(&engine_market))
+                        .map(|e| (e.interval.clone(), e.strategy.clone()))
+                        .collect();
+                    if tracks.len() > 1 {
+                        tracks_total += tracks.len();
+                        store.symbol_tracks.insert(sym.clone(), tracks);
+                    }
+                }
+                if tracks_total > 0 {
+                    log::info!(
+                        "🪢 çoklu-iz seed: {} sembol >1 TF-edge taşıyor ({} iz toplam, max={}/sembol)",
+                        store.symbol_tracks.len(), tracks_total, max_tracks);
+                }
+            }
         }
         store
     }
@@ -380,6 +418,12 @@ impl ParameterStore {
         self.symbol_strategy.get(symbol)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+    }
+
+    /// Bu sembolün ÇOKLU-İZ edge listesi (PF-azalan (interval, strateji)); yoksa boş.
+    /// Çoklu-TF açıkken cycle bu izleri sırayla dener; kapalı/boşsa tek-edge yoluna düşülür.
+    pub fn tracks_for(&self, symbol: &str) -> Vec<(String, String)> {
+        self.symbol_tracks.get(symbol).cloned().unwrap_or_default()
     }
 
     /// İlgili rejim için (override varsa o, yoksa base) TradeRiskParams.

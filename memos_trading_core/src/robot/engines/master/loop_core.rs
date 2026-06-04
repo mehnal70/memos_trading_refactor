@@ -154,7 +154,7 @@ impl Engine {
     /// → aç/kapat kararı.
     pub(crate) async fn execute_trade_cycle(state: &Arc<Mutex<AppState>>, snap: &MissionControl) {
         // 1) Mark-to-market: aktif pozisyonların current_price'ı güncel.
-        let (candidates, db_path, interval, symbol_interval, symbol_strategy, live_strategy, ml_confidence, tuning) = {
+        let (candidates, db_path, interval, symbol_interval, symbol_strategy, symbol_tracks, live_strategy, ml_confidence, tuning) = {
             let st = match state.lock() { Ok(s) => s, Err(_) => return };
             let price_map = st.fleet.live_price.read().ok().map(|g| g.clone()).unwrap_or_default();
             if let Ok(mut positions) = st.finance.live_positions.write() {
@@ -187,12 +187,12 @@ impl Engine {
             }
             let live_strategy = st.brain.live_strategy.read()
                 .map(|s| s.clone()).unwrap_or_else(|_| "MA_CROSSOVER".to_string());
-            // Per-sembol otonom interval + strateji map'leri (boş → global/auto'ya düşer).
-            let (symbol_interval, symbol_strategy) = st.brain.parameters.read().ok()
-                .map(|p| (p.symbol_interval.clone(), p.symbol_strategy.clone()))
+            // Per-sembol otonom interval + strateji + çoklu-iz map'leri (boş → global/auto'ya düşer).
+            let (symbol_interval, symbol_strategy, symbol_tracks) = st.brain.parameters.read().ok()
+                .map(|p| (p.symbol_interval.clone(), p.symbol_strategy.clone(), p.symbol_tracks.clone()))
                 .unwrap_or_default();
             (candidates, st.config.db_path.clone(), st.config.interval.clone(),
-             symbol_interval, symbol_strategy, live_strategy, st.brain.ml_confidence, tuning)
+             symbol_interval, symbol_strategy, symbol_tracks, live_strategy, st.brain.ml_confidence, tuning)
         };
 
         // 2) Paralel sembol infazı — her sembol için ayrı tokio task. State Arc<Mutex> üzerinden
@@ -215,13 +215,37 @@ impl Engine {
             // (seed_strategy_priority açıkken). Yoksa sembol global/auto'ya düşer + ScalpSwing avlanır.
             let has_seed_strategy = seed_strat.is_some();
             let live_strategy_c = seed_strat.unwrap_or_else(|| live_strategy.clone());
+            // 🪢 Çoklu-iz: sembolün >1 WF-onaylı (TF,strateji) edge'i varsa (EDGE_SEED_MULTI_TF açık →
+            // symbol_tracks dolu) izleri SIRALI dener; aksi (boş) → tek-edge anchor. Boş Vec = eski yol.
+            let tracks: Vec<(String, String)> = symbol_tracks.get(&symbol).cloned().unwrap_or_default();
             let snap_clone = snap.clone();
             let tuning_c = Arc::clone(&tuning);
             handles.push(tokio::spawn(async move {
-                Self::process_symbol_cycle(
-                    &state_clone, &symbol, &db_path_c, &interval_c,
-                    &live_strategy_c, has_seed_strategy, ml_confidence, &snap_clone, &tuning_c,
-                ).await;
+                if tracks.len() > 1 {
+                    // Tek-pozisyon invariantı: yalnız FLAT iken izleri dene; pozisyon açıkken
+                    // tek anchor çağrı (exit yönetimi, iz-arası ani re-entry churn'ü önlenir).
+                    // Her iz KENDİ TF mumunu yükler (1d çapa + 1h/30m daha sık fırsat); ilk açan durur.
+                    if symbol_has_open_position(&state_clone, &symbol) {
+                        Self::process_symbol_cycle(
+                            &state_clone, &symbol, &db_path_c, &interval_c,
+                            &live_strategy_c, true, ml_confidence, &snap_clone, &tuning_c,
+                        ).await;
+                    } else {
+                        for (iv, strat) in &tracks {
+                            Self::process_symbol_cycle(
+                                &state_clone, &symbol, &db_path_c, iv,
+                                strat, true, ml_confidence, &snap_clone, &tuning_c,
+                            ).await;
+                            // İz pozisyon açtıysa dur (sembol-başına-tek-pozisyon).
+                            if symbol_has_open_position(&state_clone, &symbol) { break; }
+                        }
+                    }
+                } else {
+                    Self::process_symbol_cycle(
+                        &state_clone, &symbol, &db_path_c, &interval_c,
+                        &live_strategy_c, has_seed_strategy, ml_confidence, &snap_clone, &tuning_c,
+                    ).await;
+                }
             }));
         }
         // Tüm sembollerin tamamlanmasını bekle (timeout yok — her biri kısa).
@@ -692,6 +716,15 @@ fn effective_stale_feed_age(configured: i64, interval_secs: i64) -> i64 {
         n if n < 0 => (interval_secs * 2).max(60),
         n => n,
     }
+}
+
+/// Sembolün AÇIK pozisyonu var mı (live_positions symbol-keyed). Çoklu-iz dispatch'i bununla
+/// tek-pozisyon invariantını korur: flat'ken izleri sırayla dener, biri açınca durur. Lock
+/// edinilemezse "var" sayar (güvenli taraf → fazladan açılış denenmez).
+fn symbol_has_open_position(state: &Arc<Mutex<AppState>>, symbol: &str) -> bool {
+    state.lock().ok()
+        .and_then(|st| st.finance.live_positions.read().ok().map(|p| p.contains_key(symbol)))
+        .unwrap_or(true)
 }
 
 #[cfg(test)]
