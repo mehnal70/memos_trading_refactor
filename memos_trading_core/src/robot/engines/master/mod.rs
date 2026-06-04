@@ -332,6 +332,14 @@ pub struct RuntimeTuning {
     /// ≤1000 bar). Tavanı aşan gap sonraki cycle'larda yakınsar → API yükü sınırlı kalır.
     /// Env `BACKFILL_MAX_REQUESTS` (default 50 → ~50k bar/cycle).
     pub backfill_max_requests: usize,
+    /// 🌱 Seed-strateji önceliği: bir sembolün edge_scan'le KEŞFEDİLMİŞ açık `symbol_strategy`
+    /// ataması varsa o sembol O stratejiyle işlem görür; fırsatçı ScalpSwing alt-kanalı o turda
+    /// PAS geçilir (yoksa ScalpSwing satır 327'de önce açıp keşfedilmiş edge'i baypas ediyordu →
+    /// seed→strateji kanalı dekoratif kalıyordu). ScalpSwing edge'siz sembollerde avlanmaya devam
+    /// eder. `true` (default) → keşfedilmiş alfa canlıda gerçekten ifade edilir. Env
+    /// `SEED_STRATEGY_PRIORITY` (0/false/off → eski davranış: ScalpSwing her sembolde önce).
+    /// [[project_edge_scan]] [[feedback_autonomy_first]].
+    pub seed_strategy_priority: bool,
 }
 
 impl Default for RuntimeTuning {
@@ -373,6 +381,7 @@ impl Default for RuntimeTuning {
             data_max_stale_bars: 10,    // son bar en fazla 10×interval yaşında
             backfill_enabled: true,     // veri-doğruluğu (gap'i doldur); bounded → güvenli
             backfill_max_requests: 50,  // 50×1000 = ~50k bar/cycle; büyük gap cycle'larda yakınsar
+            seed_strategy_priority: true, // keşfedilmiş edge'i olan sembol o stratejiyle işlem görür (ScalpSwing baypas etmez)
         }
     }
 }
@@ -445,6 +454,8 @@ impl RuntimeTuning {
             // Default açık (0/false/off → kapat) — gap doldurma veri-doğruluğu; bounded.
             backfill_enabled: !matches!(std::env::var("BACKFILL_ENABLED").ok().as_deref(), Some("0") | Some("false") | Some("off")),
             backfill_max_requests: env_parse("BACKFILL_MAX_REQUESTS", d.backfill_max_requests).max(1),
+            // Default açık (0/false/off → kapat) — keşfedilmiş edge sembolde ScalpSwing'i baypas etmesin.
+            seed_strategy_priority: !matches!(std::env::var("SEED_STRATEGY_PRIORITY").ok().as_deref(), Some("0") | Some("false") | Some("off")),
         }
     }
 

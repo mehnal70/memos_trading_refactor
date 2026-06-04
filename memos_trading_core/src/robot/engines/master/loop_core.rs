@@ -209,15 +209,18 @@ impl Engine {
             let interval_c = symbol_interval.get(&symbol).cloned().unwrap_or_else(|| interval.clone());
             // Per-sembol otonom strateji (precedence 1); yoksa global live_strategy ("auto" ise
             // process_symbol_cycle içinde select_best'e düşer). [[project_edge_scan]].
-            let live_strategy_c = symbol_strategy.get(&symbol).cloned()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| live_strategy.clone());
+            let seed_strat = symbol_strategy.get(&symbol).cloned()
+                .filter(|s| !s.trim().is_empty());
+            // Keşfedilmiş açık edge ataması var mı → fırsatçı ScalpSwing bu sembolde pas geçilir
+            // (seed_strategy_priority açıkken). Yoksa sembol global/auto'ya düşer + ScalpSwing avlanır.
+            let has_seed_strategy = seed_strat.is_some();
+            let live_strategy_c = seed_strat.unwrap_or_else(|| live_strategy.clone());
             let snap_clone = snap.clone();
             let tuning_c = Arc::clone(&tuning);
             handles.push(tokio::spawn(async move {
                 Self::process_symbol_cycle(
                     &state_clone, &symbol, &db_path_c, &interval_c,
-                    &live_strategy_c, ml_confidence, &snap_clone, &tuning_c,
+                    &live_strategy_c, has_seed_strategy, ml_confidence, &snap_clone, &tuning_c,
                 ).await;
             }));
         }
@@ -234,6 +237,7 @@ impl Engine {
         db_path: &str,
         interval: &str,
         live_strategy: &str,
+        has_seed_strategy: bool,
         ml_confidence: f64,
         snap: &MissionControl,
         tuning: &RuntimeTuning,
@@ -324,7 +328,11 @@ impl Engine {
             // SCALP_SWING_ENABLE=1 ise Scalp/SwingEngine fırsat üretir; SlotGuard kanal-bazlı
             // limit + hedge kontrolü yapar. Uygun ise açılış ScalpSwing patikasından gider
             // (kind=Some(TradeType)); bu turda klasik strateji pas geçilir. Disabled → false.
-            if Self::try_open_scalp_swing(state, symbol, &candles, regime, regime_directional_eff).await {
+            // 🌱 Seed önceliği: sembolün edge_scan'le keşfedilmiş açık strateji ataması varsa
+            // (has_seed_strategy) fırsatçı ScalpSwing PAS geçilir → keşfedilmiş edge o sembolde
+            // gerçekten koşar (aksi halde ScalpSwing önce açıp baypas ederdi). [[project_edge_scan]].
+            if !(has_seed_strategy && tuning.seed_strategy_priority)
+                && Self::try_open_scalp_swing(state, symbol, &candles, regime, regime_directional_eff).await {
                 return;
             }
 

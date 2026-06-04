@@ -306,13 +306,15 @@ fn is_better(cand: &EdgeRow, best: Option<&EdgeRow>, min_trades: usize) -> bool 
     }
 }
 
-/// Serinin günlük quote-volume (USDT-yaklaşık turnover) ortalaması — market-agnostik likidite/
-/// "majörlük" ölçütü. `close×volume` bir mumun quote-volume'ü; interval ile GÜNLÜĞE normalize
-/// edilir → 1h/4h/1d kıyaslanabilir (aksi halde 1d mumu 1h'ten 24× büyük görünür). Majörler
-/// (BTC/ETH/AVAX) yüksek, illikit-alt (MYX/SIREN) düşük döner. Saf → testli. [[feedback_market_agnostic]].
+/// Serinin günlük quote-volume (USDT turnover) ortalaması — market-agnostik likidite/"majörlük"
+/// ölçütü. `Candle.volume` ZATEN quote-volume'dür (Binance kline idx 7 = quote asset volume,
+/// bkz. data_fetcher::binance:188) → mumun turnover'ı `volume`'ün KENDİSİDİR. (Eskiden `close×volume`
+/// ile bir kez daha fiyatla çarpılıp ~fiyat kadar şişiyordu: BTCUSDT 30m 1e15 USDT/gün gibi imkânsız
+/// değerler → likidite kapısı kullanılamazdı.) Interval ile GÜNLÜĞE normalize edilir → 1h/4h/1d
+/// kıyaslanabilir. Majörler (BTC/ETH) yüksek, illikit-alt düşük döner. Saf → testli. [[feedback_market_agnostic]].
 pub fn avg_daily_quote_volume(candles: &[crate::core::types::Candle], interval: &str) -> f64 {
     if candles.is_empty() { return 0.0; }
-    let per_candle: f64 = candles.iter().map(|c| c.close * c.volume).sum::<f64>() / candles.len() as f64;
+    let per_candle: f64 = candles.iter().map(|c| c.volume).sum::<f64>() / candles.len() as f64;
     let secs = crate::robot::data_pipeline::DataNormalizer::parse_interval(interval).max(1) as f64;
     per_candle * (86_400.0 / secs)
 }
@@ -383,8 +385,11 @@ pub struct SeedRobustness {
     pub min_trades: usize,
     pub min_pf: f64,
     /// ÜST sanity cap: PF bunu AŞARSA fluke kabul edilip ELENİR. 10-40 işlemlik küçük örneklemde
-    /// aşırı PF (örn. illikit-alt RAVEUSDT 1h PF 61, ya da tek-işlem 999) sürdürülebilir edge değil
-    /// fat-tail kazadır — yüksek PF cazibesine kapılıp böyle adayı canlıya seed etme. EDGE_SEED_MAX_PF
+    /// aşırı PF (örn. illikit-alt RAVEUSDT 1h PF 61 ya da 18.52, tek-işlem 999) sürdürülebilir edge
+    /// değil fat-tail kazadır — yüksek PF cazibesine kapılıp böyle adayı canlıya seed etme. KALİBRASYON
+    /// (2026-06-04 sweep, 25 satır wf_robust): meşru likit majör edge'leri PF≤~5.5 (ZEC 4.42, XRP 4.63,
+    /// SUI 5.45) kümelenir; flukeler kopuk üstte (RAVE 18.52) → 10.0 cap ikisini temiz ayırır (eski 25
+    /// RAVE 18.52'yi kaçırıyordu). İllikidite ayrı eksen → `min_daily_quote_volume`. EDGE_SEED_MAX_PF
     /// ile gevşet (devre dışı: çok büyük değer ver).
     pub max_pf: f64,
     /// true → yalnız WF-onaylı (çoklu-pencere) satırlar seed'lenir (tek-holdout fluke'unu eler).
@@ -398,7 +403,7 @@ pub struct SeedRobustness {
 
 impl Default for SeedRobustness {
     fn default() -> Self {
-        Self { min_trades: 30, min_pf: 1.2, max_pf: 25.0, require_wf_robust: true, min_daily_quote_volume: 0.0 }
+        Self { min_trades: 30, min_pf: 1.2, max_pf: 10.0, require_wf_robust: true, min_daily_quote_volume: 0.0 }
     }
 }
 
@@ -617,11 +622,11 @@ mod tests {
 
     #[test]
     fn avg_daily_quote_volume_normalizes_by_interval() {
-        // close=100, volume=10 → mum-başı quote-vol=1000. 1h: günde 24 mum → 24_000/gün.
+        // volume ZATEN quote-volume (idx 7); mum-başı turnover = volume = 1000. 1h: günde 24 mum → 24_000/gün.
         let mk = |iv: &str, n: usize| -> Vec<Candle> {
             (0..n).map(|i| Candle {
                 timestamp: Utc.timestamp_opt(i as i64 * 3600, 0).single().unwrap(),
-                open: 100.0, high: 100.0, low: 100.0, close: 100.0, volume: 10.0,
+                open: 100.0, high: 100.0, low: 100.0, close: 100.0, volume: 1000.0,
                 symbol: "S".into(), interval: iv.into(),
             }).collect()
         };
