@@ -214,13 +214,16 @@ impl ParameterStore {
         // adayları symbol_strategy'ye PRIOR olarak yüklenir. Online backtest job sonra doğrular/
         // üzerine yazar. Boş/yok → no-op (sıfır regresyon). [[project_edge_scan]].
         if let Some(path) = std::env::var("EDGE_SEED_REPORT").ok().filter(|s| !s.trim().is_empty()) {
+            // Fallback'ler SeedRobustness::default()'tan gelir (TEK KAYNAK; hardcoded sabit kaçağı yok →
+            // default kalibrasyonu (max_pf=10 vb.) runtime'a otomatik yansır). [[feedback_config_externalization]].
+            let d = crate::robot::backtester::SeedRobustness::default();
             let r = crate::robot::backtester::SeedRobustness {
                 min_trades: std::env::var("EDGE_SEED_MIN_TRADES").ok()
-                    .and_then(|v| v.parse().ok()).unwrap_or(30),
-                min_pf: parse_env_f64("EDGE_SEED_MIN_PF").unwrap_or(1.2),
-                // ÜST sanity cap: PF>max_pf fluke (illikit-alt fat-tail) → elenir. Default 25.0;
+                    .and_then(|v| v.parse().ok()).unwrap_or(d.min_trades),
+                min_pf: parse_env_f64("EDGE_SEED_MIN_PF").unwrap_or(d.min_pf),
+                // ÜST sanity cap: PF>max_pf fluke (illikit-alt fat-tail) → elenir.
                 // EDGE_SEED_MAX_PF ile gevşet (devre dışı için çok büyük değer).
-                max_pf: parse_env_f64("EDGE_SEED_MAX_PF").unwrap_or(25.0),
+                max_pf: parse_env_f64("EDGE_SEED_MAX_PF").unwrap_or(d.max_pf),
                 // Default: yalnız WF-onaylı seed (EDGE_SEED_REQUIRE_WF=0 ile gevşet).
                 require_wf_robust: !matches!(
                     std::env::var("EDGE_SEED_REQUIRE_WF").ok().as_deref(),
@@ -228,7 +231,7 @@ impl ParameterStore {
                 // MAJÖR (likidite) tabanı: günlük quote-volume bunun altındaki illikit-alt seri
                 // seed'lenmez (canlı feed'de purge edilen MYX/SIREN tipi). Default 0.0=kapalı;
                 // EDGE_SEED_MIN_QVOL (USDT/gün) + taze rapor (avg_daily_quote_volume'lı) ile aktive.
-                min_daily_quote_volume: parse_env_f64("EDGE_SEED_MIN_QVOL").unwrap_or(0.0),
+                min_daily_quote_volume: parse_env_f64("EDGE_SEED_MIN_QVOL").unwrap_or(d.min_daily_quote_volume),
             };
             // Fix A: seed (TF, strateji) ÇİFTİni taşır → strateji DOĞRU TF'de koşar (BB'yi 1m'de
             // değil 1d'de). symbol_interval + symbol_strategy birlikte yüklenir. [[project_edge_scan]].
