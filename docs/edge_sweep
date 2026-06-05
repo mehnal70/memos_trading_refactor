@@ -12,11 +12,7 @@
    EDGE_SCAN_EDGE_MIN=0.45 ./scripts/edge_sweep.sh futures 1h,4h,1d \
     RAVEUSDT,SIRENUSDT,XRPUSDT,ZECUSDT,ORDIUSDT,BCHUSDT,STORJUSDT,ETHUSDT,AVAXUSDT,ONTUSDT,TRXUSDT,MYXUSDT
     
-    # GÜNCEL (2026-06-04): qvol unit-fix + max_pf 25→10 + SEED_STRATEGY_PRIORITY (default açık).
-    # Taze rapor 11:44 → WF-onaylı 5 majör (ETH/XRP/ZEC/SOL/BCH 1d); RAVE/SIREN/MYX taze veride
-    # WF-onaysız → kendiliğinden elenir. NOT: qvol artık gerçekçi (BTC ~7B/gün) ama yine de
-    # CANLI tradeability kanıtı DEĞİL (SIREN 275M > ZEC 112M) → ayrım WF-robust + max_pf'ten gelir.
-    EDGE_SEED_REPORT=reports/edge_sweep_20260604_114447.json EDGE_SEED_MIN_TRADES=15 \
+    EDGE_SEED_REPORT=reports/edge_sweep_20260604_094139.json EDGE_SEED_MIN_TRADES=15 \
   TRADE_MARKET=futures AUTO_INTERVAL_CANDIDATES=1h,4h,1d \
   ./run_rtc.sh --release
 
@@ -172,5 +168,8 @@
 
 → NET KÂRLI (holdout PF≥1.0, işlem≥10): 14 · WF-ONAYLI (çoklu-pencere tutarlı): 5
   Seed yalnız WF-ONAYLI satırları alır (fluke eler). Başlatırken: EDGE_SEED_REPORT=reports/edge_sweep_20260603_193532.json
+  
+  
+  
 
 

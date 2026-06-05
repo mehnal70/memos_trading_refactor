@@ -60,6 +60,11 @@ pub struct EdgeScanConfig {
     /// `wf_robust` için: pooled PF≥1.0 VE kâr-eden-pencere oranı ≥ bu VE pencere ≥ wf_min_windows.
     pub wf_min_consistency: f64,
     pub wf_min_windows: usize,
+    /// `wf_robust` ANLAMLILIK kapısı: pencere-tutarlılığının binom p-değeri (Binom(windows,0.5) null'una
+    /// karşı) bunu AŞMAMALI. consistency≥0.5 tek başına bir YAZI-TURA eşiğidir (5-20 pencerede meşru edge
+    /// ile gürültü ayrışmaz; ölçüm: WF-robust adayların ~hiçbiri p<0.05 değil); bu kapı örneklem-büyüklüğünü
+    /// hesaba katarak küçük-örneklem fluke'unu KÖKTEN eler. EDGE_WF_MAX_PVALUE ile gevşet (devre dışı: 1.0).
+    pub wf_max_pvalue: f64,
 }
 
 impl Default for EdgeScanConfig {
@@ -85,8 +90,9 @@ impl Default for EdgeScanConfig {
             wf_is: 300,
             wf_oos: 100,
             wf_step: 100,
-            wf_min_consistency: 0.5,  // pencerelerin en az yarısı kârlı olmalı
+            wf_min_consistency: 0.5,  // pencerelerin en az yarısı kârlı olmalı (zayıf taban; asıl kapı p-value)
             wf_min_windows: 3,        // en az 3 işlemli pencere (tek-pencere fluke'u eler)
+            wf_max_pvalue: 0.10,      // pencere-tutarlılığı yazı-turadan anlamlı ayrışmalı (p≤0.10)
         }
     }
 }
@@ -284,7 +290,9 @@ pub fn scan_one_series(cfg: &EdgeScanConfig, series: &CandleSeriesRef, candles: 
         let cc = crate::robot::backtester::wf_cross_check(&win_cfg, candles, &windows);
         b.wf_robust = cc.pooled_pf >= 1.0
             && cc.windows >= cfg.wf_min_windows
-            && cc.consistency() >= cfg.wf_min_consistency;
+            && cc.consistency() >= cfg.wf_min_consistency
+            // ANLAMLILIK: pencere-tutarlılığı yazı-turadan istatistiksel ayrışmalı (küçük-örneklem fluke eler).
+            && cc.window_significance() <= cfg.wf_max_pvalue;
         b.wf = cc;
     }
     best
@@ -399,11 +407,19 @@ pub struct SeedRobustness {
     /// majörlere daralır. Default 0.0 = KAPALI (eski rapor + sıfır regresyon); EDGE_SEED_MIN_QVOL
     /// (USDT/gün) + TAZE rapor (avg_daily_quote_volume'lı) ile aktive. [[feedback_market_agnostic]].
     pub min_daily_quote_volume: f64,
+    /// ANLAMLILIK kapısı — ESKİ RAPOR RETROFİTİ (opt-in). Asıl otorite scan-anı `wf_robust`'tur
+    /// (EdgeScanConfig.wf_max_pvalue, default 0.10) → TAZE tarama zaten dürüst. Bu alan, henüz yeniden
+    /// taranmamış (eski wf_robust'ı yazı-tura eşiğiyle hesaplanmış) raporları, JSON'a serialize EDİLEN
+    /// `wf.windows/profitable_windows`'tan p-değeri hesaplayıp seed-anında geriye-dönük kapılar.
+    /// Default 1.0 = KAPALI (sıfır regresyon; taze raporda wf_robust zaten yeterli); eski raporu
+    /// yeniden taramadan dürüst seed'lemek için EDGE_SEED_WF_MAX_PVALUE=0.10 ver. [[project_edge_scan]].
+    pub wf_max_pvalue: f64,
 }
 
 impl Default for SeedRobustness {
     fn default() -> Self {
-        Self { min_trades: 30, min_pf: 1.2, max_pf: 10.0, require_wf_robust: true, min_daily_quote_volume: 0.0 }
+        Self { min_trades: 30, min_pf: 1.2, max_pf: 10.0, require_wf_robust: true,
+               min_daily_quote_volume: 0.0, wf_max_pvalue: 1.0 }
     }
 }
 
@@ -437,6 +453,9 @@ pub fn passes_seed_bar(row: &EdgeRow, r: &SeedRobustness) -> bool {
         && (!r.require_wf_robust || row.wf_robust)
         // MAJÖR kapısı: illikit-alt seri (canlı feed'de purge edilen) seed'lenmesin. >0 ise aktif.
         && (r.min_daily_quote_volume <= 0.0 || row.avg_daily_quote_volume >= r.min_daily_quote_volume)
+        // ANLAMLILIK kapısı: pencere-tutarlılığı yazı-turadan istatistiksel ayrışmalı (küçük-örneklem
+        // fluke eler). Serialize wf'ten hesaplanır → ESKİ raporlara da uygular. <1.0 ise aktif.
+        && (r.wf_max_pvalue >= 1.0 || row.wf.window_significance() <= r.wf_max_pvalue)
 }
 
 pub fn seed_symbol_multi_plan(report: &EdgeScanReport, r: SeedRobustness, max_tracks: usize)
@@ -755,6 +774,37 @@ mod tests {
         assert_eq!(seed.len(), 1, "yalnız majör (AVAX) seed'lenir");
         assert!(seed.contains_key("AVAXUSDT") && !seed.contains_key("MYXUSDT"),
             "illikit-alt (MYX) majör tabanının altında → elenir (canlı purge gürültüsü kesilir)");
+    }
+
+    #[test]
+    fn seed_wf_pvalue_gate_retrofits_old_reports() {
+        // Eski-rapor retrofiti: aynı wf_robust=true iki satır; biri istatistiksel anlamlı
+        // (15/20 pencere, p≈0.02), diğeri yazı-tura (11/20, p≈0.41). Default kapı KAPALI (1.0)
+        // → ikisi de geçer (sıfır regresyon). EDGE_SEED_WF_MAX_PVALUE=0.10 retrofiti → yalnız anlamlı kalır.
+        let mk = |sym: &str, w: usize, pw: usize| EdgeRow {
+            exchange: "b".into(), market: "futures".into(), symbol: sym.into(), interval: "1d".into(),
+            rows: 5000, gap_pct: 0.0, stale_days: 0.0, best_strategy: "BB".into(),
+            take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
+            trades: 40, win_rate: 0.55, profit_factor: 1.5, expectancy: 0.0, sharpe: 0.0,
+            avg_daily_quote_volume: 1e9, profitable: true,
+            wf: WfCrossCheck { windows: w, profitable_windows: pw, pooled_pf: 1.4, trades: 80 },
+            wf_robust: true,
+        };
+        let report = EdgeScanReport {
+            generated_at: "t".into(), db_path: "d".into(), market_filter: None,
+            series_candidates: 2, series_scanned: 2, series_skipped: 0, profitable_count: 2,
+            summary: vec![],
+            rows: vec![mk("SIGUSDT", 20, 15), mk("NOISEUSDT", 20, 11)],
+        };
+        // Default (wf_max_pvalue=1.0 KAPALI) → ikisi de seed'lenir (mevcut davranış korunur).
+        let seed_off = seed_symbol_plan(&report, SeedRobustness::default());
+        assert_eq!(seed_off.len(), 2, "kapı kapalıyken (default) ikisi de geçer — sıfır regresyon");
+        // Retrofit AÇIK (0.10) → yazı-tura (p≈0.41) elenir, anlamlı (p≈0.02) kalır.
+        let strict = SeedRobustness { wf_max_pvalue: 0.10, ..SeedRobustness::default() };
+        let seed_on = seed_symbol_plan(&report, strict);
+        assert_eq!(seed_on.len(), 1, "anlamlılık retrofiti yazı-tura satırı eler");
+        assert!(seed_on.contains_key("SIGUSDT") && !seed_on.contains_key("NOISEUSDT"),
+            "yalnız istatistiksel anlamlı (15/20, p≈0.02) seed'lenir; 11/20 (p≈0.41) küçük-örneklem fluke elenir");
     }
 
     #[test]

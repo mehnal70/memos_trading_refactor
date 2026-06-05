@@ -330,6 +330,27 @@ impl WfCrossCheck {
     pub fn consistency(&self) -> f64 {
         if self.windows == 0 { 0.0 } else { self.profitable_windows as f64 / self.windows as f64 }
     }
+
+    /// Tek-yanlı binom anlamlılığı: `P(X ≥ profitable_windows)` için `X ~ Binom(windows, 0.5)`.
+    /// NULL hipotez = "edge yok → her pencere yazı-tura kârlı" (fee yüzünden gerçek null aslında
+    /// <0.5 → bu test MUHAFAZAKÂR). Küçük p → pencere-tutarlılığı şanstan ayrışıyor; büyük p →
+    /// "tutarlılık 0.55-0.60" bir yazı-tura artefaktı (az pencerede ZORUNLU güçsüz). `consistency()`
+    /// nokta-oranı ölçer ama ÖRNEKLEM BÜYÜKLÜĞÜNÜ yok sayar (5/5 ile 50/50 ayırt edilmez); bu metod
+    /// ikisini birleştirir → küçük-örneklem fluke kapısının tek-kaynağı. windows=0 → 1.0 (kanıt yok).
+    /// İteratif pmf (overflow'suz, C(n,k) şişmesi yok): pmf(0)=0.5ⁿ, pmf(i+1)=pmf(i)·(n−i)/(i+1).
+    /// Saf → testli.
+    pub fn window_significance(&self) -> f64 {
+        let n = self.windows;
+        if n == 0 { return 1.0; }
+        let k = self.profitable_windows.min(n);
+        let mut pmf = 0.5_f64.powi(n as i32); // pmf(0) = C(n,0)·0.5ⁿ
+        let mut cdf_below = 0.0_f64;           // P(X ≤ k−1)
+        for i in 0..k {
+            cdf_below += pmf;
+            pmf *= (n - i) as f64 / (i + 1) as f64;
+        }
+        (1.0 - cdf_below).clamp(0.0, 1.0)
+    }
 }
 
 /// Bir cfg'i OOS pencerelerinde TEK TEK koşar → pooled PF + kâr-eden pencere oranı (tutarlılık).
@@ -1034,6 +1055,23 @@ mod tests {
         let synth = WfCrossCheck { windows: 4, profitable_windows: 3, pooled_pf: 1.2, trades: 40 };
         assert!((synth.consistency() - 0.75).abs() < 1e-9);
         assert_eq!(WfCrossCheck::default().consistency(), 0.0, "işlemsiz → 0");
+    }
+
+    #[test]
+    fn window_significance_binomial_sf_known_values() {
+        let sig = |w: usize, p: usize| WfCrossCheck { windows: w, profitable_windows: p, pooled_pf: 1.0, trades: 1 }.window_significance();
+        // P(X≥k | Binom(n,0.5)) elle: 5/5 → 1/32; 6/5 → 7/64; 10/5 → 638/1024; 20/11 ≈ 0.412.
+        assert!((sig(5, 5) - 1.0/32.0).abs() < 1e-12, "5/5 pencere → 0.03125");
+        assert!((sig(6, 5) - 7.0/64.0).abs() < 1e-12, "6/5 → 0.109375");
+        assert!((sig(10, 5) - 638.0/1024.0).abs() < 1e-12, "10/5 → 0.623 (yazı-tura civarı)");
+        assert!((sig(20, 11) - 0.4119).abs() < 1e-3, "20/11 → ~0.412: 'tutarlılık 0.55' anlamsız");
+        // Sınır: pencere yok → 1.0 (kanıt yok); k=0 → 1.0 (P(X≥0)=1); k=n monoton azalır.
+        assert_eq!(sig(0, 0), 1.0, "windows=0 → 1.0");
+        assert_eq!(sig(8, 0), 1.0, "k=0 → P(X≥0)=1");
+        assert!(sig(20, 15) < sig(20, 11), "daha çok kârlı pencere → daha küçük p (daha anlamlı)");
+        // KÜÇÜK-ÖRNEKLEM özü: aynı %60 tutarlılık, büyük örneklemde anlamlı, küçükte değil.
+        assert!(sig(100, 60) < 0.05, "60/100 (=%60) güçlü → p<0.05 (≈0.028)");
+        assert!(sig(5, 3) > 0.10, "3/5 (=%60) güçsüz → p=0.50 (örneklem küçük → ayrışmaz)");
     }
 
     #[test]

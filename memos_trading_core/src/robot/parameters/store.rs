@@ -241,6 +241,9 @@ impl ParameterStore {
                 // seed'lenmez (canlı feed'de purge edilen MYX/SIREN tipi). Default 0.0=kapalı;
                 // EDGE_SEED_MIN_QVOL (USDT/gün) + taze rapor (avg_daily_quote_volume'lı) ile aktive.
                 min_daily_quote_volume: parse_env_f64("EDGE_SEED_MIN_QVOL").unwrap_or(d.min_daily_quote_volume),
+                // ANLAMLILIK kapısı: WF pencere-tutarlılığının binom p-değeri ≤ bu (yazı-tura fluke eler).
+                // Serialize wf'ten hesaplanır → eski raporlara da uygular. 1.0 ile devre dışı. Default 0.10.
+                wf_max_pvalue: parse_env_f64("EDGE_SEED_WF_MAX_PVALUE").unwrap_or(d.wf_max_pvalue),
             };
             // Fix A: seed (TF, strateji) ÇİFTİni taşır → strateji DOĞRU TF'de koşar (BB'yi 1m'de
             // değil 1d'de). symbol_interval + symbol_strategy birlikte yüklenir. [[project_edge_scan]].

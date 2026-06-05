@@ -51,6 +51,11 @@ fn main() {
     let out_path = std::env::var("EDGE_SCAN_OUT").unwrap_or_else(|_| {
         format!("reports/edge_scan_{}.json", chrono::Utc::now().format("%Y%m%d_%H%M%S"))
     });
+    // wf_robust ANLAMLILIK kapısı: pencere-tutarlılığının binom p-değeri ≤ bu. Default = EdgeScanConfig 0.10.
+    let wf_max_pvalue: f64 = std::env::var("EDGE_WF_MAX_PVALUE").ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|v: &f64| (0.0..=1.0).contains(v))
+        .unwrap_or_else(|| EdgeScanConfig::default().wf_max_pvalue);
 
     let cfg = EdgeScanConfig {
         db_path: db_path.clone(),
@@ -60,6 +65,7 @@ fn main() {
         candle_limit: limit,
         max_series,
         edge_min,
+        wf_max_pvalue,
         ..Default::default()
     };
 
