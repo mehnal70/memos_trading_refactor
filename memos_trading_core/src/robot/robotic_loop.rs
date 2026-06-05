@@ -32,6 +32,16 @@ pub struct AdaptiveThresholds {
 // =============================================================================
 
 /// 🏦 FİNANS BAKANLIĞI: Cüzdan, Bakiyeler ve Açık Pozisyonlar
+/// 🪜 Kademeli giriş per-pozisyon durumu: kaç kademe dolduruldu + tam hedef sermaye (ek kademeler
+/// `target_capital × weight[k]` ile boyutlanır). FinanceVault.graded_tranches map'inde tutulur.
+#[derive(Debug, Clone, Copy)]
+pub struct GradedPosState {
+    /// Şimdiye dek doldurulmuş kademe sayısı (açılış = 1).
+    pub tranches_filled: u8,
+    /// Pozisyonun tam hedef sermayesi (açılışta kademe ağırlıklarından bağımsız hesaplanan toplam).
+    pub target_capital: f64,
+}
+
 pub struct FinanceVault {
     pub equity: f64,
     pub starting_capital: f64,
@@ -57,6 +67,11 @@ pub struct FinanceVault {
     /// 🔌 XS portföy-düzeyi devre kesici cooldown'u: tetiklenince bu ana kadar kitap flat tutulur
     /// (process_xs_book yazar+okur). None → cooldown yok. Monotonik Instant; persist edilmez.
     pub xs_circuit_breaker_until: Arc<RwLock<Option<std::time::Instant>>>,
+    /// 🪜 Kademeli giriş durumu (sembol→kademe sayacı + hedef sermaye). open_paper_position açılışta
+    /// yazar, try_add_graded_tranche ek-kademe için okur+günceller, close_paper_position temizler.
+    /// Sembol-anahtarlı (tek-pozisyon/sembol invariantı). Ephemeral: restart'ta kaybolur → kurtarılan
+    /// pozisyon legacy/tam sayılır (ek kademe almaz). opt-in v1 için kabul edilebilir.
+    pub graded_tranches: Arc<RwLock<HashMap<String, GradedPosState>>>,
     /// 🔢 Uçuşta (in-flight) açılış rezervasyonu — eş-zamanlı pozisyon limiti
     /// (max_concurrent_longs/shorts) için. execute_trade_cycle sembolleri PARALEL
     /// (tokio::spawn) açtığından yalnız `live_positions` saymak race'li: 6 task aynı
@@ -270,6 +285,7 @@ impl AppState {
             closed_trades_total: Arc::new(AtomicUsize::new(0)),
             last_close_at: Arc::new(RwLock::new(HashMap::new())),
             xs_circuit_breaker_until: Arc::new(RwLock::new(None)),
+            graded_tranches: Arc::new(RwLock::new(HashMap::new())),
             pending_open_long:  Arc::new(std::sync::atomic::AtomicU32::new(0)),
             pending_open_short: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };

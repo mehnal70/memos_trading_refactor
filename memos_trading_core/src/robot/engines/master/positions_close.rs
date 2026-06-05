@@ -299,6 +299,11 @@ impl Engine {
             if let Ok(mut lc) = st.finance.last_close_at.write() {
                 lc.insert(symbol.to_string(), std::time::Instant::now());
             }
+            // 🪜 Kademeli giriş durumunu temizle: pozisyon kapandı → kademe sayacı/hedef sıfırlanır
+            // (sonraki açılış taze 1. kademeden başlar). Kayıt yoksa no-op.
+            if let Ok(mut gm) = st.finance.graded_tranches.write() {
+                gm.remove(symbol);
+            }
 
             let pnl_pct_val = if pos.entry_price > 0.0 && pos.qty > 0.0 {
                 (pnl_val / (pos.entry_price * pos.qty)) * 100.0

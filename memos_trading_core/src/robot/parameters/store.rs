@@ -99,6 +99,10 @@ pub struct ParameterStore {
     /// Default disabled → sıfır regresyon. `from_env` XS_LIVE_* ile doldurur.
     #[serde(default)]
     pub xs_live: XsLiveParams,
+    /// KADEMELİ GİRİŞ parametreleri (XS hariç): pozisyonu N kademede, rejime göre (trend→pyramiding /
+    /// ranging→averaging) HTF-teyitli kurar. Default disabled → sıfır regresyon. `from_env` GRADED_* ile.
+    #[serde(default)]
+    pub graded_entry: GradedEntryParams,
 }
 
 /// Strateji niyetiyle hizalı default trail target'lar (yüzde, entry'den uzaklık).
@@ -152,6 +156,7 @@ impl Default for ParameterStore {
             symbol_strategy: HashMap::new(),
             symbol_tracks: HashMap::new(),
             xs_live: XsLiveParams::default(),
+            graded_entry: GradedEntryParams::default(),
         }
     }
 }
@@ -333,6 +338,25 @@ impl ParameterStore {
             log::info!("📐 kesitsel adanmış mod AÇIK: {} sembol · lookback={} · top_k={} · band={} · {}",
                 store.xs_live.symbols.len(), store.xs_live.lookback, store.xs_live.top_k,
                 store.xs_live.exit_buffer, if store.xs_live.momentum { "momentum" } else { "reversal" });
+        }
+
+        // KADEMELİ GİRİŞ (opt-in, XS hariç): GRADED_ENTRY_ENABLED=1 + ağırlıklar ile aktive.
+        let gd = GradedEntryParams::default();
+        store.graded_entry = GradedEntryParams {
+            enabled: parse_env_bool("GRADED_ENTRY_ENABLED").unwrap_or(gd.enabled),
+            tranche_weights: std::env::var("GRADED_TRANCHE_WEIGHTS").ok()
+                .map(|s| s.split(',').filter_map(|x| x.trim().parse::<f64>().ok()).filter(|w| *w > 0.0).collect::<Vec<f64>>())
+                .filter(|v: &Vec<f64>| !v.is_empty())
+                .unwrap_or(gd.tranche_weights),
+            favorable_move_pct: parse_env_f64("GRADED_FAVORABLE_MOVE_PCT").unwrap_or(gd.favorable_move_pct),
+            adverse_move_pct: parse_env_f64("GRADED_ADVERSE_MOVE_PCT").unwrap_or(gd.adverse_move_pct),
+            require_htf_align: parse_env_bool("GRADED_REQUIRE_HTF").unwrap_or(gd.require_htf_align),
+        };
+        if store.graded_entry.enabled {
+            log::info!("🪜 kademeli giriş AÇIK: {} kademe (ağırlık={:?}) · pyramiding≥%{} · averaging≥%{} · HTF-hiza={}",
+                store.graded_entry.tranche_count(), store.graded_entry.tranche_weights,
+                store.graded_entry.favorable_move_pct, store.graded_entry.adverse_move_pct,
+                store.graded_entry.require_htf_align);
         }
         store
     }

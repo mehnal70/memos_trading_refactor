@@ -228,6 +228,49 @@ impl Default for XsLiveParams {
     }
 }
 
+/// KADEMELİ GİRİŞ parametreleri (XS HARİÇ — kesitsel mod kendi eşit-ağırlık/tek-fill sizing'ini
+/// kullanır; kademeli giriş XS'in turnover-düşmanı edge'ini bozar). Pozisyonu tek seferde değil N
+/// kademede kurar; ek kademeler REJİME GÖRE açılır: trend rejimde PYRAMIDING (lehte hareket → kazananı
+/// besle), ranging rejimde AVERAGING (aleyhte hareket → ortalama maliyet). Teyit: HTF trend hizası +
+/// yeterli hareket. Default DISABLED (opt-in, sıfır regresyon). [[feedback_autonomy_first]]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GradedEntryParams {
+    /// Master kapı. False → her pozisyon tek seferde tam boyutta açılır (mevcut davranış).
+    pub enabled: bool,
+    /// Kademe ağırlıkları (hedef sermayenin oranları). İlk = açılış kademesi; toplam ≈ 1.0 olmalı.
+    /// N = len. Örn. [0.4, 0.3, 0.3] → 3 kademe. Boş/tek-eleman → fiilen tek-fill (kademe yok).
+    pub tranche_weights: Vec<f64>,
+    /// PYRAMIDING (trend rejim) eşiği: pozisyon LEHTE bu yüzde kadar hareket edince ek kademe.
+    pub favorable_move_pct: f64,
+    /// AVERAGING (ranging rejim) eşiği: pozisyon ALEYHTE bu yüzde kadar hareket edince ek kademe.
+    pub adverse_move_pct: f64,
+    /// Ek kademe için HTF trend hizası şart mı (multi_tf gerekir; kapalıysa yalnız hareket eşiği).
+    pub require_htf_align: bool,
+}
+
+impl Default for GradedEntryParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tranche_weights: vec![0.4, 0.3, 0.3], // 3 kademe (40/30/30)
+            favorable_move_pct: 1.0,
+            adverse_move_pct: 1.0,
+            require_htf_align: true,
+        }
+    }
+}
+
+impl GradedEntryParams {
+    /// Kademe sayısı (geçerli ağırlık sayısı). <2 → fiilen kademeli giriş yok (tek-fill).
+    pub fn tranche_count(&self) -> usize {
+        self.tranche_weights.len()
+    }
+    /// k. kademenin ağırlığı (yoksa 0.0). 0-indeksli.
+    pub fn weight_at(&self, k: usize) -> f64 {
+        self.tranche_weights.get(k).copied().unwrap_or(0.0)
+    }
+}
+
 /// Multi-TF (Faz B) parametreleri. Engine cycle StrategyEval öncesi
 /// `load_htf_candles` çağrısını ve run_download_job HTF fetch'ini kontrol eder.
 /// `enabled=false` → davranış legacy single-TF ile aynı (htf_slice=None,

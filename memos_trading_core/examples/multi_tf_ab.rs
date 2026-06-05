@@ -38,6 +38,7 @@ fn main() {
         require_wf_robust: !matches!(
             std::env::var("EDGE_SEED_REQUIRE_WF").ok().as_deref(), Some("0")|Some("false")|Some("off")),
         min_daily_quote_volume: env_f64("EDGE_SEED_MIN_QVOL").unwrap_or(d.min_daily_quote_volume),
+        wf_max_pvalue: env_f64("EDGE_WF_MAX_PVALUE").unwrap_or(d.wf_max_pvalue),
     };
     let max_tracks = env_usize("EDGE_SEED_MAX_TRACKS",
         memos_trading_core::robot::backtester::SEED_MAX_TRACKS_DEFAULT);

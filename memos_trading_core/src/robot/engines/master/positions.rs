@@ -340,6 +340,8 @@ impl Engine {
         struct OpenPlan {
             new_pos: PositionModel,
             alloc_capital: f64,
+            /// Kademeli giriş tam hedef sermayesi (Some → açılış 1. kademe; ek kademeler bundan boyutlanır).
+            graded_target: Option<f64>,
             qty_val: f64,
             kelly_fraction: f64,
             risk_appetite: f64,
@@ -386,10 +388,22 @@ impl Engine {
             let base_alloc = st.finance.equity * st.tuning.base_alloc_fraction * risk_appetite;
             // EŞİT-AĞIRLIK (kesitsel mod): xs_sizing=Some → her bacak equity·alloc_frac (Kelly atlanır,
             // market-nötr kitabın 1/k dengesi korunur). None → Kelly dinamik ölçek (mevcut davranış).
-            let alloc_capital = match xs_sizing {
+            let full_alloc = match xs_sizing {
                 Some(s) => (st.finance.equity * s.alloc_frac).max(0.0),
                 None => kelly.calculate_dynamic_scale(base_alloc, loss_streak, ml_conf)
                     .max(base_alloc * st.tuning.alloc_floor_fraction),
+            };
+            // KADEMELİ GİRİŞ (XS hariç): açılış yalnız İLK kademe (full·weight[0]); kalan kademeler
+            // try_add_graded_tranche ile rejime-göre (pyramiding/averaging) eklenir. graded_target = tam
+            // hedef sermaye (ek kademe boyutu bundan türetilir). xs_sizing=Some (kesitsel) → uygulanmaz.
+            let graded = st.brain.parameters.read().ok().map(|p| p.graded_entry.clone());
+            let graded_target: Option<f64> = match (&xs_sizing, &graded) {
+                (None, Some(g)) if g.enabled && g.tranche_count() >= 2 => Some(full_alloc),
+                _ => None,
+            };
+            let alloc_capital = match (graded_target, &graded) {
+                (Some(target), Some(g)) => (target * g.weight_at(0)).max(0.0),
+                _ => full_alloc,
             };
             let qty_val = (alloc_capital / entry).max(0.0);
             if qty_val <= 0.0 { return; }
@@ -476,7 +490,7 @@ impl Engine {
                 kind,
             };
             Some(OpenPlan {
-                new_pos, alloc_capital, qty_val,
+                new_pos, alloc_capital, graded_target, qty_val,
                 kelly_fraction: kelly.kelly_fraction, risk_appetite, ml_conf,
                 tp_pct, sl_pct, strategy_name: strategy_name.to_string(),
                 live_executor: st.live_executor.clone(),
@@ -739,6 +753,15 @@ impl Engine {
         {
             if let Ok(mut positions) = st.finance.live_positions.write() {
                 positions.insert(symbol.to_string(), new_pos);
+            }
+        }
+        // 🪜 Kademeli giriş durumu: açılış = 1. kademe (sayaç=1); tam hedef sermaye saklanır → ek
+        // kademeler try_add_graded_tranche'de target·weight[k] ile boyutlanır. None → kademeli kapalı.
+        if let Some(target) = plan.graded_target {
+            if let Ok(mut m) = st.finance.graded_tranches.write() {
+                m.insert(symbol.to_string(), crate::robot::robotic_loop::GradedPosState {
+                    tranches_filled: 1, target_capital: target,
+                });
             }
         }
 

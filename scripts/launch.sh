@@ -24,6 +24,8 @@ KEYS=(
   XS_LIVE_ENABLED XS_LIVE_SYMBOLS XS_LIVE_INTERVAL XS_LIVE_LOOKBACK XS_LIVE_TOP_K
   XS_LIVE_BUFFER XS_LIVE_POSITION_PCT XS_LIVE_LEVERAGE XS_LIVE_REGIME_GATE XS_LIVE_MOMENTUM
   XS_LIVE_MAX_DD_PCT XS_LIVE_CB_COOLDOWN_SECS
+  GRADED_ENTRY_ENABLED GRADED_TRANCHE_WEIGHTS GRADED_FAVORABLE_MOVE_PCT
+  GRADED_ADVERSE_MOVE_PCT GRADED_REQUIRE_HTF
 )
 declare -A GROUP TYPE DESC VAL
 set_meta(){ GROUP[$1]=$2; TYPE[$1]=$3; DESC[$1]=$4; }
@@ -63,6 +65,12 @@ set_meta XS_LIVE_REGIME_GATE      "Kesitsel" "bool"                  "yüksek-vo
 set_meta XS_LIVE_MOMENTUM         "Kesitsel" "bool"                  "momentum (kapalı=reversal; doğrulanan: momentum)"
 set_meta XS_LIVE_MAX_DD_PCT       "Kesitsel" "text"                  "devre kesici: kitap DD%% eşiği (0=kapalı)"
 set_meta XS_LIVE_CB_COOLDOWN_SECS "Kesitsel" "text"                  "devre kesici sonrası flat kalma sn (default 3600)"
+# ── Kademeli giriş (XS HARİÇ — pozisyonu N kademede, rejime göre pyramiding/averaging) ───────
+set_meta GRADED_ENTRY_ENABLED     "Kademeli" "bool"                  "kademeli giriş (XS dışı pozisyonlar)"
+set_meta GRADED_TRANCHE_WEIGHTS   "Kademeli" "text"                  "kademe ağırlıkları csv (örn 0.4,0.3,0.3)"
+set_meta GRADED_FAVORABLE_MOVE_PCT "Kademeli" "text"                 "pyramiding eşiği: lehte hareket %% (trend rejim)"
+set_meta GRADED_ADVERSE_MOVE_PCT  "Kademeli" "text"                  "averaging eşiği: aleyhte hareket %% (ranging rejim)"
+set_meta GRADED_REQUIRE_HTF       "Kademeli" "bool"                  "ek kademe için HTF trend hizası şart"
 
 # ── Default'lar (doğrulanmış temiz futures profili) ─────────────────────────────────────────
 defaults(){
@@ -86,6 +94,10 @@ defaults(){
   VAL[XS_LIVE_POSITION_PCT]=0.10;     VAL[XS_LIVE_LEVERAGE]=1
   VAL[XS_LIVE_REGIME_GATE]=1;         VAL[XS_LIVE_MOMENTUM]=1
   VAL[XS_LIVE_MAX_DD_PCT]=0;          VAL[XS_LIVE_CB_COOLDOWN_SECS]=3600
+  # Kademeli giriş: ENABLED=0 → kapalı (tek-fill, mevcut davranış). Diğerleri doğrulanmış default'lar.
+  VAL[GRADED_ENTRY_ENABLED]=0;        VAL[GRADED_TRANCHE_WEIGHTS]="0.4,0.3,0.3"
+  VAL[GRADED_FAVORABLE_MOVE_PCT]=1.0; VAL[GRADED_ADVERSE_MOVE_PCT]=1.0
+  VAL[GRADED_REQUIRE_HTF]=1
 }
 latest_report(){ ls -t reports/edge_sweep_*.json 2>/dev/null | head -1; }
 

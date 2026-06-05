@@ -298,6 +298,16 @@ impl Engine {
                 return; // bu sembolde tur bitti, yeniden açılış aynı turda denenmesin
             }
 
+            // === 1.6) 🪜 KADEMELİ GİRİŞ: pozisyon hâlâ açıksa (exit tetiklenmedi) rejime-göre ek kademe
+            // dene (pyramiding/averaging, HTF-teyitli) ve TUR'U BİTİR — yeni-açılış mantığına geçme
+            // (tek-pozisyon/sembol invariantı; açık pozisyonda zaten yeni açılış bloklanır). Kademeli
+            // giriş kapalı / kademe dolu / eşik karşılanmadı → ek kademe açılmaz ama tur yine biter.
+            // Açık pozisyon YOKSA düş → normal açılış yolu. (trailing/SL/breakeven 1.5'te güncellendi.)
+            if symbol_has_open_position(state, symbol) {
+                Self::try_add_graded_tranche(state, symbol, &candles, db_path).await;
+                return;
+            }
+
             // === 1.6) 🧊 STALE-FEED KAPISI: feed pratikte ölmüşse YENİ açılış yapma ===
             // BTCUSDC örneği: mum günlerce eski + live_price donuk ($87.840,60 sabit) →
             // donuk fiyat üzerinden phantom giriş/çıkış, sahte SL/TP ve komisyon erozyonu.
