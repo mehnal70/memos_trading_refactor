@@ -52,6 +52,8 @@ fn main() {
     let fee_rate: f64 = std::env::var("XS_FEE_RATE").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0005);
     let wf_window: usize = std::env::var("XS_WF_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
     let rebalance_every: usize = std::env::var("XS_REBALANCE").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let exit_buffer: usize = std::env::var("XS_BUFFER").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let leverage: f64 = std::env::var("XS_LEVERAGE").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let long_short = std::env::var("XS_LONG_ONLY").map(|v| v != "1").unwrap_or(true);
     let family_alpha: f64 = std::env::var("XS_FAMILY_ALPHA").ok().and_then(|s| s.parse().ok()).unwrap_or(0.10);
     let lookbacks: Vec<usize> = std::env::var("XS_LOOKBACKS").ok()
@@ -60,7 +62,7 @@ fn main() {
 
     let base = XsConfig {
         db_path, market: market.clone(), interval: interval.clone(), symbols: symbols.clone(),
-        candle_limit: 5000, top_k, fee_rate, long_short, wf_window, rebalance_every,
+        candle_limit: 5000, top_k, fee_rate, long_short, wf_window, rebalance_every, exit_buffer, leverage,
         bars_per_year: bars_per_year(&interval), ..Default::default()
     };
 
@@ -82,8 +84,8 @@ fn main() {
 
     println!("📐 Kesitsel relatif-güç · market={market} · interval={interval} · sepet={} sembol",
         symbols.len());
-    println!("   top_k={top_k} · fee={:.4}/turnover · {} · rebalance={rebalance_every} bar · wf_window={wf_window} · aile={} config · Šidák p≤{:.4}",
-        fee_rate, if long_short { "LONG-SHORT (nötr)" } else { "LONG-ONLY" }, configs.len(), sidak);
+    println!("   top_k={top_k} · fee={:.4}/turnover · {} · rebalance={rebalance_every} · band={exit_buffer} · lev={leverage} · aile={} · Šidák p≤{:.4}",
+        fee_rate, if long_short { "LONG-SHORT" } else { "LONG-ONLY" }, configs.len(), sidak);
     println!();
     println!("   {:>4} {:>9} | {:>5} {:>8} {:>7} {:>6} | {:>7} {:>7} | {:>4}/{:<4} {:>7} | verdikt",
         "lb", "yön", "bar", "annRet%", "Sharpe", "win%", "t-stat", "t-p", "wfW", "wfN", "binom-p");

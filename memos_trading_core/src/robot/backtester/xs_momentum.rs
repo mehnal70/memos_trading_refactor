@@ -15,7 +15,7 @@
 //! (DB'siz testlenir) + `run_xs_momentum` (DB yükler+hizalar). Anlamlılık: hem klasik t-stat
 //! hem projenin tek-kaynak binom pencere kapısı (`WfCrossCheck::window_significance`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::persistence::reader::read_candles_market;
 use super::walk_forward::WfCrossCheck;
@@ -43,6 +43,14 @@ pub struct XsConfig {
     /// arada hedef SABİT tutulur (periyodik-rebalance yaklaşımı). 1 = her bar. Yavaş (14-30 gün) momentum
     /// sinyalini her gün dengelemek gereksiz churn → kadansı büyütmek turnover'ı ~N× kısar, net edge'i tavana yaklaştırır.
     pub rebalance_every: usize,
+    /// NO-TRADE BAND (rank-histerezisi): mevcut bir pozisyonu, sıralamadan `top_k + exit_buffer` dışına
+    /// DÜŞENE kadar TUT (marjinal daha-iyi aday için churn etme). 0 = band yok (saf top-k, eski davranış).
+    /// Kadanstan AKILLI: girişi zamana değil sinyal-anlamlılığına bağlar → turnover'ı net'i bozmadan kısar.
+    pub exit_buffer: usize,
+    /// Kaldıraç (gross-exposure çarpanı). Market-nötr L/S'te getiriyi VE turnover-maliyetini eşit ölçekler
+    /// → t-stat/Sharpe DEĞİŞMEZ (anlamlılık kaldıraçla üretilemez); yalnız bileşik büyümeyi ölçekler +
+    /// volatilite-sürüklenmesi ekler (L² ile). Risk-hedefleme knob'u, edge knob'u DEĞİL. Default 1.0.
+    pub leverage: f64,
     /// Anlamlılık penceresi (bar): return serisini bu uzunlukta ARDIŞIK parçalara böler → WfCrossCheck.
     pub wf_window: usize,
     /// Yıllık bar sayısı (Sharpe/yıllık-getiri annualize). 1d → 365, 1h → 8760.
@@ -63,6 +71,8 @@ impl Default for XsConfig {
             momentum: true,
             long_short: true,
             rebalance_every: 1, // her bar (geri-uyumlu); yavaş sinyalde XS_REBALANCE>1 ile churn kıs
+            exit_buffer: 0,     // band yok (saf top-k); >0 ile rank-histerezisi turnover'ı kısar
+            leverage: 1.0,      // risk-hedefleme; Sharpe/t-invariant
             wf_window: 30,    // ~aylık pencere (1d) → tutarlılık binom kapısı
             bars_per_year: 365.0,
         }
@@ -134,6 +144,8 @@ fn xs_returns(closes: &[Vec<Option<f64>>], cfg: &XsConfig) -> (Vec<f64>, Vec<f64
 
     let rb = cfg.rebalance_every.max(1);
     let mut prev_w = vec![0.0_f64; n_sym]; // mevcut hedef (turnover referansı)
+    let mut prev_long: HashSet<usize> = HashSet::new();  // mevcut long kitabı (histerezis için)
+    let mut prev_short: HashSet<usize> = HashSet::new();
     let mut step = 0usize;                 // POZİSYON kurulduktan sonra ilerleyen kadans saati
     let mut rets: Vec<f64> = Vec::new();
     let mut turnovers: Vec<f64> = Vec::new();
@@ -141,18 +153,24 @@ fn xs_returns(closes: &[Vec<Option<f64>>], cfg: &XsConfig) -> (Vec<f64>, Vec<f64
     for t in cfg.lookback..(n_bars - 1) {
         // Kadans: yalnız her rb bar'da hedefi yeniden hesapla; arada SABİT tut (periyodik-rebalance).
         let is_rebalance = step.is_multiple_of(rb);
-        let w = if is_rebalance {
-            target_weights(closes, t, cfg).unwrap_or_else(|| prev_w.clone()) // hesaplanamazsa tut
-        } else {
-            prev_w.clone()
-        };
+        let mut w = prev_w.clone();
+        let mut changed = false;
+        if is_rebalance {
+            // No-trade band: MEVCUT kitabı (prev_long/short) histerezisle koruyarak yeni hedef.
+            if let Some((tw, longs, shorts)) = compute_weights(closes, t, cfg, &prev_long, &prev_short) {
+                w = tw;
+                prev_long = longs;
+                prev_short = shorts;
+                changed = true;
+            }
+        }
         // Henüz pozisyon yok (warmup: yeterli sembol yok) → kaydetme, kadans saatini başlatma.
         if w.iter().all(|x| *x == 0.0) {
             continue;
         }
         step += 1;
 
-        // gerçekleşen sonraki-bar getirisi + turnover maliyeti (yalnız rebalance bar'ında)
+        // gerçekleşen sonraki-bar getirisi + turnover maliyeti (yalnız ağırlık değiştiğinde)
         let mut port = 0.0_f64;
         for j in 0..n_sym {
             if w[j] != 0.0 {
@@ -163,7 +181,8 @@ fn xs_returns(closes: &[Vec<Option<f64>>], cfg: &XsConfig) -> (Vec<f64>, Vec<f64
                 }
             }
         }
-        let turnover: f64 = if is_rebalance {
+        // band çoğu rebalance'ta kitabı korur → w≈prev_w → turnover doğal olarak küçülür.
+        let turnover: f64 = if changed {
             (0..n_sym).map(|j| (w[j] - prev_w[j]).abs()).sum()
         } else {
             0.0
@@ -175,9 +194,13 @@ fn xs_returns(closes: &[Vec<Option<f64>>], cfg: &XsConfig) -> (Vec<f64>, Vec<f64
     (rets, turnovers)
 }
 
-/// SAF: t anındaki kesitsel hedef ağırlık vektörü (long Σ=+1, short Σ=−1). Yeterli sembol yoksa None.
-/// sinyal_j = close[t]/close[t−lookback]−1; sırala → momentum: top-k long/bottom-k short, reversal: ters.
-fn target_weights(closes: &[Vec<Option<f64>>], t: usize, cfg: &XsConfig) -> Option<Vec<f64>> {
+/// SAF: t anındaki kesitsel hedef ağırlık + (long_set, short_set). Yeterli sembol yoksa None.
+/// sinyal_j = close[t]/close[t−lookback]−1; reversal'da sinyal ters çevrilir → "long edilecek uç" hep baş.
+/// `select_books` rank-histerezisiyle mevcut kitabı korur (no-trade band). long Σ=+1, short Σ=−1.
+fn compute_weights(
+    closes: &[Vec<Option<f64>>], t: usize, cfg: &XsConfig,
+    prev_long: &HashSet<usize>, prev_short: &HashSet<usize>,
+) -> Option<(Vec<f64>, HashSet<usize>, HashSet<usize>)> {
     let n_sym = closes[t].len();
     let mut sig: Vec<(usize, f64)> = Vec::with_capacity(n_sym);
     for (j, (now, past)) in closes[t].iter().zip(&closes[t - cfg.lookback]).enumerate() {
@@ -192,36 +215,81 @@ fn target_weights(closes: &[Vec<Option<f64>>], t: usize, cfg: &XsConfig) -> Opti
         return None;
     }
     sig.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let k = cfg.top_k;
-    type Rank<'a> = &'a [(usize, f64)];
-    let (longs, shorts): (Rank, Rank) = if cfg.momentum {
-        (&sig[..k], &sig[sig.len() - k..])
-    } else {
-        (&sig[sig.len() - k..], &sig[..k])
-    };
+    if !cfg.momentum {
+        sig.reverse(); // reversal: zayıf uç başa gelsin → "long edilecek" hep baş (histerezis simetrik)
+    }
+    let (longs, shorts) = select_books(&sig, cfg.top_k, cfg.exit_buffer, prev_long, prev_short);
+    if longs.is_empty() {
+        return None;
+    }
     let mut w = vec![0.0_f64; n_sym];
-    let lw = 1.0 / k as f64;
-    for &(j, _) in longs {
+    let lw = 1.0 / longs.len() as f64;
+    for &j in &longs {
         w[j] += lw; // long bacak Σ=+1
     }
-    if cfg.long_short {
-        for &(j, _) in shorts {
-            w[j] -= lw; // short bacak Σ=−1
+    if cfg.long_short && !shorts.is_empty() {
+        let sw = 1.0 / shorts.len() as f64;
+        for &j in &shorts {
+            w[j] -= sw; // short bacak Σ=−1
         }
     }
-    Some(w)
+    Some((w, longs.into_iter().collect(), shorts.into_iter().collect()))
 }
 
-/// Net-getiri serisinden tüm metrikleri doldurur (saf, ayrı → testlenir).
+/// RANK-HİSTEREZİSİ (no-trade band): tam-k long/short kitabı seçer ama MEVCUT üyeleri `k+buffer`
+/// dışına düşene dek TUTAR (marjinal daha-iyi aday için churn YOK). buffer=0 → saf top-k/bottom-k
+/// (eski davranış birebir). `sig` GÜÇ-AZALAN sıralı (baş=long edilecek uç). Saf → testli.
+fn select_books(
+    sig: &[(usize, f64)], k: usize, buffer: usize,
+    prev_long: &HashSet<usize>, prev_short: &HashSet<usize>,
+) -> (Vec<usize>, Vec<usize>) {
+    let n = sig.len();
+    let k = k.min(n / 2);
+    if k == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let rank: HashMap<usize, usize> = sig.iter().enumerate().map(|(r, (i, _))| (*i, r)).collect();
+
+    // LONG = baş (düşük rank). Önce k+buffer içinde kalan mevcut long'ları TUT, sonra en güçlülerden doldur.
+    let mut longs: Vec<usize> = prev_long.iter().copied()
+        .filter(|i| rank.get(i).is_some_and(|r| *r < k + buffer))
+        .collect();
+    longs.sort_by_key(|i| rank[i]);
+    longs.truncate(k);
+    for &(idx, _) in sig.iter() {
+        if longs.len() >= k { break; }
+        if !longs.contains(&idx) { longs.push(idx); }
+    }
+
+    // SHORT = kuyruk (yüksek rank). Önce n−(k+buffer)..n içinde kalan mevcut short'ları TUT (long'lar hariç),
+    // sonra en zayıflardan (yüksek rank) doldur.
+    let short_keep = n.saturating_sub(k + buffer);
+    let mut shorts: Vec<usize> = prev_short.iter().copied()
+        .filter(|i| rank.get(i).is_some_and(|r| *r >= short_keep) && !longs.contains(i))
+        .collect();
+    shorts.sort_by_key(|i| std::cmp::Reverse(rank[i]));
+    shorts.truncate(k);
+    for &(idx, _) in sig.iter().rev() {
+        if shorts.len() >= k { break; }
+        if !longs.contains(&idx) && !shorts.contains(&idx) { shorts.push(idx); }
+    }
+    (longs, shorts)
+}
+
+/// Net-getiri serisinden tüm metrikleri doldurur (saf, ayrı → testlenir). Kaldıraç (L) bar-getiriyi
+/// L× ölçekler: mean/std/annRet L× → t_stat & Sharpe DEĞİŞMEZ (anlamlılık L-invariant). total_return
+/// bileşik (1+L·r) → L'de NONLİNEER: volatilite-sürüklenmesi (L² ile) burada yakalanır. win_rate L-invariant.
 fn finalize_metrics(res: &mut XsResult, rets: &[f64], turnovers: &[f64], cfg: &XsConfig) {
     let n = rets.len();
     res.bars = n;
     if n == 0 {
         return;
     }
-    let mean = rets.iter().sum::<f64>() / n as f64;
+    let lev = cfg.leverage;
+    let mean = lev * rets.iter().sum::<f64>() / n as f64;
     let var = if n > 1 {
-        rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0)
+        let m0 = rets.iter().sum::<f64>() / n as f64;
+        lev * lev * rets.iter().map(|r| (r - m0).powi(2)).sum::<f64>() / (n as f64 - 1.0)
     } else {
         0.0
     };
@@ -229,7 +297,8 @@ fn finalize_metrics(res: &mut XsResult, rets: &[f64], turnovers: &[f64], cfg: &X
     res.mean_ret = mean;
     res.std_ret = std;
     res.win_rate = rets.iter().filter(|r| **r > 0.0).count() as f64 / n as f64;
-    res.total_return = rets.iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
+    // Bileşik: kaldıraçlı bar-getiri L·r → vol-sürüklenmesi (L>1'de büyüme ann.Ret'ten sapar).
+    res.total_return = rets.iter().fold(1.0, |acc, r| acc * (1.0 + lev * r)) - 1.0;
     res.ann_return = mean * cfg.bars_per_year;
     res.ann_sharpe = if std > 0.0 { mean / std * cfg.bars_per_year.sqrt() } else { 0.0 };
     res.t_stat = if std > 0.0 { mean / (std / (n as f64).sqrt()) } else { 0.0 };
@@ -457,6 +526,67 @@ mod tests {
         assert_eq!(wf.profitable_windows, 3, "üç pencerenin toplamı da pozitif");
         assert!(wf.pooled_pf > 1.0, "net kârlı seri → PF>1");
         assert!((wf.window_significance() - 0.125).abs() < 1e-9, "3/3 → 0.5³ = 0.125");
+    }
+
+    // NO-TRADE BAND: histerezis mevcut pozisyonu marjinal daha-iyi aday için churn ETMEZ.
+    #[test]
+    fn select_books_buffer_retains_incumbent() {
+        // sig güç-azalan: idx 10,11,12,13 → rank 0,1,2,3. k=2.
+        let sig = vec![(10usize, 0.4), (11, 0.3), (12, 0.2), (13, 0.1)];
+        let held_long: HashSet<usize> = [12].into_iter().collect(); // rank 2 = top-k DIŞINDA
+        let empty = HashSet::new();
+        // buffer=0 → saf top-2: incumbent 12 churn'lenir, kitap {10,11}.
+        let (l0, _) = select_books(&sig, 2, 0, &held_long, &empty);
+        assert!(l0.contains(&10) && l0.contains(&11) && !l0.contains(&12),
+            "band yok (buffer=0) → eski top-k davranışı: incumbent churn'lenir");
+        // buffer=1 → 12 (rank2<3) TUTULUR; kalan slot en güçlü (10) ile dolar → {12,10}, 11 ALINMAZ.
+        let (l1, _) = select_books(&sig, 2, 1, &held_long, &empty);
+        assert!(l1.contains(&12) && l1.contains(&10) && !l1.contains(&11),
+            "band: incumbent (rank2) tutulur, marjinal daha-iyi (11) için churn YOK");
+    }
+
+    // Band turnover'ı kısar: dalgalanan sıralamada buffer>0, buffer=0'dan az turnover öder ama kazancı korur.
+    #[test]
+    fn buffer_cuts_turnover_on_noisy_ranking() {
+        // 3 sembol, sıralama bar-bar gürültülü oynar → buffer churn'ü emer.
+        let mut closes = Vec::new();
+        let mut a = 100.0; let mut b = 100.0; let mut c = 100.0;
+        for i in 0..40 {
+            closes.push(vec![Some(a), Some(b), Some(c)]);
+            // A genel yukarı trend + gürültü; B,C zayıf → sıralama uçlarda gürültüyle takas olur
+            a *= 1.02; b *= if i % 2 == 0 { 1.005 } else { 0.995 }; c *= 0.99;
+        }
+        let base = XsConfig {
+            symbols: vec!["A".into(), "B".into(), "C".into()],
+            top_k: 1, lookback: 2, fee_rate: 0.001, wf_window: 5, ..Default::default()
+        };
+        let no_band = evaluate_xs(&closes, &XsConfig { exit_buffer: 0, ..base.clone() });
+        let band = evaluate_xs(&closes, &XsConfig { exit_buffer: 1, ..base.clone() });
+        assert!(band.avg_turnover <= no_band.avg_turnover,
+            "band turnover'ı azaltır ({} ≤ {})", band.avg_turnover, no_band.avg_turnover);
+    }
+
+    // KALDIRAÇ: getiriyi/büyümeyi ölçekler ama t-stat'ı (anlamlılığı) DEĞİŞTİRMEZ.
+    #[test]
+    fn leverage_scales_growth_not_tstat() {
+        // VOLATİL trend (std>0 → t-stat sonlu): A yukarı-eğilimli ama bar-bar dalgalı, C tersi.
+        let mut a = 100.0; let mut c = 100.0; let mut closes = Vec::new();
+        for i in 0..40 {
+            closes.push(vec![Some(a), Some(100.0), Some(c)]);
+            let up = if i % 2 == 0 { 1.05 } else { 1.01 }; // ort. yukarı, dalgalı → varyans gerçek
+            a *= up; c *= 2.0 - up;
+        }
+        let base = XsConfig {
+            symbols: vec!["A".into(), "B".into(), "C".into()],
+            top_k: 1, lookback: 2, fee_rate: 0.0, wf_window: 5, ..Default::default()
+        };
+        let r1 = evaluate_xs(&closes, &base);
+        let r3 = evaluate_xs(&closes, &XsConfig { leverage: 3.0, ..base.clone() });
+        assert!(r1.std_ret > 0.0, "test verisi volatil (std>0) olmalı");
+        let rel = (r1.t_stat - r3.t_stat).abs() / r1.t_stat.abs().max(1.0);
+        assert!(rel < 1e-9, "kaldıraç t-stat'ı DEĞİŞTİRMEZ (anlamlılık L-invariant): {} vs {}", r1.t_stat, r3.t_stat);
+        assert!((r3.mean_ret - 3.0 * r1.mean_ret).abs() < 1e-9, "ortalama getiri tam L× ölçeklenir");
+        assert!(r3.total_return > r1.total_return, "bileşik büyüme L ile artar (pozitif edge'de)");
     }
 
     // WF: kalıcı momentum trendinde IS momentum'u seçer, OOS POZİTİF döner (look-ahead'siz).
