@@ -164,6 +164,10 @@ pub struct FleetCommand {
     
     // [DÜZELTME]: live_sr_zones'un içindeki veri tipi anayasal SrZone olarak tescillendi 🎯
     pub live_sr_zones: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, Vec<SrZone>>>>,
+    /// 📈 Sembol → ~24h önceki referans fiyat (Market Gözetimi "24h %" sütunu için). spawn_sr_updater
+    /// kilit-dışı candle okumasından hesaplar+yazar; bridge displayed live_price ile % değişimi türetir
+    /// (kilit altında DB yok). 0/eksik → değişim hesaplanamaz (—/0.0).
+    pub live_ref_price_24h: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, f64>>>,
     pub symbol_orchestrator: std::sync::Arc<std::sync::RwLock<SymbolOrchestrator>>,
     /// Ana otonom döngünün en son nabız anı (UNIX epoch saniye). Heartbeat task'ı bu alanı
     /// okuyarak `main_loop` adımının gerçekten ilerleyip ilerlemediğini denetler.
@@ -387,6 +391,7 @@ impl AppState {
             triggers: Self::init_default_triggers(),
             live_price: Arc::new(RwLock::new(HashMap::new())),
             live_sr_zones: Arc::new(RwLock::new(HashMap::new())),
+            live_ref_price_24h: Arc::new(RwLock::new(HashMap::new())),
             symbol_orchestrator: Arc::new(RwLock::new(symbol_orchestrator)),
             // Başlangıç değeri 0 → heartbeat'i hemen DataStall uyarısı vermesin diye
             // sonradan ana döngünün ilk turunda doldurulur.

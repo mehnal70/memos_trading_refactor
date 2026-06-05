@@ -98,6 +98,9 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
 
     // 4. FİLO VE PAZAR ALGISI (Worker Status + S/R Zones)
     let live_price_map = st.fleet.live_price.read().ok().map(|g| g.clone()).unwrap_or_default();
+    // 24h % değişim paydası: spawn_sr_updater'ın kilit-dışı hesapladığı ~24h önceki referans fiyat.
+    let ref_price_24h_map = st.fleet.live_ref_price_24h.read().ok().map(|g| g.clone()).unwrap_or_default();
+    let market_label = st.config.market.clone();
     let fleet: Vec<WorkerModel> = st.fleet.symbol_orchestrator.read().ok().map(|orch| {
         orch.get_worker_status().into_iter().map(|w| {
             let price = live_price_map.get(&w.symbol).copied().unwrap_or(0.0);
@@ -137,10 +140,17 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
                 strength:    z.strength,
                 touch_count: z.touch_count,
             }).collect();
+            // 24h % değişim: (güncel − ~24h önceki referans)/referans·100. Referans yoksa (SR updater
+            // henüz koşmadı / candle yetersiz) ya da fiyat 0 → 0.0 (gösterimde nötr).
+            let change_24h = match ref_price_24h_map.get(sym).copied() {
+                Some(r) if r > 0.0 && current_price > 0.0 => (current_price - r) / r * 100.0,
+                _ => 0.0,
+            };
             MarketAnalysisModel {
                 symbol: sym.clone(),
+                market: market_label.clone(),
                 current_price,
-                change_24h: 0.0,
+                change_24h,
                 zones: zones_converted,
                 nearest_support,
                 nearest_resistance,

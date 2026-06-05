@@ -225,9 +225,16 @@ impl Engine {
                 // 2) Her sembol için candles oku, SR detect — IO/CPU lock dışında yapılır.
                 let mut zones_map: std::collections::HashMap<String, Vec<crate::robot::sr_detector::SrZone>>
                     = Default::default();
+                // Market Gözetimi "24h %" sütunu için ~24h önceki referans fiyat (SR'dan bağımsız;
+                // candles varsa hesaplanır). bridge displayed live_price ile % değişimi türetir.
+                let mut ref_map: std::collections::HashMap<String, f64> = Default::default();
                 let mut total_zones = 0usize;
                 for sym in &symbols {
                     if let Ok(candles) = crate::persistence::reader::read_candles_market(&db_path, sym, &interval, &market, 200) {
+                        let r = reference_price_24h_ago(&candles);
+                        if r > 0.0 {
+                            ref_map.insert(sym.clone(), r);
+                        }
                         // Detect lookback=5 default; en az ~11 candle gerekir, güvenli alt sınır 20.
                         if candles.len() >= 20 {
                             let zones = detector.detect(&candles);
@@ -239,10 +246,13 @@ impl Engine {
                     }
                 }
 
-                // 3) Yaz — kısa scope'lu write lock.
+                // 3) Yaz — kısa scope'lu write lock (zones + 24h referans).
                 if let Ok(st) = state.lock() {
                     if let Ok(mut guard) = st.fleet.live_sr_zones.write() {
                         *guard = zones_map;
+                    }
+                    if let Ok(mut rg) = st.fleet.live_ref_price_24h.write() {
+                        *rg = ref_map;
                     }
                 }
 
@@ -259,4 +269,48 @@ impl Engine {
         });
     }
 
+}
+
+/// SAF: candles → son mum timestamp'inden ~24h önceki referans close fiyatı (Market Gözetimi
+/// "24h %" sütununun paydası). Tam 24h öncesine eşit/önceki en yeni mumu seçer; pencere 24h'i
+/// kapsamıyorsa (örn. 1m·200=3.3h) en eski mevcut muma düşer (kısmi pencere). Boş → 0. Testli.
+pub(crate) fn reference_price_24h_ago(candles: &[Candle]) -> f64 {
+    let last = match candles.last() {
+        Some(c) => c,
+        None => return 0.0,
+    };
+    let cutoff = last.timestamp - chrono::Duration::hours(24);
+    candles.iter().rev()
+        .find(|c| c.timestamp <= cutoff)
+        .map(|c| c.close)
+        .unwrap_or_else(|| candles[0].close)
+}
+
+#[cfg(test)]
+mod fleet_tuners_tests {
+    use super::*;
+
+    fn candle(ts_offset_h: i64, close: f64) -> Candle {
+        Candle {
+            timestamp: chrono::Utc::now() - chrono::Duration::hours(ts_offset_h.max(0)),
+            close,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reference_24h_picks_bar_at_or_before_cutoff() {
+        // Son mum şimdi (0h), 24h önce close=100, 12h önce close=110, şimdi close=120.
+        // 24h sınırına eşit/önceki en yeni mum = 24h'lik (100).
+        let candles = vec![candle(48, 90.0), candle(24, 100.0), candle(12, 110.0), candle(0, 120.0)];
+        assert!((reference_price_24h_ago(&candles) - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reference_24h_partial_window_falls_back_to_oldest() {
+        // Pencere yalnız 3h (1m benzeri kısa) → 24h öncesi yok → en eski mum referans.
+        let candles = vec![candle(3, 200.0), candle(2, 205.0), candle(1, 210.0), candle(0, 215.0)];
+        assert!((reference_price_24h_ago(&candles) - 200.0).abs() < 1e-9);
+        assert_eq!(reference_price_24h_ago(&[]), 0.0, "boş → 0");
+    }
 }

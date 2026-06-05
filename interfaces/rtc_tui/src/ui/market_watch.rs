@@ -26,8 +26,18 @@ pub fn draw(f: &mut ratatui::Frame, area: Rect, snap: &MissionControl, selected_
     let rows: Vec<Row> = snap.market_fleet.iter().enumerate().map(|(i, m)| {
         let color = if m.change_24h >= 0.0 { Color::LightGreen } else { Color::LightRed };
         let marker = if i == selected_index { "▶" } else { " " };
+        // Piyasa: futures/perp/coinm → Vadeli (sarı, kaldıraç riski), boş → "—", diğer → Spot (gri).
+        let ml = m.market.to_lowercase();
+        let (mkt_label, mkt_color) = if ml.contains("fut") || ml.contains("perp") || ml.contains("coinm") {
+            ("Vadeli", Color::Yellow)
+        } else if ml.is_empty() {
+            ("—", Color::DarkGray)
+        } else {
+            ("Spot", Color::Gray)
+        };
         let row = Row::new(vec![
             Cell::from(format!("{} {}", marker, m.symbol)).style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from(mkt_label).style(Style::default().fg(mkt_color)),
             Cell::from(format!("{:.4}", m.current_price)),
             Cell::from(format!("{:+.2}%", m.change_24h)).style(Style::default().fg(color)),
             Cell::from(m.nearest_support.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into())),
@@ -37,11 +47,11 @@ pub fn draw(f: &mut ratatui::Frame, area: Rect, snap: &MissionControl, selected_
     }).collect();
 
     let table = Table::new(rows, [
-        Constraint::Percentage(25), Constraint::Percentage(20),
-        Constraint::Percentage(15), Constraint::Percentage(20),
-        Constraint::Percentage(20),
+        Constraint::Percentage(22), Constraint::Percentage(12),
+        Constraint::Percentage(18), Constraint::Percentage(14),
+        Constraint::Percentage(17), Constraint::Percentage(17),
     ])
-    .header(Row::new(vec!["Sembol", "Fiyat", "24h %", "Destek", "Direnç"]).style(Style::default().fg(Color::Yellow)))
+    .header(Row::new(vec!["Sembol", "Piyasa", "Fiyat", "24h %", "Destek", "Direnç"]).style(Style::default().fg(Color::Yellow)))
     .block(Block::default()
         .title(" 🌐 Market Gözetimi  [↑/↓ sembol seç] ")
         .borders(Borders::ALL));

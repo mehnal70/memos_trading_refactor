@@ -403,6 +403,10 @@ pub struct AiBrainSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketAnalysisModel {
     pub symbol: String,
+    /// İşlem piyasası (spot/futures/…) — Market Gözetimi "Piyasa" sütunu. Motor tek market koşar
+    /// (config.market) → tüm market_fleet sembolleri bunu paylaşır. Boş (eski snapshot) → "—".
+    #[serde(default)]
+    pub market: String,
     pub current_price: f64,
     pub change_24h: f64,
     pub zones: Vec<SrZoneModel>,
