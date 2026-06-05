@@ -41,6 +41,12 @@ pub struct LivePathConfig {
     pub commission_rate: f64,
     pub min_hold_bars: usize,      // reverse-signal kapanışı için min tutma (bar)
     pub window: usize,             // strateji lookback (canlı: 200)
+    /// SR-farkında giriş filtresi (A/B ölçümü için): Some(band%) → long fiyatın band%'i içinde güçlü
+    /// direnç altındaysa / short güçlü destek üstündeyse giriş REDDEDİLİR ("dirence alma, desteğe satma").
+    /// None → filtre kapalı (mevcut davranış, sıfır regresyon). [[project_sr_display_only]]
+    pub sr_filter_band_pct: Option<f64>,
+    /// SR filtresi: bu güç eşiğinin altındaki bölgeler yok sayılır (yalnız güçlü S/R engeller).
+    pub sr_min_strength: f64,
 }
 
 impl Default for LivePathConfig {
@@ -59,8 +65,37 @@ impl Default for LivePathConfig {
             commission_rate: 0.0004,
             min_hold_bars: 30,
             window: 200,
+            sr_filter_band_pct: None, // filtre kapalı (opt-in; A/B ile kanıtlanmadan default-off)
+            sr_min_strength: 0.0,
         }
     }
+}
+
+/// SAF: SR-farkında giriş uygun mu? Long → fiyatın `band_pct`'i (%) ÜSTünde `min_strength`'i aşan bir
+/// DİRENÇ bölgesi varsa REDDET (sınırlı yukarı alan / ret riski). Short → band içinde ALTında güçlü
+/// DESTEK varsa reddet. Engelleyici bölge yoksa true. price<=0 / band<=0 → true (koruma). Testli.
+pub fn sr_entry_ok(
+    zones: &[crate::robot::sr_detector::SrZone], is_long: bool, price: f64, band_pct: f64, min_strength: f64,
+) -> bool {
+    use crate::robot::sr_detector::ZoneType;
+    if price <= 0.0 || band_pct <= 0.0 {
+        return true;
+    }
+    let band = price * band_pct / 100.0;
+    for z in zones {
+        if z.strength < min_strength {
+            continue;
+        }
+        if is_long && matches!(z.zone_type, ZoneType::Resistance)
+            && z.midpoint > price && z.midpoint <= price + band {
+            return false; // hemen üstte güçlü direnç → long alma
+        }
+        if !is_long && matches!(z.zone_type, ZoneType::Support)
+            && z.midpoint < price && z.midpoint >= price - band {
+            return false; // hemen altta güçlü destek → short satma
+        }
+    }
+    true
 }
 
 #[derive(Debug, Clone, Default)]
@@ -167,7 +202,17 @@ pub fn run(candles_1m: &[Candle], cfg: &LivePathConfig) -> LivePathResult {
             let sig = gen_signal(cfg, window, &symbol);
             if matches!(sig, Signal::Buy | Signal::Sell) {
                 let edge = Engine::compute_edge_score_with(window, &sig, 0.0, cfg.edge_reverse_penalty);
-                if edge >= threshold {
+                // SR-farkında giriş filtresi (opt-in): aday giriş güçlü S/R'a sıkışıyorsa reddet.
+                // Yalnız edge geçen adayda detect → ucuz (her barda değil). [[project_sr_display_only]]
+                let sr_ok = match cfg.sr_filter_band_pct {
+                    Some(band) => {
+                        let zones = crate::robot::sr_detector::SrDetector::new(
+                            crate::robot::sr_detector::SrDetectorConfig::default()).detect(window);
+                        sr_entry_ok(&zones, matches!(sig, Signal::Buy), price, band, cfg.sr_min_strength)
+                    }
+                    None => true,
+                };
+                if edge >= threshold && sr_ok {
                     let is_long = matches!(sig, Signal::Buy);
                     let entry = price;
                     let (stop_loss, take_profit) = if is_long {
@@ -248,5 +293,43 @@ fn finalize(
         profit_factor,
         sharpe,
         final_equity: equity,
+    }
+}
+
+#[cfg(test)]
+mod sr_filter_tests {
+    use super::*;
+    use crate::robot::sr_detector::{SrZone, ZoneType};
+
+    fn zone(zt: ZoneType, mid: f64, strength: f64) -> SrZone {
+        SrZone { price_low: mid * 0.999, price_high: mid * 1.001, midpoint: mid,
+                 zone_type: zt, strength, touch_count: 3, vol_weight: 1.0 }
+    }
+
+    #[test]
+    fn sr_blocks_long_under_resistance() {
+        // Fiyat 100, %1 band → 100..101 aralığında güçlü direnç (100.5) → long REDDEDİLİR.
+        let z = vec![zone(ZoneType::Resistance, 100.5, 5.0)];
+        assert!(!sr_entry_ok(&z, true, 100.0, 1.0, 1.0), "dirence sıkışan long reddedilmeli");
+        // Direnç band dışında (102 > 101) → long uygun.
+        let z2 = vec![zone(ZoneType::Resistance, 102.0, 5.0)];
+        assert!(sr_entry_ok(&z2, true, 100.0, 1.0, 1.0), "uzak direnç long'u engellemez");
+    }
+
+    #[test]
+    fn sr_blocks_short_above_support() {
+        // Fiyat 100, %1 band → 99..100 aralığında güçlü destek (99.5) → short REDDEDİLİR.
+        let z = vec![zone(ZoneType::Support, 99.5, 5.0)];
+        assert!(!sr_entry_ok(&z, false, 100.0, 1.0, 1.0), "desteğe sıkışan short reddedilmeli");
+    }
+
+    #[test]
+    fn sr_ignores_weak_zones_and_disabled() {
+        // Zayıf direnç (strength 0.5 < min 1.0) → engellemez.
+        let z = vec![zone(ZoneType::Resistance, 100.5, 0.5)];
+        assert!(sr_entry_ok(&z, true, 100.0, 1.0, 1.0), "zayıf bölge yok sayılır");
+        // band=0 → filtre kapalı → daima uygun.
+        let z2 = vec![zone(ZoneType::Resistance, 100.5, 5.0)];
+        assert!(sr_entry_ok(&z2, true, 100.0, 0.0, 1.0), "band 0 → filtre devre dışı");
     }
 }
