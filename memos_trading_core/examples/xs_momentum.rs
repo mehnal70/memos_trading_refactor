@@ -20,7 +20,7 @@
 //      XS_LOOKBACKS (csv, default 1,3,7,14,30), XS_WF_WINDOW (binom pencere bar, default 30),
 //      XS_LONG_ONLY=1 (long-short yerine long-only top), XS_FAMILY_ALPHA (Šidák aile α, default 0.10).
 
-use memos_trading_core::robot::backtester::{run_xs_momentum, XsConfig, XsResult};
+use memos_trading_core::robot::backtester::{run_xs_momentum, run_xs_walkforward, XsConfig, XsResult, XsWfConfig};
 
 fn csv(arg: Option<&String>) -> Vec<String> {
     match arg.map(|s| s.as_str()) {
@@ -73,6 +73,13 @@ fn main() {
     let n_fam = configs.len() as f64;
     let sidak = 1.0 - (1.0 - family_alpha).powf(1.0 / n_fam);
 
+    // WALK-FORWARD MODU (XS_WF=1): tüm-veride seçim YOK — her IS penceresinde aday ızgaradan en iyiyi
+    // seç, GÖRMEDİĞİ OOS'a uygula, OOS'ları birleştir → look-ahead'siz dürüst test.
+    if std::env::var("XS_WF").map(|v| v == "1").unwrap_or(false) {
+        run_wf_mode(&base, &configs, &interval);
+        return;
+    }
+
     println!("📐 Kesitsel relatif-güç · market={market} · interval={interval} · sepet={} sembol",
         symbols.len());
     println!("   top_k={top_k} · fee={:.4}/turnover · {} · rebalance={rebalance_every} bar · wf_window={wf_window} · aile={} config · Šidák p≤{:.4}",
@@ -114,5 +121,54 @@ fn main() {
                 r.wf.window_significance(), r.bars);
         }
         println!("  Bunlar tek portföy-serisinde yüzlerce rebalance üzerinde ölçüldü → küçük-örneklem fluke DEĞİL.");
+    }
+}
+
+/// Walk-forward OOS: aday ızgaradan IS'te seç, kör OOS'a uygula, birleştirilmiş OOS'ta anlamlılık.
+fn run_wf_mode(base: &XsConfig, candidates: &[(usize, bool)], interval: &str) {
+    // IS/OOS pencere uzunlukları (bar). 1d için ~2 yıl IS / ~yarım yıl OOS makul.
+    let is_bars: usize = std::env::var("XS_WF_IS").ok().and_then(|s| s.parse().ok())
+        .unwrap_or(if interval == "1d" { 730 } else { 2000 });
+    let oos_bars: usize = std::env::var("XS_WF_OOS").ok().and_then(|s| s.parse().ok())
+        .unwrap_or(if interval == "1d" { 180 } else { 500 });
+
+    let wf = XsWfConfig { is_bars, oos_bars, candidates: candidates.to_vec() };
+    let r = run_xs_walkforward(base, &wf);
+
+    println!("🔁 WALK-FORWARD OOS · IS={is_bars} bar / OOS={oos_bars} bar (örtüşmesiz) · aday={} config",
+        candidates.len());
+    println!("   Her pencerede IS-Sharpe en iyisi seçilir → GÖRMEDİĞİ OOS'a uygulanır → OOS'lar birleşir.");
+    println!();
+    if r.windows == 0 {
+        println!("⚠️  Yeterli veri yok (IS+OOS toplamı seriden uzun). XS_WF_IS / XS_WF_OOS küçült.");
+        return;
+    }
+    // Pencere bazında seçim + IS→OOS tutarlılık (overfit teşhisi: IS iyi ama OOS kötü mü?).
+    println!("   {:>4} | {:>10} | {:>9} | {:>10}", "pen", "seçim", "IS-Sharpe", "OOS-ort%");
+    println!("   {}", "-".repeat(44));
+    for (i, ((lb, mom), (is_sh, oos_m))) in r.selections.iter().zip(&r.is_oos_pairs).enumerate() {
+        println!("   {:>4} | {:>3} {:<6} | {:>9.2} | {:>10.3}",
+            i + 1, lb, if *mom { "mom" } else { "rev" }, is_sh, 100.0 * oos_m);
+    }
+    // Seçim kararlılığı: momentum ne sıklıkta seçildi?
+    let mom_share = r.selections.iter().filter(|(_, m)| *m).count() as f64 / r.windows as f64;
+
+    println!();
+    let o = &r.oos;
+    let tp = o.t_pvalue();
+    let bp = o.wf.window_significance();
+    println!("══════ BİRLEŞTİRİLMİŞ OOS (look-ahead'siz) ══════");
+    println!("   pencere={} · OOS bar={} · momentum-seçim oranı={:.0}%", r.windows, o.bars, 100.0 * mom_share);
+    println!("   annRet={:.1}% · Sharpe={:.2} · win%={:.0} · turnover_ort={:.2}",
+        100.0 * o.ann_return, o.ann_sharpe, 100.0 * o.win_rate, o.avg_turnover);
+    println!("   t-stat={:.2} (tek-yanlı p={:.4}) · binom {}/{}  (p={:.4})",
+        o.t_stat, tp, o.wf.profitable_windows, o.wf.windows, bp);
+    println!();
+    if o.t_stat > 0.0 && tp <= 0.05 {
+        println!("✅ OOS ANLAMLI: sinyal kör veride de tutuyor (t-p={:.4}≤0.05). Overfit DEĞİL — gerçek lead.", tp);
+    } else if o.t_stat > 0.0 {
+        println!("~ OOS POZİTİF ama p={:.4}>0.05: yön doğru, güç sınırda (sepet/OOS genişlet ya da kadans ayarla).", tp);
+    } else {
+        println!("✗ OOS NEGATİF/sıfır: IS-edge kör veride tutmadı → overfit/regime-bağımlı. Canlıya BAĞLAMA.");
     }
 }

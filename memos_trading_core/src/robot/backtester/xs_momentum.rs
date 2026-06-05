@@ -116,11 +116,20 @@ fn erfc(x: f64) -> f64 {
 ///  2) sırala → momentum: top-k long / bottom-k short; reversal: ters. Ağırlık long Σ=+1, short Σ=−1.
 ///  3) gerçekleşen getiri = Σ w_j·(close[t+1]/close[t]−1); maliyet = Σ|w−w_prev|·fee_rate.
 pub fn evaluate_xs(closes: &[Vec<Option<f64>>], cfg: &XsConfig) -> XsResult {
+    let n_sym = if closes.is_empty() { 0 } else { closes[0].len() };
+    let mut res = XsResult { symbols_used: n_sym, ..Default::default() };
+    let (rets, turnovers) = xs_returns(closes, cfg);
+    finalize_metrics(&mut res, &rets, &turnovers, cfg);
+    res
+}
+
+/// SAF: kesitsel portföyün bar-bar NET getiri + turnover serisini üretir (metriklerden ayrı →
+/// WF gibi çağrılar OOS dilimlerinin HAM getirisini birleştirebilir). evaluate_xs bunu sarar.
+fn xs_returns(closes: &[Vec<Option<f64>>], cfg: &XsConfig) -> (Vec<f64>, Vec<f64>) {
     let n_bars = closes.len();
     let n_sym = if n_bars > 0 { closes[0].len() } else { 0 };
-    let mut res = XsResult { symbols_used: n_sym, ..Default::default() };
     if n_bars <= cfg.lookback + 1 || n_sym < 2 || cfg.top_k == 0 {
-        return res;
+        return (Vec::new(), Vec::new());
     }
 
     let rb = cfg.rebalance_every.max(1);
@@ -163,9 +172,7 @@ pub fn evaluate_xs(closes: &[Vec<Option<f64>>], cfg: &XsConfig) -> XsResult {
         turnovers.push(turnover);
         prev_w = w;
     }
-
-    finalize_metrics(&mut res, &rets, &turnovers, cfg);
-    res
+    (rets, turnovers)
 }
 
 /// SAF: t anındaki kesitsel hedef ağırlık vektörü (long Σ=+1, short Σ=−1). Yeterli sembol yoksa None.
@@ -250,9 +257,9 @@ fn windowed_consistency(rets: &[f64], window: usize) -> WfCrossCheck {
     WfCrossCheck { windows, profitable_windows: profitable, pooled_pf, trades: rets.len() }
 }
 
-/// DB-YÜKLEYEN sürüm: sepet sembollerinin kapanışlarını okur, ORTAK timestamp ızgarasına hizalar
-/// (union grid, eksik = None → o bar o sembolü sıralamaya katmaz), sonra `evaluate_xs`. Market-saf.
-pub fn run_xs_momentum(cfg: &XsConfig) -> XsResult {
+/// DB'den sepet kapanışlarını ORTAK timestamp ızgarasına hizalar (union grid, eksik = None →
+/// o bar o sembolü sıralamaya katmaz). Market-saf. evaluate_xs/WF bunu paylaşır (DRY).
+pub fn align_closes(cfg: &XsConfig) -> Vec<Vec<Option<f64>>> {
     // sembol → (ts_ms → close)
     let mut per_sym: Vec<BTreeMap<i64, f64>> = Vec::with_capacity(cfg.symbols.len());
     let mut grid: BTreeMap<i64, ()> = BTreeMap::new();
@@ -268,13 +275,90 @@ pub fn run_xs_momentum(cfg: &XsConfig) -> XsResult {
         }
         per_sym.push(m);
     }
-    // union grid (sıralı ts) × sembol → Option<close>
     let stamps: Vec<i64> = grid.keys().copied().collect();
-    let closes: Vec<Vec<Option<f64>>> = stamps
+    stamps
         .iter()
         .map(|ts| per_sym.iter().map(|m| m.get(ts).copied()).collect())
-        .collect();
-    evaluate_xs(&closes, cfg)
+        .collect()
+}
+
+/// DB-YÜKLEYEN sürüm: kapanışları hizalar → `evaluate_xs`.
+pub fn run_xs_momentum(cfg: &XsConfig) -> XsResult {
+    evaluate_xs(&align_closes(cfg), cfg)
+}
+
+/// Rolling walk-forward kalibrasyonu: aday config kümesinden HER IS penceresinde en iyiyi (IS Sharpe)
+/// seç → SONRAKİ OOS penceresine kör uygula → OOS getirilerini birleştir. OOS = sinyalin GÖRMEDİĞİ
+/// veri → look-ahead'siz dürüst test. Sweep'in "tüm-veride en iyi config" optimizmini KESER.
+#[derive(Debug, Clone)]
+pub struct XsWfConfig {
+    pub is_bars: usize,                 // kalibrasyon penceresi uzunluğu (bar)
+    pub oos_bars: usize,                // kör-test penceresi (örtüşmesiz → OOS getiri çift-saymaz)
+    pub candidates: Vec<(usize, bool)>, // (lookback, momentum) aday ızgara — IS bunlardan seçer
+}
+
+/// WF sonucu. `oos` = BİRLEŞTİRİLMİŞ OOS serisinde metrik (dürüst t-stat + binom). `selections` =
+/// pencere başına seçilen config (kararlılık teşhisi). `is_oos_pairs` = (IS Sharpe, OOS ort. getiri).
+#[derive(Debug, Clone, Default)]
+pub struct XsWfResult {
+    pub oos: XsResult,
+    pub windows: usize,
+    pub selections: Vec<(usize, bool)>,
+    pub is_oos_pairs: Vec<(f64, f64)>,
+}
+
+/// SAF WF çekirdeği (hizalanmış matris üzerinde, DB'siz testlenir).
+pub fn evaluate_xs_walkforward(
+    closes: &[Vec<Option<f64>>],
+    base: &XsConfig,
+    wf: &XsWfConfig,
+) -> XsWfResult {
+    let n = closes.len();
+    let n_sym = if n > 0 { closes[0].len() } else { 0 };
+    let mut oos_rets: Vec<f64> = Vec::new();
+    let mut oos_turn: Vec<f64> = Vec::new();
+    let mut selections: Vec<(usize, bool)> = Vec::new();
+    let mut is_oos_pairs: Vec<(f64, f64)> = Vec::new();
+
+    let mut oos_start = wf.is_bars;
+    while oos_start + wf.oos_bars <= n && !wf.candidates.is_empty() {
+        let is_lo = oos_start.saturating_sub(wf.is_bars);
+        // 1) IS'te en iyi adayı seç (IS Sharpe; n sabitken t-stat ile aynı sıralama).
+        let mut best: Option<((usize, bool), f64)> = None;
+        for &(lb, mom) in &wf.candidates {
+            let cfg = XsConfig { lookback: lb, momentum: mom, ..base.clone() };
+            let is_res = evaluate_xs(&closes[is_lo..oos_start], &cfg);
+            if is_res.bars > 0 && best.is_none_or(|(_, s)| is_res.ann_sharpe > s) {
+                best = Some(((lb, mom), is_res.ann_sharpe));
+            }
+        }
+        let Some((sel, _)) = best else {
+            oos_start += wf.oos_bars;
+            continue;
+        };
+        // 2) seçileni OOS'a UYGULA (lookback lead-in dahil dilim, getiri yalnız OOS bölgesinde).
+        let lead = sel.0.min(oos_start);
+        let seg_hi = (oos_start + wf.oos_bars).min(n);
+        let cfg = XsConfig { lookback: sel.0, momentum: sel.1, ..base.clone() };
+        let (rets, turns) = xs_returns(&closes[oos_start - lead..seg_hi], &cfg);
+        let oos_mean = if rets.is_empty() { 0.0 } else { rets.iter().sum::<f64>() / rets.len() as f64 };
+        let is_sharpe = evaluate_xs(&closes[is_lo..oos_start],
+            &XsConfig { lookback: sel.0, momentum: sel.1, ..base.clone() }).ann_sharpe;
+        oos_rets.extend(rets);
+        oos_turn.extend(turns);
+        selections.push(sel);
+        is_oos_pairs.push((is_sharpe, oos_mean));
+        oos_start += wf.oos_bars;
+    }
+
+    let mut oos = XsResult { symbols_used: n_sym, ..Default::default() };
+    finalize_metrics(&mut oos, &oos_rets, &oos_turn, base);
+    XsWfResult { oos, windows: selections.len(), selections, is_oos_pairs }
+}
+
+/// DB-YÜKLEYEN WF sürümü: hizala → `evaluate_xs_walkforward`.
+pub fn run_xs_walkforward(base: &XsConfig, wf: &XsWfConfig) -> XsWfResult {
+    evaluate_xs_walkforward(&align_closes(base), base, wf)
 }
 
 #[cfg(test)]
@@ -373,6 +457,33 @@ mod tests {
         assert_eq!(wf.profitable_windows, 3, "üç pencerenin toplamı da pozitif");
         assert!(wf.pooled_pf > 1.0, "net kârlı seri → PF>1");
         assert!((wf.window_significance() - 0.125).abs() < 1e-9, "3/3 → 0.5³ = 0.125");
+    }
+
+    // WF: kalıcı momentum trendinde IS momentum'u seçer, OOS POZİTİF döner (look-ahead'siz).
+    #[test]
+    fn walkforward_selects_and_validates_persistent_momentum() {
+        // 120 bar: A↑, C↓ kalıcı → her IS penceresinde momentum kazanır, OOS'ta da kazanmalı.
+        let mut a = 100.0;
+        let mut c = 100.0;
+        let mut closes = Vec::new();
+        for _ in 0..120 {
+            closes.push(vec![Some(a), Some(100.0), Some(c)]);
+            a *= 1.03;
+            c *= 0.97;
+        }
+        let base = XsConfig {
+            symbols: vec!["A".into(), "B".into(), "C".into()],
+            top_k: 1, fee_rate: 0.0, long_short: true, wf_window: 10, ..Default::default()
+        };
+        let wf = XsWfConfig {
+            is_bars: 40, oos_bars: 20,
+            candidates: vec![(3, true), (3, false), (7, true), (7, false)], // mom + rev adayları
+        };
+        let r = evaluate_xs_walkforward(&closes, &base, &wf);
+        assert!(r.windows >= 2, "birden çok OOS penceresi üretilmeli");
+        assert!(r.oos.bars > 0 && r.oos.mean_ret > 0.0, "OOS getiri pozitif (trend kör-test'te sürer)");
+        assert!(r.selections.iter().all(|(_, mom)| *mom),
+            "kalıcı trendde her pencere MOMENTUM seçmeli (reversal değil)");
     }
 
     // Yetersiz veri / dejenere giriş → boş ama panik-yok sonuç.
