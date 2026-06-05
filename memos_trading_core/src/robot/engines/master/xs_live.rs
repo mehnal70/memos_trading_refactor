@@ -36,6 +36,16 @@ pub(crate) fn regime_blocks_xs(regime: crate::evolution::MarketRegime) -> bool {
     matches!(regime, crate::evolution::MarketRegime::HighVolatility)
 }
 
+/// SAF: açık XS bacaklarının toplam realize-olmamış PnL'i (USD) → equity yüzdesi. Portföy-düzeyi
+/// devre kesici bunu `−max_drawdown_pct` ile karşılaştırır (XS stopsuz → kitap-geneli felaket freni).
+/// equity<=0 → 0 (bölme koruması). Testli.
+pub(crate) fn xs_book_drawdown_pct(open_pnl_sum: f64, equity: f64) -> f64 {
+    if equity <= 0.0 {
+        return 0.0;
+    }
+    open_pnl_sum / equity * 100.0
+}
+
 /// SAF: son kapanıştan lookback-bar geriye momentum sinyali = close[t]/close[t−lb]−1. Yetersiz → None.
 pub(crate) fn latest_signal(closes: &[f64], lookback: usize) -> Option<f64> {
     let n = closes.len();
@@ -138,12 +148,20 @@ impl Engine {
             return;
         }
 
-        // 2) mevcut kitap: sepet sembollerinin açık pozisyon yönleri (symbol→is_long).
-        let current: HashMap<String, bool> = {
+        // 2) mevcut kitap + DEVRE KESİCİ girdileri (tek lock): açık XS pozisyon yönleri (symbol→is_long),
+        //    açık bacakların toplam realize-olmamış PnL'i (mark-to-market), equity ve cooldown durumu.
+        let (current, open_pnl_sum, equity, cb_until): (HashMap<String, bool>, f64, f64, Option<std::time::Instant>) = {
             let st = match state.lock() { Ok(s) => s, Err(_) => return };
-            st.finance.live_positions.read().ok()
-                .map(|p| xs.symbols.iter().filter_map(|s| p.get(s).map(|m| (s.clone(), m.is_long))).collect())
-                .unwrap_or_default()
+            let (cur, pnl) = st.finance.live_positions.read().ok()
+                .map(|p| {
+                    let cur: HashMap<String, bool> = xs.symbols.iter()
+                        .filter_map(|s| p.get(s).map(|m| (s.clone(), m.is_long))).collect();
+                    let pnl: f64 = xs.symbols.iter().filter_map(|s| p.get(s)).map(|m| m.calculate_pnl()).sum();
+                    (cur, pnl)
+                })
+                .unwrap_or_default();
+            let cb_until = st.finance.xs_circuit_breaker_until.read().ok().and_then(|c| *c);
+            (cur, pnl, st.finance.equity, cb_until)
         };
         let prev_long: HashSet<String> = current.iter().filter(|(_, l)| **l).map(|(s, _)| s.clone()).collect();
         let prev_short: HashSet<String> = current.iter().filter(|(_, l)| !**l).map(|(s, _)| s.clone()).collect();
@@ -151,6 +169,33 @@ impl Engine {
         // 3) hedef kitap (backtest çekirdeği ile DRY) + saf aksiyon planı.
         let (mut longs, mut shorts) = crate::robot::backtester::xs_target_book(
             &signals, xs.top_k, xs.exit_buffer, xs.momentum, &prev_long, &prev_short);
+
+        // PORTFÖY-DÜZEYİ DEVRE KESİCİ (per-bacak stop YERİNE — XS rank-rebalance ile yönetilir, bacak
+        // stopu market-nötr yapıyı bozar): açık kitabın toplam realize-olmamış zararı equity'nin
+        // max_drawdown_pct'ini aşarsa TÜM kitabı flat'a çek + cb_cooldown_secs boyunca yeniden kurma.
+        // 0 → kapalı (rejim-gate birincil koruma; bu hızlı/bağımsız felaket frenidir). [[project_xs_momentum]]
+        let cb_now = std::time::Instant::now();
+        let in_cb_cooldown = cb_until.map(|u| cb_now < u).unwrap_or(false);
+        let dd_pct = xs_book_drawdown_pct(open_pnl_sum, equity);
+        if xs.max_drawdown_pct > 0.0 && dd_pct <= -xs.max_drawdown_pct {
+            // TETİK: cooldown mührü (tek lock); kitap flat → plan açık XS'i kapatır, yeni açmaz.
+            if let Ok(st) = state.lock() {
+                if let Ok(mut cb) = st.finance.xs_circuit_breaker_until.write() {
+                    *cb = Some(cb_now + std::time::Duration::from_secs(xs.cb_cooldown_secs));
+                }
+            }
+            let msg = format!(
+                "🔌 kesitsel DEVRE KESİCİ: kitap DD %{:.2} ≤ −%{:.2} → FLAT + {}sn cooldown (felaket freni)",
+                dd_pct, xs.max_drawdown_pct, xs.cb_cooldown_secs);
+            push_state_log(state, msg.clone());
+            log::warn!("{}", msg);
+            longs.clear();
+            shorts.clear();
+        } else if in_cb_cooldown {
+            // Cooldown sürüyor → kitabı flat tut (felaket sonrası aceleci yeniden-giriş churn'ü önlenir).
+            longs.clear();
+            shorts.clear();
+        }
 
         // REJİM-GATE: market bellwether'ı (BTC, yoksa en derin sepet serisi) Volatile ise kitabı FLAT'a
         // çek (kriz/yüksek-vol'da kesitsel momentum bozulur). Hedef boşalınca plan mevcut XS'i kapatır,
@@ -218,6 +263,17 @@ mod xs_live_tests {
         for r in [StrongUptrend, WeakUptrend, Ranging, WeakDowntrend, StrongDowntrend, LowVolatility, Unknown] {
             assert!(!regime_blocks_xs(r), "{:?} → kitap normal işler", r);
         }
+    }
+
+    #[test]
+    fn book_drawdown_pct_basic() {
+        assert!((xs_book_drawdown_pct(-500.0, 10_000.0) - (-5.0)).abs() < 1e-9, "−$500/$10k = −%5");
+        assert!((xs_book_drawdown_pct(200.0, 10_000.0) - 2.0).abs() < 1e-9, "+$200/$10k = +%2");
+        assert_eq!(xs_book_drawdown_pct(-100.0, 0.0), 0.0, "equity 0 → bölme koruması");
+        // Devre kesici eşik mantığı: DD ≤ −threshold tetikler.
+        let dd = xs_book_drawdown_pct(-800.0, 10_000.0); // −%8
+        assert!(dd <= -5.0, "−%8, −%5 eşiğini tetiklemeli");
+        assert!(!(dd <= -10.0), "−%8, −%10 eşiğini tetiklememeli");
     }
 
     #[test]

@@ -54,6 +54,9 @@ pub struct FinanceVault {
     /// yazar, open_paper_position okur: REENTRY_COOLDOWN_SECS içinde yeniden açılış
     /// engellenir (churn/flip-flop koruması). Monotonik Instant; persist edilmez.
     pub last_close_at: Arc<RwLock<HashMap<String, std::time::Instant>>>,
+    /// 🔌 XS portföy-düzeyi devre kesici cooldown'u: tetiklenince bu ana kadar kitap flat tutulur
+    /// (process_xs_book yazar+okur). None → cooldown yok. Monotonik Instant; persist edilmez.
+    pub xs_circuit_breaker_until: Arc<RwLock<Option<std::time::Instant>>>,
     /// 🔢 Uçuşta (in-flight) açılış rezervasyonu — eş-zamanlı pozisyon limiti
     /// (max_concurrent_longs/shorts) için. execute_trade_cycle sembolleri PARALEL
     /// (tokio::spawn) açtığından yalnız `live_positions` saymak race'li: 6 task aynı
@@ -266,6 +269,7 @@ impl AppState {
             live_orders: Arc::new(RwLock::new(HashMap::new())),
             closed_trades_total: Arc::new(AtomicUsize::new(0)),
             last_close_at: Arc::new(RwLock::new(HashMap::new())),
+            xs_circuit_breaker_until: Arc::new(RwLock::new(None)),
             pending_open_long:  Arc::new(std::sync::atomic::AtomicU32::new(0)),
             pending_open_short: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };

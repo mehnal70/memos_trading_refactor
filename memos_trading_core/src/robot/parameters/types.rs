@@ -199,6 +199,14 @@ pub struct XsLiveParams {
     /// kesitsel momentum bozulur: korelasyonlar→1, nötr varsayım çöker). Tek-kaynak classify_regime
     /// (math→onnx pluggable, sabit eşik DEĞİL [[feedback_autonomy_first]]). Default true. Rejim sakinleşince yeniden kurulur.
     pub regime_gate: bool,
+    /// PORTFÖY-DÜZEYİ DEVRE KESİCİ: açık XS bacaklarının toplam realize-olmamış zararı equity'nin bu
+    /// yüzdesini aşarsa TÜM kitap flat'a çekilir (per-bacak stop YERİNE — bacak stopu market-nötr yapıyı
+    /// bozar). XS stopsuz olduğundan bu kitap-geneli felaket frenidir. 0.0 → kapalı (default; rejim-gate
+    /// zaten birincil koruma). Tetiklenince `cb_cooldown_secs` boyunca yeniden kurulmaz.
+    pub max_drawdown_pct: f64,
+    /// Devre kesici tetiklenince kitabı flat tutma süresi (sn). max_drawdown_pct=0 iken etkisiz.
+    /// Default 3600 (1 saat) — felaket sonrası aceleci yeniden-giriş churn'ünü önler.
+    pub cb_cooldown_secs: u64,
 }
 
 impl Default for XsLiveParams {
@@ -214,6 +222,8 @@ impl Default for XsLiveParams {
             position_pct: 0.10, // eşit-ağırlık: bacak başına equity'nin %10'u
             leverage: 1.0,      // kaldıraçsız (marjinal nötr edge'de mütevazı; XS_LIVE_LEVERAGE ile artır)
             regime_gate: true,  // Volatile rejimde kitabı flat'a çek (kriz koruması)
+            max_drawdown_pct: 0.0, // devre kesici KAPALI (opt-in; rejim-gate birincil koruma)
+            cb_cooldown_secs: 3600, // tetiklenirse 1 saat flat kal
         }
     }
 }

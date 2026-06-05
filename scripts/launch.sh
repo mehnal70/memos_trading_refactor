@@ -23,6 +23,7 @@ KEYS=(
   USE_LIMIT_ENTRY MAKER_COMMISSION_RATE LET_WINNERS_RUN STALE_FEED_MAX_AGE_SECS
   XS_LIVE_ENABLED XS_LIVE_SYMBOLS XS_LIVE_INTERVAL XS_LIVE_LOOKBACK XS_LIVE_TOP_K
   XS_LIVE_BUFFER XS_LIVE_POSITION_PCT XS_LIVE_LEVERAGE XS_LIVE_REGIME_GATE XS_LIVE_MOMENTUM
+  XS_LIVE_MAX_DD_PCT XS_LIVE_CB_COOLDOWN_SECS
 )
 declare -A GROUP TYPE DESC VAL
 set_meta(){ GROUP[$1]=$2; TYPE[$1]=$3; DESC[$1]=$4; }
@@ -60,6 +61,8 @@ set_meta XS_LIVE_POSITION_PCT     "Kesitsel" "text"                  "bacak baş
 set_meta XS_LIVE_LEVERAGE         "Kesitsel" "text"                  "sabit kaldıraç (anlamlılık L-invariant)"
 set_meta XS_LIVE_REGIME_GATE      "Kesitsel" "bool"                  "yüksek-vol'da kitabı flat çek (kriz koruması)"
 set_meta XS_LIVE_MOMENTUM         "Kesitsel" "bool"                  "momentum (kapalı=reversal; doğrulanan: momentum)"
+set_meta XS_LIVE_MAX_DD_PCT       "Kesitsel" "text"                  "devre kesici: kitap DD%% eşiği (0=kapalı)"
+set_meta XS_LIVE_CB_COOLDOWN_SECS "Kesitsel" "text"                  "devre kesici sonrası flat kalma sn (default 3600)"
 
 # ── Default'lar (doğrulanmış temiz futures profili) ─────────────────────────────────────────
 defaults(){
@@ -82,6 +85,7 @@ defaults(){
   VAL[XS_LIVE_TOP_K]=3;               VAL[XS_LIVE_BUFFER]=1
   VAL[XS_LIVE_POSITION_PCT]=0.10;     VAL[XS_LIVE_LEVERAGE]=1
   VAL[XS_LIVE_REGIME_GATE]=1;         VAL[XS_LIVE_MOMENTUM]=1
+  VAL[XS_LIVE_MAX_DD_PCT]=0;          VAL[XS_LIVE_CB_COOLDOWN_SECS]=3600
 }
 latest_report(){ ls -t reports/edge_sweep_*.json 2>/dev/null | head -1; }
 
