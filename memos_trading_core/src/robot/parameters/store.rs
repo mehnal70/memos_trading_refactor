@@ -94,6 +94,11 @@ pub struct ParameterStore {
     /// İlk iz `symbol_interval`/`symbol_strategy` ile tutarlıdır (anchor). [[project_edge_scan]].
     #[serde(default)]
     pub symbol_tracks: HashMap<String, Vec<(String, String)>>,
+    /// Kesitsel (cross-sectional) relatif-güç ADANMIŞ MOD parametreleri ([[project_xs_momentum]]).
+    /// enabled iken sepet sembolleri market-nötr long/short kitabıyla yönetilir (ScalpSwing/seed pas).
+    /// Default disabled → sıfır regresyon. `from_env` XS_LIVE_* ile doldurur.
+    #[serde(default)]
+    pub xs_live: XsLiveParams,
 }
 
 /// Strateji niyetiyle hizalı default trail target'lar (yüzde, entry'den uzaklık).
@@ -146,6 +151,7 @@ impl Default for ParameterStore {
             symbol_interval: HashMap::new(),
             symbol_strategy: HashMap::new(),
             symbol_tracks: HashMap::new(),
+            xs_live: XsLiveParams::default(),
         }
     }
 }
@@ -301,6 +307,27 @@ impl ParameterStore {
                         store.symbol_tracks.len(), tracks_total, max_tracks);
                 }
             }
+        }
+
+        // KESİTSEL ADANMIŞ MOD (opt-in): XS_LIVE_ENABLED=1 + XS_LIVE_SYMBOLS=BTC,ETH,... ile aktive.
+        // Algoritmik parametreler ParameterStore'da (tek yapı, env serpme yok) [[feedback_config_externalization]].
+        // Sepet sembolleri market-nötr long/short kitabıyla yönetilir; backtest çekirdeğiyle DRY skorlama.
+        let d = XsLiveParams::default();
+        store.xs_live = XsLiveParams {
+            enabled: parse_env_bool("XS_LIVE_ENABLED").unwrap_or(d.enabled),
+            symbols: std::env::var("XS_LIVE_SYMBOLS").ok()
+                .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                .unwrap_or(d.symbols),
+            interval: std::env::var("XS_LIVE_INTERVAL").ok().filter(|s| !s.trim().is_empty()).unwrap_or(d.interval),
+            lookback: std::env::var("XS_LIVE_LOOKBACK").ok().and_then(|v| v.parse().ok()).unwrap_or(d.lookback),
+            top_k: std::env::var("XS_LIVE_TOP_K").ok().and_then(|v| v.parse().ok()).unwrap_or(d.top_k),
+            exit_buffer: std::env::var("XS_LIVE_BUFFER").ok().and_then(|v| v.parse().ok()).unwrap_or(d.exit_buffer),
+            momentum: parse_env_bool("XS_LIVE_MOMENTUM").unwrap_or(d.momentum),
+        };
+        if store.xs_live.enabled {
+            log::info!("📐 kesitsel adanmış mod AÇIK: {} sembol · lookback={} · top_k={} · band={} · {}",
+                store.xs_live.symbols.len(), store.xs_live.lookback, store.xs_live.top_k,
+                store.xs_live.exit_buffer, if store.xs_live.momentum { "momentum" } else { "reversal" });
         }
         store
     }

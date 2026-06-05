@@ -165,6 +165,44 @@ impl Default for LeverageParams {
     }
 }
 
+/// Kesitsel (cross-sectional) relatif-güç ADANMIŞ MOD parametreleri ([[project_xs_momentum]]).
+/// `enabled=true` iken sepet sembolleri SADECE kesitsel kitapla (market-nötr long/short) yönetilir;
+/// ScalpSwing/seed yalnız sepet-DIŞI sembollerde çalışır → tek-pozisyon/sembol invariantı temiz kalır.
+/// Backtest+WF-OOS+Newey-West doğrulamasından gelen edge'in canlı ifadesi. Default DISABLED (opt-in).
+/// Skorlama backtest çekirdeğiyle BİT-AYNI (`xs_target_book` → `select_books`, DRY).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XsLiveParams {
+    /// Master kapı. False → kesitsel mod kapalı, hiçbir sembol XS-yönetimine girmez (sıfır regresyon).
+    pub enabled: bool,
+    /// Kesitsel sepet (majör semboller). En az 2*top_k gerekir. Boş → mod fiilen pasif.
+    /// Doğrulanmış: 15-majör ya da derin+likit-25 ([[project_xs_momentum]]).
+    pub symbols: Vec<String>,
+    /// Sinyal TF'i (bar). Doğrulanmış edge 1d → default "1d" (global config.interval'den bağımsız).
+    pub interval: String,
+    /// Momentum geriye-bakış (bar). WF-OOS'ta 14-30 en iyi; default 14.
+    pub lookback: usize,
+    /// Sepet kenarı (long k / short k). Doğrulanmış 3-5; default 3.
+    pub top_k: usize,
+    /// No-trade band (rank-histerezisi): pozisyonu top_k+exit_buffer dışına düşene dek tut. Default 1.
+    pub exit_buffer: usize,
+    /// true = momentum (en güçlü long); false = reversal. WF 9/9 pencere momentum seçti → default true.
+    pub momentum: bool,
+}
+
+impl Default for XsLiveParams {
+    fn default() -> Self {
+        Self {
+            enabled: false, // opt-in: XS_LIVE_ENABLED=1 + sepet ile aktive
+            symbols: Vec::new(),
+            interval: "1d".to_string(),
+            lookback: 14,
+            top_k: 3,
+            exit_buffer: 1,
+            momentum: true,
+        }
+    }
+}
+
 /// Multi-TF (Faz B) parametreleri. Engine cycle StrategyEval öncesi
 /// `load_htf_candles` çağrısını ve run_download_job HTF fetch'ini kontrol eder.
 /// `enabled=false` → davranış legacy single-TF ile aynı (htf_slice=None,

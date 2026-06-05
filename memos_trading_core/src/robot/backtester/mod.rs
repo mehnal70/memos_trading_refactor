@@ -19,4 +19,4 @@ pub use edge_scan::{EdgeScanConfig, EdgeScanReport, EdgeRow, GroupSummary, SeedR
 pub use multi_tf_ab::{run_multi_tf_ab, run_symbol_ab, arbitrate_single_position, arm_metrics,
     AbConfig, AbReport, SymbolAb, ArmMetrics, TradeSlot};
 pub use xs_momentum::{run_xs_momentum, evaluate_xs, align_closes, XsConfig, XsResult,
-    run_xs_walkforward, evaluate_xs_walkforward, XsWfConfig, XsWfResult};
+    run_xs_walkforward, evaluate_xs_walkforward, XsWfConfig, XsWfResult, xs_target_book};

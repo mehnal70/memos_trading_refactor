@@ -633,6 +633,7 @@ mod tuning_tests {
 
 // ── Faz 1: impl Engine sorumluluk modüllerine bölündü (davranış birebir) ──
 mod loop_core;
+mod xs_live; // kesitsel relatif-güç adanmış mod (market-nötr long/short kitabı)
 mod edge_regime;
 mod infra_fleet;
 mod fleet_tuners;

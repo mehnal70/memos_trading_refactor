@@ -165,6 +165,13 @@ impl Engine {
                 }
             }
             let mut candidates = Vec::new();
+            // 📐 Kesitsel ADANMIŞ MOD sepeti: bu semboller SADECE process_xs_book (market-nötr kitap)
+            // tarafından yönetilir → normal per-sembol döngüden + yetim-pozisyon yolundan HARİÇ tutulur
+            // (çift-yönetim/çakışma yok, tek-pozisyon invariantı temiz). Mod kapalı → boş set, sıfır regresyon.
+            let xs_basket: std::collections::HashSet<String> = st.brain.parameters.read().ok()
+                .filter(|p| p.xs_live.enabled)
+                .map(|p| p.xs_live.symbols.iter().cloned().collect())
+                .unwrap_or_default();
             // Canlı feed'i olmayan borsa sembolleri (örn. BIST) cycle'a alınmaz →
             // fiyatsız satırlar DataIngest/PriceFetch Failed → anomaly birikimi yapardı.
             // Karar market-agnostik tek noktada: RuntimeTuning.symbol_eligible_for_live.
@@ -174,6 +181,7 @@ impl Engine {
                     if !tuning.symbol_eligible_for_live(&worker.symbol) {
                         continue;
                     }
+                    if xs_basket.contains(&worker.symbol) { continue; } // XS-yönetimli → atla
                     candidates.push(worker.symbol.clone());
                 }
             }
@@ -182,6 +190,7 @@ impl Engine {
             if let Ok(positions) = st.finance.live_positions.read() {
                 for sym in positions.keys() {
                     if !tuning.symbol_eligible_for_live(sym) { continue; }
+                    if xs_basket.contains(sym) { continue; } // XS-yönetimli pozisyon → kitap yönetir
                     if !candidates.contains(sym) { candidates.push(sym.clone()); }
                 }
             }
@@ -194,6 +203,10 @@ impl Engine {
             (candidates, st.config.db_path.clone(), st.config.interval.clone(),
              symbol_interval, symbol_strategy, symbol_tracks, live_strategy, st.brain.ml_confidence, tuning)
         };
+
+        // 📐 KESİTSEL ADANMIŞ MOD: sepeti tek market-nötr kitap olarak yönet (per-sembol döngüden ÖNCE,
+        // sepet sembolleri candidates'tan zaten hariç). Mod kapalı/sepet yetersiz → anında no-op.
+        Self::process_xs_book(state).await;
 
         // 2) Paralel sembol infazı — her sembol için ayrı tokio task. State Arc<Mutex> üzerinden
         //    paylaşılır; lock contention'ı kısa tutmak için her closure içinde minimal scope kullanılır.

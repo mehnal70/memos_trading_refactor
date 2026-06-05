@@ -240,10 +240,34 @@ fn compute_weights(
     Some((w, longs.into_iter().collect(), shorts.into_iter().collect()))
 }
 
+/// CANLI hedef-kitap skorlayıcısı (DRY: backtest `select_books`'in sembol-anahtarlı sarmalayıcısı).
+/// `signals` = (sembol, momentum_sinyali=close[t]/close[t−lb]−1). Mevcut kitabı (prev_long/short)
+/// rank-histerezisiyle koruyarak hedef long/short sembol listelerini üretir → canlı motor bunu çağırıp
+/// hedef yönleri infaz eder. momentum=false → reversal (sinyal ters). Backtest ile BİT-AYNI seçim mantığı.
+pub fn xs_target_book(
+    signals: &[(String, f64)], top_k: usize, exit_buffer: usize, momentum: bool,
+    prev_long: &HashSet<String>, prev_short: &HashSet<String>,
+) -> (Vec<String>, Vec<String>) {
+    // sembol↔indeks köprüsü; sinyale göre GÜÇ-AZALAN sırala (reversal → ters), select_books ile aynı.
+    let mut idx_sig: Vec<(usize, f64)> =
+        signals.iter().enumerate().map(|(i, (_, s))| (i, *s)).collect();
+    idx_sig.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    if !momentum {
+        idx_sig.reverse();
+    }
+    let sym_of = |i: usize| signals[i].0.clone();
+    let to_idx = |set: &HashSet<String>| -> HashSet<usize> {
+        signals.iter().enumerate().filter(|(_, (s, _))| set.contains(s)).map(|(i, _)| i).collect()
+    };
+    let (longs, shorts) =
+        select_books(&idx_sig, top_k, exit_buffer, &to_idx(prev_long), &to_idx(prev_short));
+    (longs.into_iter().map(sym_of).collect(), shorts.into_iter().map(&sym_of).collect())
+}
+
 /// RANK-HİSTEREZİSİ (no-trade band): tam-k long/short kitabı seçer ama MEVCUT üyeleri `k+buffer`
 /// dışına düşene dek TUTAR (marjinal daha-iyi aday için churn YOK). buffer=0 → saf top-k/bottom-k
 /// (eski davranış birebir). `sig` GÜÇ-AZALAN sıralı (baş=long edilecek uç). Saf → testli.
-fn select_books(
+pub(crate) fn select_books(
     sig: &[(usize, f64)], k: usize, buffer: usize,
     prev_long: &HashSet<usize>, prev_short: &HashSet<usize>,
 ) -> (Vec<usize>, Vec<usize>) {
@@ -648,6 +672,27 @@ mod tests {
         assert!(rel < 1e-9, "kaldıraç t-stat'ı DEĞİŞTİRMEZ (anlamlılık L-invariant): {} vs {}", r1.t_stat, r3.t_stat);
         assert!((r3.mean_ret - 3.0 * r1.mean_ret).abs() < 1e-9, "ortalama getiri tam L× ölçeklenir");
         assert!(r3.total_return > r1.total_return, "bileşik büyüme L ile artar (pozitif edge'de)");
+    }
+
+    // CANLI hedef-kitap: sembol-anahtarlı sarmalayıcı backtest seçimiyle aynı sonucu verir.
+    #[test]
+    fn xs_target_book_symbol_keyed() {
+        let sig = vec![
+            ("A".to_string(), 0.5), ("B".into(), 0.3), ("C".into(), 0.1),
+            ("D".into(), -0.2), ("E".into(), -0.4),
+        ];
+        let empty = HashSet::new();
+        // momentum top_k=2: long en güçlü {A,B}, short en zayıf {E,D}.
+        let (l, s) = xs_target_book(&sig, 2, 0, true, &empty, &empty);
+        assert!(l.contains(&"A".to_string()) && l.contains(&"B".to_string()), "long = en güçlü 2");
+        assert!(s.contains(&"E".to_string()) && s.contains(&"D".to_string()), "short = en zayıf 2");
+        // reversal: long/short yer değiştirir.
+        let (lr, sr) = xs_target_book(&sig, 2, 0, false, &empty, &empty);
+        assert!(lr.contains(&"E".to_string()) && sr.contains(&"A".to_string()), "reversal → ters kitap");
+        // histerezis: C (rank2) mevcut long ve buffer=1 → top-2 dışında olsa da TUTULUR.
+        let held: HashSet<String> = ["C".to_string()].into_iter().collect();
+        let (lh, _) = xs_target_book(&sig, 2, 1, true, &held, &empty);
+        assert!(lh.contains(&"C".to_string()), "band: incumbent C (rank2<k+buffer=3) tutulur");
     }
 
     // WF: kalıcı momentum trendinde IS momentum'u seçer, OOS POZİTİF döner (look-ahead'siz).
