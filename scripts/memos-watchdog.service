@@ -30,6 +30,13 @@ WorkingDirectory=/home/ulas/PyCharmMiscProject/memos_trading_refactor
 ExecStart=/home/ulas/PyCharmMiscProject/memos_trading_refactor/scripts/watchdog.sh --release
 Restart=always
 RestartSec=10
+# KRİTİK: KillMode=process → systemd YALNIZ watchdog sürecini durdurur/yeniden başlatır; motoru
+# (rtc_headless ya da tmux TUI) cgroup'la birlikte ÖLDÜRMEZ. Aksi halde watchdog restart'ı motoru
+# da düşürür. Watchdog motorun yaşam-döngüsünü bağımsız yönetir.
+KillMode=process
+# ── TUI modu (panelleri izlemek için): aşağıdaki satırı aç → motor tmux 'memos' oturumunda koşar.
+#    İzlemek: ./scripts/tui_daemon.sh attach   (Ctrl-b d ile bırak). Headless için kapalı bırak.
+# Environment=WATCHDOG_TARGET=tui
 # Watchdog hafif; kaynak sınırı koymaya gerek yok. Loglar journalctl --user'a düşer.
 
 [Install]

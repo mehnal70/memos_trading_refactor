@@ -12,10 +12,14 @@
 #   (kalıcı 7/24 için: scripts/memos-watchdog.service — systemd --user, aşağıdaki kurulum)
 #
 # Env (default):
+#   WATCHDOG_TARGET=headless   # headless (engine.sh+PID) | tui (tui_daemon.sh+tmux)
 #   WATCHDOG_CHECK_SECS=60     # kontrol aralığı
 #   WATCHDOG_STALE_SECS=180    # heartbeat bu kadar saniyedir güncellenmiyorsa "hung" say
 #   WATCHDOG_MAX_RESTARTS=5    # pencerede bu kadar restart aşılırsa DURAKLA (crash-loop)
 #   WATCHDOG_WINDOW_SECS=900   # crash-loop penceresi (15 dk)
+#
+# TUI modu (panelleri izlemek isteyenler için): WATCHDOG_TARGET=tui ./scripts/watchdog.sh --release
+#   → TUI'yi tmux 'memos' oturumunda tutar; izlemek: ./scripts/tui_daemon.sh attach
 #
 # Bakım/duraklatma: `logs/.watchdog.pause` dosyası varsa watchdog restart YAPMAZ (kasıtlı
 #   bakım: `touch logs/.watchdog.pause`; geri al: `rm logs/.watchdog.pause`).
@@ -28,9 +32,29 @@ PID_FILE="logs/.engine.pid"
 HEARTBEAT_LOG="logs/heartbeat.jsonl"
 PAUSE_FILE="logs/.watchdog.pause"
 ENGINE="./scripts/engine.sh"
+TUI_DAEMON="./scripts/tui_daemon.sh"
+TUI_SESSION="${MEMOS_TUI_SESSION:-memos}"
+TARGET="${WATCHDOG_TARGET:-headless}"   # headless | tui
 
 MODE_FLAG=""
 for a in "$@"; do [ "$a" = "--release" ] && MODE_FLAG="--release"; done
+
+# Hedefe-göre canlılık + restart soyutlaması (heartbeat-bayatlık kontrolü ikisinde de ortak).
+engine_alive() {
+    if [ "$TARGET" = "tui" ]; then
+        tmux has-session -t "$TUI_SESSION" 2>/dev/null
+    else
+        local p=""; [ -f "$PID_FILE" ] && p="$(cat "$PID_FILE" 2>/dev/null)"
+        [ -n "$p" ] && kill -0 "$p" 2>/dev/null
+    fi
+}
+engine_restart() {
+    if [ "$TARGET" = "tui" ]; then
+        "$TUI_DAEMON" restart $MODE_FLAG >>logs/watchdog.log 2>&1
+    else
+        "$ENGINE" restart $MODE_FLAG >>logs/watchdog.log 2>&1
+    fi
+}
 
 CHECK_SECS="${WATCHDOG_CHECK_SECS:-60}"
 STALE_SECS="${WATCHDOG_STALE_SECS:-180}"
@@ -58,10 +82,10 @@ record_and_check_loop() { # restart kaydet; pencerede sınır aşıldıysa 1 dö
     [ "$count" -ge "$MAX_RESTARTS" ]
 }
 
-do_restart() { # neden → engine.sh restart; crash-loop ise duraklat
+do_restart() { # neden → hedefe-göre restart; crash-loop ise duraklat
     local reason="$1"
-    log "⚠️ $reason → engine restart ($MODE_FLAG)"
-    "$ENGINE" restart $MODE_FLAG >>logs/watchdog.log 2>&1 || log "restart komutu hata döndürdü"
+    log "⚠️ $reason → $TARGET restart ($MODE_FLAG)"
+    engine_restart || log "restart komutu hata döndürdü"
     if record_and_check_loop; then
         log "🛑 CRASH-LOOP: ${WINDOW_SECS}sn içinde ≥${MAX_RESTARTS} restart → DURAKLATILIYOR (touch $PAUSE_FILE)."
         log "   Binary/ortam bozuk olabilir. Düzelt + 'rm $PAUSE_FILE' ile devam ettir."
@@ -69,7 +93,7 @@ do_restart() { # neden → engine.sh restart; crash-loop ise duraklat
     fi
 }
 
-log "başladı (check=${CHECK_SECS}s stale=${STALE_SECS}s max_restarts=${MAX_RESTARTS}/${WINDOW_SECS}s mode=${MODE_FLAG:-debug})"
+log "başladı (target=${TARGET} check=${CHECK_SECS}s stale=${STALE_SECS}s max_restarts=${MAX_RESTARTS}/${WINDOW_SECS}s mode=${MODE_FLAG:-debug})"
 trap 'log "durduruldu (sinyal)"; exit 0' INT TERM
 
 while true; do
@@ -77,9 +101,8 @@ while true; do
         log "⏸️  duraklatıldı ($PAUSE_FILE var) — restart yok"
         sleep "$CHECK_SECS"; continue
     fi
-    pid=""; [ -f "$PID_FILE" ] && pid="$(cat "$PID_FILE" 2>/dev/null)"
-    if ! pid_alive "$pid"; then
-        do_restart "motor ÖLÜ (PID ${pid:-yok} canlı değil)"
+    if ! engine_alive; then
+        do_restart "motor ÖLÜ ($TARGET canlı değil)"
     else
         age=$(hb_age)
         if [ "$age" -gt "$STALE_SECS" ]; then
