@@ -745,8 +745,13 @@ impl Engine {
         // Maker dolumda (POST_ONLY giriş) taker'dan düşük maker_commission_rate uygulanır;
         // taker/market girişte normal commission_rate. used_maker yalnız gerçek maker
         // dolumunda true (fallback-market → false).
-        let entry_commission_rate = if used_maker { st.tuning.maker_commission_rate }
-                                     else          { st.tuning.commission_rate };
+        // KESİTSEL maker icra: XS pozisyonları (strategy_name=XS tag) maker için TASARLANDI
+        // (net edge maker 2bps'te doğrulandı). Operatör USE_LIMIT_ENTRY ile maker'a opt-in ettiyse
+        // paper komisyon muhasebesi de maker oranını yansıtsın → P&L doğrulanan senaryoya sadık.
+        let xs_maker = strategy_name == crate::robot::engines::master::xs_live::XS_STRATEGY_TAG
+            && st.tuning.use_limit_entry;
+        let entry_commission_rate = if used_maker || xs_maker { st.tuning.maker_commission_rate }
+                                     else                     { st.tuning.commission_rate };
         let commission = alloc_capital * entry_commission_rate;
         if let Ok(mut costs) = st.finance.live_execution_costs.write() {
             costs.commission_usd += commission;

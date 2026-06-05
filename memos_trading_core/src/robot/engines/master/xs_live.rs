@@ -9,6 +9,10 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
 
+/// Kesitsel pozisyonların strateji/trade_type etiketi — açılışta mühürlenir, kapanış + komisyon
+/// muhasebesi bununla XS pozisyonunu tanır (maker icra: USE_LIMIT_ENTRY iken maker komisyon oranı).
+pub(crate) const XS_STRATEGY_TAG: &str = "XS_MOMENTUM";
+
 /// Kesitsel adanmış mod aksiyonu (saf plan → imperatif infaz). flip = Close + Open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum XsAction {
@@ -135,12 +139,12 @@ impl Engine {
                 XsAction::OpenLong(sym) => {
                     if let Some(c) = candles_map.get(&sym) {
                         // EŞİT-AĞIRLIK: her bacak equity·position_pct (Kelly bypass → market-nötr 1/k dengesi).
-                        Self::open_paper_position(state, &sym, &crate::core::types::Signal::Buy, c, "XS_MOMENTUM", None, Some(xs.position_pct)).await;
+                        Self::open_paper_position(state, &sym, &crate::core::types::Signal::Buy, c, XS_STRATEGY_TAG, None, Some(xs.position_pct)).await;
                     }
                 }
                 XsAction::OpenShort(sym) => {
                     if let Some(c) = candles_map.get(&sym) {
-                        Self::open_paper_position(state, &sym, &crate::core::types::Signal::Sell, c, "XS_MOMENTUM", None, Some(xs.position_pct)).await;
+                        Self::open_paper_position(state, &sym, &crate::core::types::Signal::Sell, c, XS_STRATEGY_TAG, None, Some(xs.position_pct)).await;
                     }
                 }
             }
