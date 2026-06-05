@@ -379,8 +379,16 @@ impl Engine {
             // mutex'i bırakmadan önce gerekli alanları kopyala.
             let logger_for_event = st.trading_logger.clone();
             let equity_now = st.finance.equity;
-            let strategy_name = st.brain.live_strategy.read()
-                .map(|s| s.clone()).unwrap_or_else(|_| "?".to_string());
+            // Strateji etiketi: pozisyonun KENDİ mührü (pos.trade_type) — açılış dosya-logu
+            // (TradeEvent::trade_open, strategy_name) ile SİMETRİK. Global live_strategy ("AUTO"
+            // → "Otonom") DEĞİL: aksi halde XS_MOMENTUM/ScalpSwing açılışları kapanışta tek bir
+            // "Otonom" kovasına karışır → strateji-bazlı realize P&L (uzun paper izlemenin temeli)
+            // ölçülemezdi. trade_type açılışta her zaman strategy_name ile mühürlenir. [[project_xs_momentum]]
+            let strategy_name = if pos.trade_type.is_empty() {
+                "?".to_string()
+            } else {
+                pos.trade_type.clone()
+            };
 
             drop(st); // Q-Table alt işçisi çağrılmadan önce ana kilit tamamen imha edilir (Fail-Safe)
 

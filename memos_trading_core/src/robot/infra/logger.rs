@@ -21,6 +21,12 @@ pub struct TradeEvent {
     pub event_type: String, // "SIGNAL", "TRADE", "RISK_BLOCK", "ERROR"
     pub symbol: String,
     pub signal: String, // "BUY", "SELL", "HOLD"
+    // Strateji etiketi (normalize: AUTO/Default/"" → "Otonom (rejime göre)"). Birinci-sınıf alan
+    // (sadece message string'inde değil) → JSONL'den strateji-bazlı realize P&L makineyle
+    // toplanabilir: `jq 'select(.event_type=="TRADE_CLOSE" and .strategy=="XS_MOMENTUM") | .pnl'`.
+    // Uzun paper koşusunda XS kitabını ScalpSwing/Regular'dan ayırmanın temeli. [[project_xs_momentum]]
+    #[serde(default)]
+    pub strategy: String,
     pub price: f64,
     pub quantity: f64,
     pub pnl: f64,
@@ -36,6 +42,7 @@ impl TradeEvent {
             event_type: "SIGNAL".to_string(),
             symbol: symbol.to_string(),
             signal: format!("{:?}", signal),
+            strategy: String::new(),
             price,
             quantity: 0.0,
             pnl: 0.0,
@@ -51,6 +58,7 @@ impl TradeEvent {
             event_type: "TRADE".to_string(),
             symbol: trade.symbol.clone(),
             signal: trade.strategy.clone(),
+            strategy: trade.strategy.clone(),
             price: trade.entry_price,
             quantity: trade.amount,
             pnl,
@@ -80,6 +88,7 @@ impl TradeEvent {
             event_type: "TRADE_OPEN".to_string(),
             symbol: symbol.to_string(),
             signal: side.to_string(),
+            strategy: strat_label.clone(),
             price,
             quantity: qty,
             pnl: 0.0,
@@ -112,6 +121,7 @@ impl TradeEvent {
             event_type: "TRADE_CLOSE".to_string(),
             symbol: symbol.to_string(),
             signal: side.to_string(),
+            strategy: strat_label.clone(),
             price: exit_price,
             quantity: qty,
             pnl,
@@ -130,6 +140,7 @@ impl TradeEvent {
             event_type: "RISK_BLOCK".to_string(),
             symbol: symbol.to_string(),
             signal: "HOLD".to_string(),
+            strategy: String::new(),
             price: 0.0,
             quantity: 0.0,
             pnl: 0.0,
@@ -145,6 +156,7 @@ impl TradeEvent {
             event_type: "ERROR".to_string(),
             symbol: "UNKNOWN".to_string(),
             signal: "HOLD".to_string(),
+            strategy: String::new(),
             price: 0.0,
             quantity: 0.0,
             pnl: 0.0,
@@ -378,6 +390,22 @@ mod tests {
         );
         assert!(ev.message.contains("Strat=Otonom (rejime göre)"),
             "AUTO normalize edilmedi: {}", ev.message);
+        // Birinci-sınıf strategy alanı da normalize edilmeli (JSONL makine-toplaması için).
+        assert_eq!(ev.strategy, "Otonom (rejime göre)");
+    }
+
+    #[test]
+    fn trade_close_strategy_field_preserves_xs_tag() {
+        // XS kitabı uzun paper koşusunda ScalpSwing/Regular'dan ayrılabilmeli: strategy alanı
+        // pozisyonun gerçek mührünü (ham, normalize-pas) taşır → jq ile filtrelenebilir.
+        let ev = TradeEvent::trade_close(
+            "AVAXUSDT", "XS_MOMENTUM", false, 30.0, 1.0, 2.5, 10_002.5, "STRATEGY_SIGNAL", 1.0,
+        );
+        assert_eq!(ev.strategy, "XS_MOMENTUM", "XS etiketi strategy alanında korunmalı");
+        assert_eq!(ev.event_type, "TRADE_CLOSE");
+        // Açılış tarafı da aynı etiketi taşır → open/close eşleşmesi tutarlı.
+        let open = TradeEvent::trade_open("AVAXUSDT", "XS_MOMENTUM", false, 31.0, 1.0, 10_000.0, 1.0);
+        assert_eq!(open.strategy, "XS_MOMENTUM");
     }
 
     #[test]
