@@ -30,6 +30,12 @@ pub(crate) enum XsAction {
     Close(String), // →flat ya da flip'in kapatma yarısı (önce kapanışlar infaz edilir)
 }
 
+/// SAF: rejim XS kitabını bloklar mı? Kriz/yüksek-vol'da kesitsel momentum bozulur (korelasyon→1)
+/// → HighVolatility'de kitap FLAT'a çekilir. Tek-kaynak koşul (testli).
+pub(crate) fn regime_blocks_xs(regime: crate::evolution::MarketRegime) -> bool {
+    matches!(regime, crate::evolution::MarketRegime::HighVolatility)
+}
+
 /// SAF: son kapanıştan lookback-bar geriye momentum sinyali = close[t]/close[t−lb]−1. Yetersiz → None.
 pub(crate) fn latest_signal(closes: &[f64], lookback: usize) -> Option<f64> {
     let n = closes.len();
@@ -122,8 +128,26 @@ impl Engine {
         let prev_short: HashSet<String> = current.iter().filter(|(_, l)| !**l).map(|(s, _)| s.clone()).collect();
 
         // 3) hedef kitap (backtest çekirdeği ile DRY) + saf aksiyon planı.
-        let (longs, shorts) = crate::robot::backtester::xs_target_book(
+        let (mut longs, mut shorts) = crate::robot::backtester::xs_target_book(
             &signals, xs.top_k, xs.exit_buffer, xs.momentum, &prev_long, &prev_short);
+
+        // REJİM-GATE: market bellwether'ı (BTC, yoksa en derin sepet serisi) Volatile ise kitabı FLAT'a
+        // çek (kriz/yüksek-vol'da kesitsel momentum bozulur). Hedef boşalınca plan mevcut XS'i kapatır,
+        // yeni açmaz; rejim sakinleşince yeniden kurulur. Tek-kaynak classify_regime [[feedback_autonomy_first]].
+        if xs.regime_gate {
+            let proxy = candles_map.get("BTCUSDT")
+                .or_else(|| candles_map.values().max_by_key(|c| c.len()));
+            if let Some(pc) = proxy {
+                if regime_blocks_xs(Self::classify_regime(pc)) {
+                    if !longs.is_empty() || !shorts.is_empty() {
+                        log::info!("📐 kesitsel REJİM-GATE: Volatile → kitap FLAT'a çekiliyor (kriz koruması)");
+                    }
+                    longs.clear();
+                    shorts.clear();
+                }
+            }
+        }
+
         let actions = xs_plan_actions(&longs, &shorts, &current);
         if actions.is_empty() {
             return; // kitap zaten hedefte (no-trade band churn'ü emdi) → işlem yok
@@ -165,6 +189,15 @@ impl Engine {
 #[cfg(test)]
 mod xs_live_tests {
     use super::*;
+
+    #[test]
+    fn regime_gate_blocks_only_high_volatility() {
+        use crate::evolution::MarketRegime::*;
+        assert!(regime_blocks_xs(HighVolatility), "kriz/yüksek-vol → kitap flat");
+        for r in [StrongUptrend, WeakUptrend, Ranging, WeakDowntrend, StrongDowntrend, LowVolatility, Unknown] {
+            assert!(!regime_blocks_xs(r), "{:?} → kitap normal işler", r);
+        }
+    }
 
     #[test]
     fn latest_signal_basic() {

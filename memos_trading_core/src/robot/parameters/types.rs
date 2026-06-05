@@ -195,6 +195,10 @@ pub struct XsLiveParams {
     /// (kaldıraç edge üretmez, riski ölçekler) → marjinal market-nötr edge'de mütevazı/sabit L doğru.
     /// Default 1.0 (kaldıraçsız; gross zaten 2k·position_pct). Operatör XS_LIVE_LEVERAGE ile yükseltebilir.
     pub leverage: f64,
+    /// REJİM-GATE: market bellwether'ı (BTC) HighVolatility rejiminde iken kitabı FLAT'a çek (kriz/yüksek-vol'da
+    /// kesitsel momentum bozulur: korelasyonlar→1, nötr varsayım çöker). Tek-kaynak classify_regime
+    /// (math→onnx pluggable, sabit eşik DEĞİL [[feedback_autonomy_first]]). Default true. Rejim sakinleşince yeniden kurulur.
+    pub regime_gate: bool,
 }
 
 impl Default for XsLiveParams {
@@ -209,6 +213,7 @@ impl Default for XsLiveParams {
             momentum: true,
             position_pct: 0.10, // eşit-ağırlık: bacak başına equity'nin %10'u
             leverage: 1.0,      // kaldıraçsız (marjinal nötr edge'de mütevazı; XS_LIVE_LEVERAGE ile artır)
+            regime_gate: true,  // Volatile rejimde kitabı flat'a çek (kriz koruması)
         }
     }
 }

@@ -325,6 +325,7 @@ impl ParameterStore {
             momentum: parse_env_bool("XS_LIVE_MOMENTUM").unwrap_or(d.momentum),
             position_pct: parse_env_f64("XS_LIVE_POSITION_PCT").unwrap_or(d.position_pct),
             leverage: parse_env_f64("XS_LIVE_LEVERAGE").unwrap_or(d.leverage),
+            regime_gate: parse_env_bool("XS_LIVE_REGIME_GATE").unwrap_or(d.regime_gate),
         };
         if store.xs_live.enabled {
             log::info!("📐 kesitsel adanmış mod AÇIK: {} sembol · lookback={} · top_k={} · band={} · {}",
