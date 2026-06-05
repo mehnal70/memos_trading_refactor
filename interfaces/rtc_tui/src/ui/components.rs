@@ -94,6 +94,13 @@ pub fn render_position_row(p: &PositionModel) -> Row<'static> {
     // farklı olabilir). Boş (eski snapshot) → "—". Edge sembolleri 1d/4h burada görünür.
     let tf_label = if p.interval.is_empty() { "—".to_string() } else { p.interval.clone() };
 
+    // SL/TP/TSL seviyeleri: 0/unset → "—". XS (kesitsel) pozisyonları STOPSUZ — rank-rebalance
+    // ile yönetilir (per-bacak stop market-nötr yapıyı bozar), bu yüzden onlarda üç sütun da "—"
+    // görünür (beklenen, bug değil). Breakeven aktifse SL entry'e taşınmıştır → sarı vurgu
+    // (kayıp riski nötrlendi). [[project_xs_momentum]]
+    let fmt_lvl = |v: f64| if v > 0.0 { format!("{:.4}", v) } else { "—".to_string() };
+    let sl_color = if p.breakeven_activated { Color::Yellow } else { Color::LightRed };
+
     Row::new(vec![
         Cell::from(p.symbol.clone()).style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from(p.trade_type.clone()),
@@ -103,6 +110,9 @@ pub fn render_position_row(p: &PositionModel) -> Row<'static> {
         Cell::from(format!("{:.1}x", p.leverage)).style(Style::default().fg(lev_color)),
         Cell::from(format!("{:.4}", p.entry_price)),
         Cell::from(format!("{:.4}", p.current_price)),
+        Cell::from(fmt_lvl(p.stop_loss)).style(Style::default().fg(sl_color)),
+        Cell::from(fmt_lvl(p.take_profit)).style(Style::default().fg(Color::LightGreen)),
+        Cell::from(fmt_lvl(p.trailing_stop)).style(Style::default().fg(Color::LightCyan)),
         Cell::from(format!("{:+.2} USDT", pnl)).style(Style::default().fg(color)),
         Cell::from(format!("{:+.1}%", pnl_pct)).style(Style::default().fg(color)),
     ]).height(1)

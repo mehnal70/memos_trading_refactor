@@ -36,19 +36,22 @@ pub fn draw(f: &mut ratatui::Frame, area: Rect, snap: &MissionControl) {
             .collect();
 
         let table = Table::new(rows, [
-            Constraint::Percentage(12), // Sembol
-            Constraint::Percentage(11), // Strateji
-            Constraint::Percentage(6),  // TF (zaman dilimi)
-            Constraint::Percentage(8),  // Yön
-            Constraint::Percentage(7),  // Tür (spot/vadeli)
-            Constraint::Percentage(7),  // Kald.
-            Constraint::Percentage(11), // Giriş
-            Constraint::Percentage(11), // Fiyat
-            Constraint::Percentage(14), // PnL
-            Constraint::Percentage(13), // ROE%
+            Constraint::Percentage(10), // Sembol
+            Constraint::Percentage(9),  // Strateji
+            Constraint::Percentage(5),  // TF (zaman dilimi)
+            Constraint::Percentage(7),  // Yön
+            Constraint::Percentage(6),  // Tür (spot/vadeli)
+            Constraint::Percentage(6),  // Kald.
+            Constraint::Percentage(9),  // Giriş
+            Constraint::Percentage(9),  // Fiyat
+            Constraint::Percentage(8),  // SL (stop-loss; XS'te "—")
+            Constraint::Percentage(8),  // TP (take-profit; XS'te "—")
+            Constraint::Percentage(8),  // TSL (trailing-stop; XS'te "—")
+            Constraint::Percentage(8),  // PnL
+            Constraint::Percentage(7),  // ROE%
         ])
         .header(
-            Row::new(vec!["Sembol", "Strateji", "TF", "Yön", "Tür", "Kald.", "Giriş", "Fiyat", "PnL", "ROE%"])
+            Row::new(vec!["Sembol", "Strateji", "TF", "Yön", "Tür", "Kald.", "Giriş", "Fiyat", "SL", "TP", "TSL", "PnL", "ROE%"])
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         )
         .block(
@@ -165,5 +168,33 @@ mod tests {
         snap.positions = vec![pos("ETHUSDT", "")];
         let r = render_string(&snap);
         assert!(r.contains("—"), "boş TF tire ile gösterilmeli\n{}", r);
+    }
+
+    /// SL/TP/TSL kolonları: başlıklar + set edilmiş seviyeler (XS-dışı pozisyon) gösterilmeli.
+    #[test]
+    fn position_table_shows_sl_tp_tsl_columns() {
+        let mut snap = make_snap("Executing");
+        let mut p = pos("BTCUSDT", "1h");
+        p.stop_loss = 95.0; p.take_profit = 112.0; p.trailing_stop = 98.0;
+        snap.positions = vec![p];
+        let r = render_string(&snap);
+        assert!(r.contains(" SL "), "SL başlığı yok\n{}", r);
+        assert!(r.contains(" TP "), "TP başlığı yok\n{}", r);
+        assert!(r.contains("TSL"), "TSL başlığı yok\n{}", r);
+        assert!(r.contains("95.0"), "SL seviyesi gösterilmeli\n{}", r);
+        assert!(r.contains("112.0"), "TP seviyesi gösterilmeli\n{}", r);
+    }
+
+    /// XS (kesitsel) pozisyonu STOPSUZ (SL/TP/TSL=0) → üç hücre de "—" basar (rank-rebalance
+    /// ile yönetilir, per-bacak stop yoktur — beklenen, bug değil).
+    #[test]
+    fn position_table_xs_no_stops_shows_dash() {
+        let mut snap = make_snap("Executing");
+        let mut p = pos("AVAXUSDT", "1d"); // interval dolu → "—" yalnız stop hücrelerinden gelir
+        p.trade_type = "XS_MOMENTUM".into();
+        // stop_loss/take_profit/trailing_stop pos() helper'ında zaten 0.0
+        snap.positions = vec![p];
+        let r = render_string(&snap);
+        assert!(r.contains("—"), "XS stopsuz pozisyon → tire gösterilmeli\n{}", r);
     }
 }
