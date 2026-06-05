@@ -133,7 +133,7 @@ impl Engine {
         }
         Self::open_paper_position(
             state, symbol, &signal, candles, &strategy_name, Some(opp.trade_type), None,
-        ).await;
+        ).await; // xs_sizing=None → ScalpSwing Kelly+resolve_leverage (mevcut davranış)
         true
     }
 
@@ -150,9 +150,10 @@ impl Engine {
         candles: &[Candle],
         strategy_name: &str,
         kind: Option<crate::robot::scalp_swing::TradeType>,
-        // EŞİT-AĞIRLIK override (kesitsel mod): Some(frac) → alloc = equity·frac (Kelly/risk_appetite
-        // bypass). Market-nötr kitabın 1/k dengesini korur. None → mevcut Kelly sizing (sıfır regresyon).
-        alloc_override: Option<f64>,
+        // KESİTSEL override (adanmış mod): Some → eşit-ağırlık alloc (equity·frac, Kelly bypass) + SABİT
+        // kaldıraç (resolve_leverage bypass). Market-nötr kitabın 1/k dengesi + risk kontrolü. None →
+        // mevcut Kelly sizing + resolve_leverage (sıfır regresyon; XS-dışı tüm çağıranlar None).
+        xs_sizing: Option<xs_live::XsSizing>,
     ) {
         use crate::robot::risk::kelly::KellyCriterion;
         let last_candle = match candles.last() { Some(c) => c, None => return };
@@ -383,10 +384,10 @@ impl Engine {
             let kelly = KellyCriterion::calculate(win_prob, avg_win, avg_loss);
 
             let base_alloc = st.finance.equity * st.tuning.base_alloc_fraction * risk_appetite;
-            // EŞİT-AĞIRLIK (kesitsel mod): alloc_override=Some(frac) → her bacak equity·frac (Kelly atlanır,
+            // EŞİT-AĞIRLIK (kesitsel mod): xs_sizing=Some → her bacak equity·alloc_frac (Kelly atlanır,
             // market-nötr kitabın 1/k dengesi korunur). None → Kelly dinamik ölçek (mevcut davranış).
-            let alloc_capital = match alloc_override {
-                Some(frac) => (st.finance.equity * frac).max(0.0),
+            let alloc_capital = match xs_sizing {
+                Some(s) => (st.finance.equity * s.alloc_frac).max(0.0),
                 None => kelly.calculate_dynamic_scale(base_alloc, loss_streak, ml_conf)
                     .max(base_alloc * st.tuning.alloc_floor_fraction),
             };
@@ -434,9 +435,14 @@ impl Engine {
                 p.symbol_stats.get(&(symbol.to_string(), interval_for_resolve.clone()))
                     .map(|s| s.noise_floor_pct)
             });
-            let leverage_resolved = st.brain.parameters.read().ok()
-                .map(|p| p.resolve_leverage(regime.as_str(), ml_conf, win_prob, noise_floor_opt))
-                .unwrap_or(1.0);
+            // KESİTSEL: sabit kaldıraç (rejim-değişken resolve_leverage bypass; marjinal nötr edge'de
+            // mütevazı L — anlamlılık L-invariant). None → otonom resolve_leverage (mevcut davranış).
+            let leverage_resolved = match xs_sizing {
+                Some(s) => s.leverage.max(1.0),
+                None => st.brain.parameters.read().ok()
+                    .map(|p| p.resolve_leverage(regime.as_str(), ml_conf, win_prob, noise_floor_opt))
+                    .unwrap_or(1.0),
+            };
             // strategy_name caller'dan geliyor — process_symbol_cycle StrategySelector ile
             // rejime göre seçti (SUPERTREND / BB / MA_CROSSOVER vb.). trade_type bunu mühürler;
             // check_exit_conditions açılışla aynı target_pct'i okuyabilsin diye.

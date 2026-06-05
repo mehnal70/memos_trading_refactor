@@ -191,6 +191,10 @@ pub struct XsLiveParams {
     /// kitabın backtest'te doğrulanan 1/k dengesi korunur (Kelly "yüksek edge"e şişirip nötrlüğü bozardı).
     /// 2k pozisyon → gross exposure ≈ 2k·position_pct. Default 0.10 (top_k=3 → ~%60 gross, ~nötr net).
     pub position_pct: f64,
+    /// SABİT kaldıraç (resolve_leverage'in rejim/conf değişkenini BYPASS eder). Anlamlılık L-invariant
+    /// (kaldıraç edge üretmez, riski ölçekler) → marjinal market-nötr edge'de mütevazı/sabit L doğru.
+    /// Default 1.0 (kaldıraçsız; gross zaten 2k·position_pct). Operatör XS_LIVE_LEVERAGE ile yükseltebilir.
+    pub leverage: f64,
 }
 
 impl Default for XsLiveParams {
@@ -204,6 +208,7 @@ impl Default for XsLiveParams {
             exit_buffer: 1,
             momentum: true,
             position_pct: 0.10, // eşit-ağırlık: bacak başına equity'nin %10'u
+            leverage: 1.0,      // kaldıraçsız (marjinal nötr edge'de mütevazı; XS_LIVE_LEVERAGE ile artır)
         }
     }
 }

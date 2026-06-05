@@ -13,6 +13,15 @@ use std::collections::{HashMap, HashSet};
 /// muhasebesi bununla XS pozisyonunu tanır (maker icra: USE_LIMIT_ENTRY iken maker komisyon oranı).
 pub(crate) const XS_STRATEGY_TAG: &str = "XS_MOMENTUM";
 
+/// Kesitsel mod sizing+kaldıraç override'ı (`open_paper_position`'a Some olarak verilir): eşit-ağırlık
+/// alloc (Kelly bypass, market-nötr 1/k dengesi) + SABİT kaldıraç (resolve_leverage rejim-değişkenini
+/// bypass; anlamlılık L-invariant → marjinal nötr edge'de mütevazı L). None → mevcut Kelly+resolve.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct XsSizing {
+    pub alloc_frac: f64,
+    pub leverage: f64,
+}
+
 /// Kesitsel adanmış mod aksiyonu (saf plan → imperatif infaz). flip = Close + Open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum XsAction {
@@ -127,8 +136,9 @@ impl Engine {
         log::info!("📐 kesitsel rebalance: long={:?} short={:?} → {} aksiyon", longs, shorts, actions.len());
 
         // 4) infaz: önce kapanışlar (flat/flip), sonra açılışlar (plan bu sırada). open/close
-        //    mevcut tek-nokta makinesini kullanır (muhasebe/log/cooldown ortak). Sizing şimdilik
-        //    Kelly (faz 2: eşit-ağırlık). reentry_cooldown flip'i bir cycle geciktirebilir (kabul).
+        //    mevcut tek-nokta makinesini kullanır (muhasebe/log/cooldown ortak). Eşit-ağırlık alloc +
+        //    sabit kaldıraç override (XsSizing). reentry_cooldown flip'i bir cycle geciktirebilir (kabul).
+        let sizing = XsSizing { alloc_frac: xs.position_pct, leverage: xs.leverage };
         for act in actions {
             match act {
                 XsAction::Close(sym) => {
@@ -138,13 +148,13 @@ impl Engine {
                 }
                 XsAction::OpenLong(sym) => {
                     if let Some(c) = candles_map.get(&sym) {
-                        // EŞİT-AĞIRLIK: her bacak equity·position_pct (Kelly bypass → market-nötr 1/k dengesi).
-                        Self::open_paper_position(state, &sym, &crate::core::types::Signal::Buy, c, XS_STRATEGY_TAG, None, Some(xs.position_pct)).await;
+                        // EŞİT-AĞIRLIK alloc + SABİT kaldıraç (market-nötr 1/k dengesi + risk kontrolü).
+                        Self::open_paper_position(state, &sym, &crate::core::types::Signal::Buy, c, XS_STRATEGY_TAG, None, Some(sizing)).await;
                     }
                 }
                 XsAction::OpenShort(sym) => {
                     if let Some(c) = candles_map.get(&sym) {
-                        Self::open_paper_position(state, &sym, &crate::core::types::Signal::Sell, c, XS_STRATEGY_TAG, None, Some(xs.position_pct)).await;
+                        Self::open_paper_position(state, &sym, &crate::core::types::Signal::Sell, c, XS_STRATEGY_TAG, None, Some(sizing)).await;
                     }
                 }
             }

@@ -324,6 +324,7 @@ impl ParameterStore {
             exit_buffer: std::env::var("XS_LIVE_BUFFER").ok().and_then(|v| v.parse().ok()).unwrap_or(d.exit_buffer),
             momentum: parse_env_bool("XS_LIVE_MOMENTUM").unwrap_or(d.momentum),
             position_pct: parse_env_f64("XS_LIVE_POSITION_PCT").unwrap_or(d.position_pct),
+            leverage: parse_env_f64("XS_LIVE_LEVERAGE").unwrap_or(d.leverage),
         };
         if store.xs_live.enabled {
             log::info!("📐 kesitsel adanmış mod AÇIK: {} sembol · lookback={} · top_k={} · band={} · {}",
