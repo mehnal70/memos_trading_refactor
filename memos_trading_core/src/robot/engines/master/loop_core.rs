@@ -723,7 +723,7 @@ impl Engine {
 /// arasında; sabit eşik kısa interval'i fazla gevşek, uzun interval'i fazla sıkı
 /// bırakır. `configured`: `<0` → auto = `2×interval` (feed canlı = son bar < 2 bar
 /// eski; sub-1m için 60s taban), `0` → kapalı, `>0` → operatör sabit override.
-fn effective_stale_feed_age(configured: i64, interval_secs: i64) -> i64 {
+pub(crate) fn effective_stale_feed_age(configured: i64, interval_secs: i64) -> i64 {
     match configured {
         0 => 0,
         n if n < 0 => (interval_secs * 2).max(60),

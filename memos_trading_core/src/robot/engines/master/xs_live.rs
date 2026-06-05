@@ -95,7 +95,17 @@ impl Engine {
             _ => return,
         };
 
-        // 1) sepet sembollerinin son mumlarını yükle + momentum sinyali (eligibility kapısından geçenler).
+        // 🧊 STALE-FEED KAPISI (XS): bayat-mumlu sembolü kitaba SOKMA. Normal yolun phantom-giriş
+        // koruması (process_symbol_cycle, [[project_stale_feed_gate]]) XS'i KAPSAMIYORDU çünkü sepet
+        // sembolleri o döngüden hariç + cycle_load_candles bayatlık filtrelemez. ONT −$82.96 artefaktı
+        // kökü: bayat boot mumuyla (@0.0505) giriş → download tazeleyince fantom flip (@0.0463). Eşik
+        // interval-farkında auto=2×bar (effective_stale_feed_age DRY, loop_core); 0 → kapalı (escape).
+        let interval_secs =
+            crate::robot::data_pipeline::DataNormalizer::parse_interval(&xs.interval) as i64;
+        let stale_bound =
+            super::loop_core::effective_stale_feed_age(tuning.stale_feed_max_age_secs, interval_secs);
+
+        // 1) sepet sembollerinin son mumlarını yükle + momentum sinyali (eligibility + tazelik kapısından geçenler).
         let mut signals: Vec<(String, f64)> = Vec::new();
         let mut candles_map: HashMap<String, Vec<Candle>> = HashMap::new();
         for sym in &xs.symbols {
@@ -103,6 +113,17 @@ impl Engine {
                 continue;
             }
             if let Some(c) = Self::cycle_load_candles(state, sym, &db_path, &xs.interval, &tuning) {
+                // Bayat feed → sinyal setinden DIŞLA (ne kitaba girer ne fantom flip yaratır).
+                if stale_bound > 0 {
+                    if let Some(last) = c.last() {
+                        if !candle_is_fresh_within(&last.timestamp, stale_bound) {
+                            let age = (chrono::Utc::now() - last.timestamp).num_seconds();
+                            log::debug!("📐 kesitsel: {} bayat mum ({}sn > {}sn) → sinyalden dışlandı (phantom giriş koruması)",
+                                sym, age, stale_bound);
+                            continue;
+                        }
+                    }
+                }
                 let closes: Vec<f64> = c.iter().map(|k| k.close).collect();
                 if let Some(s) = latest_signal(&closes, xs.lookback) {
                     signals.push((sym.clone(), s));
