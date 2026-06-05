@@ -1,0 +1,36 @@
+# Memos Trading Engine Watchdog — systemd --user servisi (KÖK GEREKTİRMEZ).
+#
+# Bu servis WATCHDOG'u denetler (Restart=always); watchdog da motoru denetler → iki katman:
+#   systemd → watchdog.sh → engine (rtc_headless)
+# Watchdog crash-loop'ta duraklarsa systemd watchdog'u canlı tutar; motor sağlığını watchdog yönetir.
+#
+# KURULUM (bir kez):
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/memos-watchdog.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now memos-watchdog
+#   loginctl enable-linger "$USER"      # oturum kapalıyken + boot'ta da çalışsın
+#
+# YÖNETİM:
+#   systemctl --user status  memos-watchdog
+#   journalctl --user -u memos-watchdog -f
+#   systemctl --user stop    memos-watchdog     # watchdog'u durdur (motor çalışmaya devam eder)
+#   systemctl --user disable memos-watchdog
+#
+# NOT: ExecStart yolu mutlak olmalı — kendi kurulumunda REPO yolunu doğrula/düzelt.
+
+[Unit]
+Description=Memos Trading Engine Watchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ulas/PyCharmMiscProject/memos_trading_refactor
+ExecStart=/home/ulas/PyCharmMiscProject/memos_trading_refactor/scripts/watchdog.sh --release
+Restart=always
+RestartSec=10
+# Watchdog hafif; kaynak sınırı koymaya gerek yok. Loglar journalctl --user'a düşer.
+
+[Install]
+WantedBy=default.target
