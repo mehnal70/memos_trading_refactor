@@ -90,15 +90,19 @@ pub struct XsResult {
     pub win_rate: f64,       // pozitif-getirili bar oranı
     pub mean_ret: f64,       // bar başı ortalama net getiri
     pub std_ret: f64,
-    pub t_stat: f64,         // mean / (std/√N) — tek-yanlı (H0: getiri≤0)
+    pub t_stat: f64,         // mean / (std/√N) — tek-yanlı (H0: getiri≤0), OTOKORELASYON DÜZELTMESİZ
+    pub nw_t_stat: f64,      // Newey-West HAC t — band/kadans tutuşu otokorelasyon → naif t'yi şişirir; bu düzeltir
+    pub nw_lag: usize,       // kullanılan Bartlett bant-genişliği (truncation lag)
     pub avg_turnover: f64,
     pub wf: WfCrossCheck,    // pencere-tutarlılığı → window_significance() binom p-değeri
 }
 
 impl XsResult {
-    /// Tek-yanlı t-stat'ı normal-yaklaşımla p-değerine çevirir (büyük N; H0: ortalama getiri ≤ 0).
-    /// Otokorelasyon düzeltmesi YOK (günlük getiri kabaca bağımsız) → muhafazakâr ön-eleme.
+    /// Naif t-stat'ı normal-yaklaşımla p-değerine çevirir (büyük N; H0: ortalama getiri ≤ 0).
+    /// Otokorelasyon düzeltmesi YOK → örtüşen/tutulan getiride İYİMSER (şişmiş). Karşılaştırma için.
     pub fn t_pvalue(&self) -> f64 { one_sided_normal_sf(self.t_stat) }
+    /// Newey-West HAC t-stat'ın tek-yanlı p-değeri — DÜRÜST anlamlılık (otokorelasyona dayanıklı).
+    pub fn nw_t_pvalue(&self) -> f64 { one_sided_normal_sf(self.nw_t_stat) }
 }
 
 /// Std normal üst-kuyruk P(Z≥z) — Abramowitz-Stegun 7.1.26 erf yaklaşımı (saf, bağımlılıksız).
@@ -302,8 +306,41 @@ fn finalize_metrics(res: &mut XsResult, rets: &[f64], turnovers: &[f64], cfg: &X
     res.ann_return = mean * cfg.bars_per_year;
     res.ann_sharpe = if std > 0.0 { mean / std * cfg.bars_per_year.sqrt() } else { 0.0 };
     res.t_stat = if std > 0.0 { mean / (std / (n as f64).sqrt()) } else { 0.0 };
+    // Newey-West HAC: band/kadans pozisyonu birkaç bar tuttuğundan getiriler otokorelasyonlu →
+    // naif t şişer. Bant-genişliği NW(1994) plug-in kuralı, tutuş ufkuyla (rebalance_every) ALTTAN
+    // sınırlanır. Kaldıraç-invariant (μ,γ ortak ölçeklenir) → base rets üzerinde hesaplanır.
+    let auto_lag = (4.0 * (n as f64 / 100.0).powf(2.0 / 9.0)).floor() as usize;
+    let lag = auto_lag.max(cfg.rebalance_every).max(1).min(n.saturating_sub(1));
+    res.nw_lag = lag;
+    res.nw_t_stat = newey_west_tstat(rets, lag);
     res.avg_turnover = turnovers.iter().sum::<f64>() / n as f64;
     res.wf = windowed_consistency(rets, cfg.wf_window);
+}
+
+/// SAF: Newey-West (Bartlett kernel, HAC) tek-yanlı t-stat'ı = mean / sqrt(S/n), S = uzun-dönem varyans
+/// = γ₀ + 2·Σ_{l=1}^{lag} (1 − l/(lag+1))·γ_l, γ_l = otokovaryans. Pozitif otokorelasyon S'i şişirir →
+/// SE büyür → t küçülür (naif t'nin örtüşme-iyimserliğini düzeltir). Kaldıraç-invariant. Saf → testli.
+fn newey_west_tstat(rets: &[f64], lag: usize) -> f64 {
+    let n = rets.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mean = rets.iter().sum::<f64>() / n as f64;
+    let dev: Vec<f64> = rets.iter().map(|r| r - mean).collect();
+    let gamma0 = dev.iter().map(|d| d * d).sum::<f64>() / n as f64;
+    let mut s = gamma0;
+    for l in 1..=lag.min(n - 1) {
+        let w = 1.0 - l as f64 / (lag as f64 + 1.0); // Bartlett ağırlığı
+        let mut g = 0.0;
+        for t in l..n {
+            g += dev[t] * dev[t - l];
+        }
+        s += 2.0 * w * g / n as f64; // 2·w_l·γ_l
+    }
+    if s <= 0.0 {
+        return 0.0;
+    }
+    mean / (s / n as f64).sqrt() // var(mean) = S/n
 }
 
 /// Getiri serisini `window` uzunluklu ARDIŞIK (örtüşmesiz) parçalara böler → WfCrossCheck.
@@ -564,6 +601,30 @@ mod tests {
         let band = evaluate_xs(&closes, &XsConfig { exit_buffer: 1, ..base.clone() });
         assert!(band.avg_turnover <= no_band.avg_turnover,
             "band turnover'ı azaltır ({} ≤ {})", band.avg_turnover, no_band.avg_turnover);
+    }
+
+    // NEWEY-WEST: pozitif otokorelasyon naif t'yi şişirir → HAC t onu deflate eder.
+    #[test]
+    fn newey_west_deflates_positively_autocorrelated() {
+        // periyodiksiz beyaz gürültü (LCG) → IID; MA(3) düzleştirme lag-1,2 POZİTİF otokorelasyon yaratır.
+        let mut seed = 12345u64;
+        let mut nz = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 40) as f64 / (1u64 << 24) as f64 - 0.5 // ~[-0.5,0.5], ortalama~0, periyodiksiz
+        };
+        let raw: Vec<f64> = (0..600).map(|_| nz()).collect();
+        // IID seri: NW ≈ lag0 (otokorelasyon ~0).
+        let iid: Vec<f64> = raw.iter().map(|x| 0.01 + 0.03 * x).collect();
+        let i0 = newey_west_tstat(&iid, 0);
+        let i8 = newey_west_tstat(&iid, 8);
+        assert!(i0 > 0.0, "mean>0 → pozitif t");
+        assert!((i8 - i0).abs() / i0 < 0.30, "IID'de NW ≈ naif (otokorelasyon yok): {} vs {}", i8, i0);
+        // MA(3) düzleştirme → pozitif kalıcılık → NW t naif'ten KÜÇÜK.
+        let ma: Vec<f64> = (2..raw.len()).map(|t| 0.01 + 0.03 * (raw[t] + raw[t - 1] + raw[t - 2]) / 3.0).collect();
+        let m0 = newey_west_tstat(&ma, 0);
+        let m8 = newey_west_tstat(&ma, 8);
+        assert!(m0 > 0.0 && m8 > 0.0, "mean>0 → pozitif t");
+        assert!(m8 < m0 * 0.95, "pozitif otokorelasyon (MA) → NW t naif t'den KÜÇÜK ({} < {})", m8, m0);
     }
 
     // KALDIRAÇ: getiriyi/büyümeyi ölçekler ama t-stat'ı (anlamlılığı) DEĞİŞTİRMEZ.

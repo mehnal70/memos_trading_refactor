@@ -158,19 +158,21 @@ fn run_wf_mode(base: &XsConfig, candidates: &[(usize, bool)], interval: &str) {
     println!();
     let o = &r.oos;
     let tp = o.t_pvalue();
+    let np = o.nw_t_pvalue();
     let bp = o.wf.window_significance();
     println!("══════ BİRLEŞTİRİLMİŞ OOS (look-ahead'siz) ══════");
     println!("   pencere={} · OOS bar={} · momentum-seçim oranı={:.0}%", r.windows, o.bars, 100.0 * mom_share);
     println!("   annRet={:.1}% · Sharpe={:.2} · win%={:.0} · turnover_ort={:.2}",
         100.0 * o.ann_return, o.ann_sharpe, 100.0 * o.win_rate, o.avg_turnover);
-    println!("   t-stat={:.2} (tek-yanlı p={:.4}) · binom {}/{}  (p={:.4})",
-        o.t_stat, tp, o.wf.profitable_windows, o.wf.windows, bp);
+    println!("   naif t={:.2} (p={:.4}) · NEWEY-WEST t={:.2} (p={:.4}, lag={}) · binom {}/{} (p={:.4})",
+        o.t_stat, tp, o.nw_t_stat, np, o.nw_lag, o.wf.profitable_windows, o.wf.windows, bp);
     println!();
-    if o.t_stat > 0.0 && tp <= 0.05 {
-        println!("✅ OOS ANLAMLI: sinyal kör veride de tutuyor (t-p={:.4}≤0.05). Overfit DEĞİL — gerçek lead.", tp);
-    } else if o.t_stat > 0.0 {
-        println!("~ OOS POZİTİF ama p={:.4}>0.05: yön doğru, güç sınırda (sepet/OOS genişlet ya da kadans ayarla).", tp);
+    // DÜRÜST verdikt: otokorelasyona-dayanıklı Newey-West p-değerine dayanır (naif değil).
+    if o.nw_t_stat > 0.0 && np <= 0.05 {
+        println!("✅ OOS ANLAMLI (Newey-West p={:.4}≤0.05): edge otokorelasyon düzeltmesinden SONRA da tutuyor.", np);
+    } else if o.nw_t_stat > 0.0 {
+        println!("~ OOS POZİTİF ama NW p={:.4}>0.05: naif t (p={:.4}) otokorelasyonla şişmiş; dürüst güç sınırda.", np, tp);
     } else {
-        println!("✗ OOS NEGATİF/sıfır: IS-edge kör veride tutmadı → overfit/regime-bağımlı. Canlıya BAĞLAMA.");
+        println!("✗ OOS NEGATİF/sıfır: edge kör veride tutmadı → overfit/regime-bağımlı. Canlıya BAĞLAMA.");
     }
 }
