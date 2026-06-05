@@ -92,7 +92,10 @@ impl Engine {
             }
         }
         if signals.len() < 2 * xs.top_k {
-            return; // kesitsel sıralama için yeterli geçerli sinyal yok → bu cycle pas
+            // Teşhis (throttle'sız ama nadir koşul): neden kitap kurulamadı (veri/eligibility/lookback).
+            log::debug!("📐 kesitsel: yetersiz sinyal ({}/{} sembol geçerli, ≥{} gerek; interval={} lookback={}) → pas",
+                signals.len(), xs.symbols.len(), 2 * xs.top_k, xs.interval, xs.lookback);
+            return;
         }
 
         // 2) mevcut kitap: sepet sembollerinin açık pozisyon yönleri (symbol→is_long).
@@ -112,8 +115,12 @@ impl Engine {
         if actions.is_empty() {
             return; // kitap zaten hedefte (no-trade band churn'ü emdi) → işlem yok
         }
+        // Panel + DOSYA logu (seed görünürlük fix'i deseni): operatör `grep "kesitsel rebalance"` ile
+        // her rebalance'ın kitabını (long/short + aksiyon sayısı) kalıcı izleyebilsin (push_state_log
+        // ring'i 100 kayıtta kayar, stdout'a düşmez). [[project_edge_scan]] c06f780.
         push_state_log(state, format!(
             "📐 kesitsel rebalance: long={:?} short={:?} → {} aksiyon", longs, shorts, actions.len()));
+        log::info!("📐 kesitsel rebalance: long={:?} short={:?} → {} aksiyon", longs, shorts, actions.len());
 
         // 4) infaz: önce kapanışlar (flat/flip), sonra açılışlar (plan bu sırada). open/close
         //    mevcut tek-nokta makinesini kullanır (muhasebe/log/cooldown ortak). Sizing şimdilik
