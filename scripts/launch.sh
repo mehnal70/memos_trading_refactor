@@ -20,7 +20,9 @@ KEYS=(
   EDGE_SEED_REPORT EDGE_SEED_MIN_TRADES EDGE_SEED_MAX_PF EDGE_SEED_MIN_QVOL
   EDGE_SEED_REQUIRE_WF EDGE_SEED_MULTI_TF EDGE_SEED_MAX_TRACKS EDGE_SEED_IGNORE_MARKET
   SEED_STRATEGY_PRIORITY REGIME_DIRECTIONAL REGIME_ADAPTIVE_PCTL SCALP_SWING_ENABLE
-  USE_LIMIT_ENTRY LET_WINNERS_RUN STALE_FEED_MAX_AGE_SECS
+  USE_LIMIT_ENTRY MAKER_COMMISSION_RATE LET_WINNERS_RUN STALE_FEED_MAX_AGE_SECS
+  XS_LIVE_ENABLED XS_LIVE_SYMBOLS XS_LIVE_INTERVAL XS_LIVE_LOOKBACK XS_LIVE_TOP_K
+  XS_LIVE_BUFFER XS_LIVE_POSITION_PCT XS_LIVE_LEVERAGE XS_LIVE_REGIME_GATE XS_LIVE_MOMENTUM
 )
 declare -A GROUP TYPE DESC VAL
 set_meta(){ GROUP[$1]=$2; TYPE[$1]=$3; DESC[$1]=$4; }
@@ -41,8 +43,23 @@ set_meta REGIME_DIRECTIONAL       "Otonomi" "bool"                   "rejim-yön
 set_meta REGIME_ADAPTIVE_PCTL     "Otonomi" "text"                   "adaptif Volatile pctl (boş=sabit)"
 set_meta SCALP_SWING_ENABLE       "Otonomi" "bool"                   "ScalpSwing alt-kanalı"
 set_meta USE_LIMIT_ENTRY          "İcra"    "bool"                   "maker LIMIT giriş (yoksa taker MARKET)"
+set_meta MAKER_COMMISSION_RATE    "İcra"    "text"                   "maker komisyon oranı (boş=taker ile aynı; XS≈0.0002)"
 set_meta LET_WINNERS_RUN          "İcra"    "bool"                   "kazananı koştur (trail genişlet)"
 set_meta STALE_FEED_MAX_AGE_SECS  "İcra"    "text"                   "bayat-feed eşiği sn (boş=auto)"
+# ── Kesitsel adanmış mod (XS momentum — market-nötr long/short kitabı) ──────────────────────
+# Doğrulanmış edge (gross OOS p=0.009, net band=1 maker günlük p=0.034, NW-HAC sonrası da anlamlı).
+# XS_LIVE_ENABLED=0 → mod kapalı (sıfır regresyon); 1 + sepet ile aktive. Maker net için yukarıdaki
+# USE_LIMIT_ENTRY=1 + MAKER_COMMISSION_RATE≈0.0002 ile birlikte kullan.
+set_meta XS_LIVE_ENABLED          "Kesitsel" "bool"                  "kesitsel adanmış mod (market-nötr L/S kitabı)"
+set_meta XS_LIVE_SYMBOLS          "Kesitsel" "text"                  "sepet (csv; ≥2·top_k derin major)"
+set_meta XS_LIVE_INTERVAL         "Kesitsel" "text"                  "sepet TF (doğrulanan: 1d)"
+set_meta XS_LIVE_LOOKBACK         "Kesitsel" "text"                  "momentum bar sayısı (boş=14)"
+set_meta XS_LIVE_TOP_K            "Kesitsel" "text"                  "bacak başına sembol (long=short=k)"
+set_meta XS_LIVE_BUFFER           "Kesitsel" "text"                  "no-trade band (rank histerezisi; 1-2)"
+set_meta XS_LIVE_POSITION_PCT     "Kesitsel" "text"                  "bacak başına equity oranı (eşit-ağırlık)"
+set_meta XS_LIVE_LEVERAGE         "Kesitsel" "text"                  "sabit kaldıraç (anlamlılık L-invariant)"
+set_meta XS_LIVE_REGIME_GATE      "Kesitsel" "bool"                  "yüksek-vol'da kitabı flat çek (kriz koruması)"
+set_meta XS_LIVE_MOMENTUM         "Kesitsel" "bool"                  "momentum (kapalı=reversal; doğrulanan: momentum)"
 
 # ── Default'lar (doğrulanmış temiz futures profili) ─────────────────────────────────────────
 defaults(){
@@ -55,8 +72,16 @@ defaults(){
   VAL[EDGE_SEED_IGNORE_MARKET]=0
   VAL[SEED_STRATEGY_PRIORITY]=1;      VAL[REGIME_DIRECTIONAL]=0
   VAL[REGIME_ADAPTIVE_PCTL]="";       VAL[SCALP_SWING_ENABLE]=1
-  VAL[USE_LIMIT_ENTRY]=0;             VAL[LET_WINNERS_RUN]=0
-  VAL[STALE_FEED_MAX_AGE_SECS]=""
+  VAL[USE_LIMIT_ENTRY]=0;             VAL[MAKER_COMMISSION_RATE]=""
+  VAL[LET_WINNERS_RUN]=0;             VAL[STALE_FEED_MAX_AGE_SECS]=""
+  # Kesitsel: ENABLED=0 → mod kapalı (mevcut davranış birebir). Diğerleri doğrulanmış config'in
+  # ön-doldurulmuş değerleri → ENABLED'ı 1'e çevirince çalışan bir kitap kurulur (sepet düzenlenebilir).
+  VAL[XS_LIVE_ENABLED]=0
+  VAL[XS_LIVE_SYMBOLS]="BTCUSDT,ETHUSDT,BCHUSDT,XRPUSDT,TRXUSDT,ADAUSDT,ZECUSDT,BNBUSDT,ONTUSDT,DOGEUSDT,SOLUSDT,UNIUSDT,AVAXUSDT,STORJUSDT,ALPHAUSDT"
+  VAL[XS_LIVE_INTERVAL]=1d;           VAL[XS_LIVE_LOOKBACK]=14
+  VAL[XS_LIVE_TOP_K]=3;               VAL[XS_LIVE_BUFFER]=1
+  VAL[XS_LIVE_POSITION_PCT]=0.10;     VAL[XS_LIVE_LEVERAGE]=1
+  VAL[XS_LIVE_REGIME_GATE]=1;         VAL[XS_LIVE_MOMENTUM]=1
 }
 latest_report(){ ls -t reports/edge_sweep_*.json 2>/dev/null | head -1; }
 
