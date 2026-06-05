@@ -132,7 +132,7 @@ impl Engine {
             ));
         }
         Self::open_paper_position(
-            state, symbol, &signal, candles, &strategy_name, Some(opp.trade_type),
+            state, symbol, &signal, candles, &strategy_name, Some(opp.trade_type), None,
         ).await;
         true
     }
@@ -150,6 +150,9 @@ impl Engine {
         candles: &[Candle],
         strategy_name: &str,
         kind: Option<crate::robot::scalp_swing::TradeType>,
+        // EŞİT-AĞIRLIK override (kesitsel mod): Some(frac) → alloc = equity·frac (Kelly/risk_appetite
+        // bypass). Market-nötr kitabın 1/k dengesini korur. None → mevcut Kelly sizing (sıfır regresyon).
+        alloc_override: Option<f64>,
     ) {
         use crate::robot::risk::kelly::KellyCriterion;
         let last_candle = match candles.last() { Some(c) => c, None => return };
@@ -380,8 +383,13 @@ impl Engine {
             let kelly = KellyCriterion::calculate(win_prob, avg_win, avg_loss);
 
             let base_alloc = st.finance.equity * st.tuning.base_alloc_fraction * risk_appetite;
-            let alloc_capital = kelly.calculate_dynamic_scale(base_alloc, loss_streak, ml_conf)
-                .max(base_alloc * st.tuning.alloc_floor_fraction);
+            // EŞİT-AĞIRLIK (kesitsel mod): alloc_override=Some(frac) → her bacak equity·frac (Kelly atlanır,
+            // market-nötr kitabın 1/k dengesi korunur). None → Kelly dinamik ölçek (mevcut davranış).
+            let alloc_capital = match alloc_override {
+                Some(frac) => (st.finance.equity * frac).max(0.0),
+                None => kelly.calculate_dynamic_scale(base_alloc, loss_streak, ml_conf)
+                    .max(base_alloc * st.tuning.alloc_floor_fraction),
+            };
             let qty_val = (alloc_capital / entry).max(0.0);
             if qty_val <= 0.0 { return; }
 

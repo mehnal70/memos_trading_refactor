@@ -580,7 +580,7 @@ impl Engine {
                             symbol, signal_label, edge, strategy_name,
                         ));
                     }
-                    Self::open_paper_position(state, symbol, &signal, &candles, &strategy_name, None).await;
+                    Self::open_paper_position(state, symbol, &signal, &candles, &strategy_name, None, None).await;
                 }
                 // Pozisyon varken TERS yönde sinyal → kapanış (edge filtresi gevşek).
                 // Long + Sell ya da Short + Buy: trend dönmüş demektir.

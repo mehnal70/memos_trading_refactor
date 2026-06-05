@@ -134,12 +134,13 @@ impl Engine {
                 }
                 XsAction::OpenLong(sym) => {
                     if let Some(c) = candles_map.get(&sym) {
-                        Self::open_paper_position(state, &sym, &crate::core::types::Signal::Buy, c, "XS_MOMENTUM", None).await;
+                        // EŞİT-AĞIRLIK: her bacak equity·position_pct (Kelly bypass → market-nötr 1/k dengesi).
+                        Self::open_paper_position(state, &sym, &crate::core::types::Signal::Buy, c, "XS_MOMENTUM", None, Some(xs.position_pct)).await;
                     }
                 }
                 XsAction::OpenShort(sym) => {
                     if let Some(c) = candles_map.get(&sym) {
-                        Self::open_paper_position(state, &sym, &crate::core::types::Signal::Sell, c, "XS_MOMENTUM", None).await;
+                        Self::open_paper_position(state, &sym, &crate::core::types::Signal::Sell, c, "XS_MOMENTUM", None, Some(xs.position_pct)).await;
                     }
                 }
             }

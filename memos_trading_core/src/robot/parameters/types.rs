@@ -187,6 +187,10 @@ pub struct XsLiveParams {
     pub exit_buffer: usize,
     /// true = momentum (en güçlü long); false = reversal. WF 9/9 pencere momentum seçti → default true.
     pub momentum: bool,
+    /// EŞİT-AĞIRLIK sizing: her XS bacağı için equity'nin bu oranı (notional). Kelly DEĞİL → market-nötr
+    /// kitabın backtest'te doğrulanan 1/k dengesi korunur (Kelly "yüksek edge"e şişirip nötrlüğü bozardı).
+    /// 2k pozisyon → gross exposure ≈ 2k·position_pct. Default 0.10 (top_k=3 → ~%60 gross, ~nötr net).
+    pub position_pct: f64,
 }
 
 impl Default for XsLiveParams {
@@ -199,6 +203,7 @@ impl Default for XsLiveParams {
             top_k: 3,
             exit_buffer: 1,
             momentum: true,
+            position_pct: 0.10, // eşit-ağırlık: bacak başına equity'nin %10'u
         }
     }
 }
