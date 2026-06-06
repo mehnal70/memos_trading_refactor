@@ -347,6 +347,11 @@ pub struct PositionModel {
     /// auto_tune feedback loop bu alanı okur.
     #[serde(default)]
     pub kind: Option<crate::robot::scalp_swing::TradeType>,
+    /// Açılışta ödenen giriş komisyonu (USD). Kapanışta NET P&L için saklanır
+    /// (net_pnl = gross − entry_commission − exit_commission). Eski serialize'lı /
+    /// kurtarılan pozisyonlar → 0.0 (serde default; net≈gross−exit, kabul edilebilir).
+    #[serde(default)]
+    pub entry_commission: f64,
 }
 
 impl PositionModel {
@@ -449,6 +454,17 @@ pub struct ClosedTradeModel {
     /// default 1.0 (serde) — geriye uyumlu.
     #[serde(default = "default_leverage_one")]
     pub leverage: f64,
+    /// Komisyon-DAHİL net P&L (USD) = gross `pnl` − round-trip komisyon. Dürüst gösterim için
+    /// (bir BREAKEVEN gross 0 olsa da round-trip fee'yi yansıtır). `pnl` (gross) win-rate/strateji
+    /// skorlama/attribution tüketicileri için DEĞİŞMEDEN kalır. Eski/DB kayıt → gross'a eşitlenir.
+    #[serde(default)]
+    pub net_pnl: f64,
+    /// Net P&L yüzdesi (net_pnl / notional × 100). Eski/DB kayıt → pnl_pct.
+    #[serde(default)]
+    pub net_pnl_pct: f64,
+    /// Round-trip toplam komisyon (giriş + çıkış, USD). Eski/DB kayıt → 0.0.
+    #[serde(default)]
+    pub commission: f64,
 }
 
 fn default_leverage_one() -> f64 { 1.0 }

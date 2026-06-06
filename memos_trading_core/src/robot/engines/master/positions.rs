@@ -493,6 +493,7 @@ impl Engine {
                 // close_paper_position kapanışta bu alanı okuyup
                 // ScalpSwingStatsTable'a kanal-bazlı kayıt geçiyor.
                 kind,
+                entry_commission: 0.0, // açılışta gerçek komisyon hesaplanınca mühürlenir (aşağıda)
             };
             Some(OpenPlan {
                 new_pos, alloc_capital, graded_target, qty_val,
@@ -793,6 +794,11 @@ impl Engine {
             costs.trade_count    += 1;
         }
         st.finance.equity -= commission;
+        // Per-trade NET P&L için giriş komisyonunu pozisyona mühürle (kapanışta
+        // net_pnl = gross − entry_commission − exit_commission). Pozisyon 760'ta insert edildi.
+        if let Ok(mut positions) = st.finance.live_positions.write() {
+            if let Some(p) = positions.get_mut(symbol) { p.entry_commission = commission; }
+        }
 
         // IntelligenceHub.track_trade — kapanışta learn_from_exit ile eşleşecek.
         if let Ok(mut hub) = st.brain.intelligence_hub.write() {

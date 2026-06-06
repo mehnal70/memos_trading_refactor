@@ -343,6 +343,7 @@ mod tests {
                     max_favorable_price: 1.0,
                     breakeven_activated: false,
                     kind: None,
+                    entry_commission: 0.0,
                 });
             }
         }

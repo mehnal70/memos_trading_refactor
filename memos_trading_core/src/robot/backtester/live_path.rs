@@ -251,6 +251,7 @@ pub fn run(candles_1m: &[Candle], cfg: &LivePathConfig) -> LivePathResult {
                                 max_favorable_price: entry,
                                 breakeven_activated: false,
                                 kind: None,
+                                entry_commission: 0.0,
                             },
                             entry_bar: i,
                             entry_commission,

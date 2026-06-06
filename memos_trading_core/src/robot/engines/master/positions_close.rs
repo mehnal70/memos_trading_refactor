@@ -309,12 +309,25 @@ impl Engine {
                 (pnl_val / (pos.entry_price * pos.qty)) * 100.0
             } else { 0.0 };
 
+            // NET P&L (dürüst gösterim): gross − round-trip komisyon. entry_commission açılışta
+            // pozisyona mühürlendi (open_paper_position), exit_commission yukarıda hesaplandı. Bir
+            // BREAKEVEN gross 0 olsa da net round-trip fee'yi yansıtır → "+0.00" yanıltması biter.
+            // `pnl`/`pnl_pct` (gross) win-rate/skorlama tüketicileri için DEĞİŞMEDEN kalır.
+            let round_trip_commission = pos.entry_commission + exit_commission;
+            let net_pnl_val = pnl_val - round_trip_commission;
+            let net_pnl_pct_val = if pos.entry_price > 0.0 && pos.qty > 0.0 {
+                (net_pnl_val / (pos.entry_price * pos.qty)) * 100.0
+            } else { 0.0 };
+
             let closed_trade = ClosedTradeModel {
                 symbol: symbol.to_string(),
                 is_long: pos.is_long,
                 exit_reason: reason.as_str().to_string(),
                 pnl: pnl_val,
                 pnl_pct: pnl_pct_val,
+                net_pnl: net_pnl_val,
+                net_pnl_pct: net_pnl_pct_val,
+                commission: round_trip_commission,
                 closed_at: chrono::Utc::now().to_rfc3339(),
                 opened_at: pos.opened_at.clone(),
                 leverage: pos.leverage,

@@ -52,13 +52,16 @@ pub fn draw_trade_history(f: &mut ratatui::Frame, area: Rect, snap: &MissionCont
     }
 
     let rows: Vec<Row> = snap.trade_history.iter().map(|t| {
-        let pnl_color = if t.pnl >= 0.0 { Color::LightGreen } else { Color::LightRed };
+        // Renk + değerler NET (komisyon-dahil): "Net PnL" başlığı artık gerçekten net. Bir BREAKEVEN
+        // gross 0 olsa da round-trip fee'yi yansıtır (Komisyon kolonu fee'yi ayrıca gösterir).
+        let pnl_color = if t.net_pnl >= 0.0 { Color::LightGreen } else { Color::LightRed };
         Row::new(vec![
             format!("{}", t.closed_at),
             t.symbol.clone(),
             if t.is_long { "▲ LONG".into() } else { "▼ SHORT".into() },
-            format!("{:+.2} USDT", t.pnl),
-            format!("{:+.2}%", t.pnl_pct),
+            format!("{:+.2} USDT", t.net_pnl),
+            format!("{:+.2}%", t.net_pnl_pct),
+            format!("-{:.2}", t.commission),
             t.exit_reason.clone(),
         ]).style(Style::default().fg(pnl_color))
     }).collect();
@@ -66,12 +69,13 @@ pub fn draw_trade_history(f: &mut ratatui::Frame, area: Rect, snap: &MissionCont
     let table = Table::new(rows, [
         Constraint::Length(20), // Zaman
         Constraint::Length(10), // Sembol
-        Constraint::Length(10), // Yön
-        Constraint::Length(15), // PnL
-        Constraint::Length(10), // %
-        Constraint::Min(15),    // Neden
+        Constraint::Length(8),  // Yön
+        Constraint::Length(14), // Net PnL
+        Constraint::Length(9),  // ROE%
+        Constraint::Length(9),  // Komisyon
+        Constraint::Min(12),    // Neden
     ])
-    .header(Row::new(vec!["Kapanış", "Sembol", "Yön", "Net PnL", "ROE%", "Çıkış Nedeni"])
+    .header(Row::new(vec!["Kapanış", "Sembol", "Yön", "Net PnL", "ROE%", "Komisyon", "Çıkış Nedeni"])
         .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
     .block(Block::default().title(" 📜 Kapanmış İşlemler (Son 50) ").borders(Borders::ALL));
 

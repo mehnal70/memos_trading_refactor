@@ -147,6 +147,7 @@ mod tests {
             trade_type: "BB".into(), opened_at: "2026-06-03T00:00:00Z".into(),
             stop_loss: 0.0, take_profit: 0.0, trailing_stop: 0.0,
             max_favorable_price: 101.0, breakeven_activated: false, kind: None,
+            entry_commission: 0.0,
         }
     }
 
