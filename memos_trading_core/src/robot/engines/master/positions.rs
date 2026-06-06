@@ -169,7 +169,12 @@ impl Engine {
         // ⏳ Re-entry cooldown: son kapanıştan REENTRY_COOLDOWN_SECS geçmediyse yeni
         // açılış engellenir — churn/flip-flop (aç→kapa→hemen aç) koruması. 0 → kapalı.
         // Her iki açılış yolu (scalp_swing + strateji) buradan geçtiği için tek-nokta.
+        // KESİTSEL MUAF: XS kitabının churn kontrolü no-trade band + bar-başına kadans kapısıdır
+        // (process_xs_book). Per-sembol cooldown XS'e uygulanınca flip'in açma yarısını (close→open
+        // aynı cycle) bloklar ve bar-kadansı kapısı yüzünden bir sonraki bara kadar açtırmaz → bacak
+        // bar boyu yanlış flat kalır. XS zaten Kelly+resolve_leverage'ı da bypass ediyor. [[project_xs_momentum]]
         let cooldown_block = state.lock().ok().and_then(|st| {
+            if xs_sizing.is_some() { return None; }
             let cd = st.tuning.reentry_cooldown_secs;
             if cd == 0 { return None; }
             st.finance.last_close_at.read().ok()

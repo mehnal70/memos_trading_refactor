@@ -214,6 +214,36 @@ impl Engine {
             }
         }
 
+        // ⏱️ BAR-BAŞINA KADANS KAPISI: rank-tabanlı rebalance sinyal-barı başına BİR kez. Sinyal
+        // (latest_signal) son mumun close'undan hesaplanır; 1d modunda son mum = devam eden bar →
+        // close'u her veri tazelemesinde oynar → marjinal rank-k bacaklar bar-içi yer değiştirir →
+        // close+reopen churn'ü (canlı kök: ~15dk'lık zarar zinciri = download tazeleme kadansı). Edge
+        // WF-OOS + no-trade band ile BAR/1-REBALANCE kadansında doğrulandı; bar-içi işlem turnover'ı
+        // edge'i yiyor. cur_bar (son mum open-time) bar içinde STABİL → cur_bar==last → rank rebalance
+        // ATLA (kitabı tut). FORCE-FLAT (devre-kesici/rejim-gate/cooldown → longs&shorts boş) MUAF:
+        // hızlı felaket freni responsive kalmalı; bar da işaretlenmez → koruma kalkınca kitap anında
+        // yeniden kurulur. [[project_xs_momentum]] [[feedback_autonomy_first]]
+        let cur_bar = candles_map.values().filter_map(|c| c.last()).map(|k| k.timestamp).max();
+        let forced_flat = longs.is_empty() && shorts.is_empty();
+        if !forced_flat {
+            // Aynı bar mı? (skip) — değilse barı atomik işaretle (tek lock). Force-flat'ta işaretlenmez.
+            let skip = match state.lock() {
+                Ok(st) => {
+                    let last = st.finance.xs_last_rebalance_bar.read().ok().and_then(|b| *b);
+                    if cur_bar.is_some() && cur_bar == last {
+                        true
+                    } else {
+                        if let Ok(mut b) = st.finance.xs_last_rebalance_bar.write() { *b = cur_bar; }
+                        false
+                    }
+                }
+                Err(_) => return,
+            };
+            if skip {
+                return; // aynı bar → kitabı tut (bar-içi rank churn'ü yok)
+            }
+        }
+
         let actions = xs_plan_actions(&longs, &shorts, &current);
         if actions.is_empty() {
             return; // kitap zaten hedefte (no-trade band churn'ü emdi) → işlem yok

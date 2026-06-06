@@ -67,6 +67,11 @@ pub struct FinanceVault {
     /// 🔌 XS portföy-düzeyi devre kesici cooldown'u: tetiklenince bu ana kadar kitap flat tutulur
     /// (process_xs_book yazar+okur). None → cooldown yok. Monotonik Instant; persist edilmez.
     pub xs_circuit_breaker_until: Arc<RwLock<Option<std::time::Instant>>>,
+    /// 📐 XS son rank-rebalance edilen bar (sinyal mumu open-time). process_xs_book yazar+okur:
+    /// rank-tabanlı rebalance bar başına BİR kez tetiklenir (cur_bar==last → atla) → bar-içi sinyal
+    /// jitter'ından doğan turnover churn'ü önlenir; edge backtest-kadansıyla (bar/1 rebalance) hizalanır.
+    /// Devre-kesici/rejim-gate force-flat MUAF (responsive). None → henüz rebalance yok. Persist edilmez.
+    pub xs_last_rebalance_bar: Arc<RwLock<Option<chrono::DateTime<chrono::Utc>>>>,
     /// 🪜 Kademeli giriş durumu (sembol→kademe sayacı + hedef sermaye). open_paper_position açılışta
     /// yazar, try_add_graded_tranche ek-kademe için okur+günceller, close_paper_position temizler.
     /// Sembol-anahtarlı (tek-pozisyon/sembol invariantı). Ephemeral: restart'ta kaybolur → kurtarılan
@@ -289,6 +294,7 @@ impl AppState {
             closed_trades_total: Arc::new(AtomicUsize::new(0)),
             last_close_at: Arc::new(RwLock::new(HashMap::new())),
             xs_circuit_breaker_until: Arc::new(RwLock::new(None)),
+            xs_last_rebalance_bar: Arc::new(RwLock::new(None)),
             graded_tranches: Arc::new(RwLock::new(HashMap::new())),
             pending_open_long:  Arc::new(std::sync::atomic::AtomicU32::new(0)),
             pending_open_short: Arc::new(std::sync::atomic::AtomicU32::new(0)),
