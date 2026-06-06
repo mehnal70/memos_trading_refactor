@@ -92,7 +92,9 @@ cmd_start() {
     # Stale PID temizliği
     clear_pid
 
-    nohup "$binary" > "$STDOUT_LOG" 2> "$STDERR_LOG" &
+    # .launch.conf env'ini _engine_exec.sh içinden yükle → headless daemon interaktif çalıştırmayla
+    # AYNI env'i alır (XS/graded/rejim daemon'da da geçerli). [[project_daemon_env_pending]]
+    nohup "$REPO_DIR/scripts/_engine_exec.sh" "$binary" > "$STDOUT_LOG" 2> "$STDERR_LOG" &
     local new_pid=$!
     echo "$new_pid" > "$PID_FILE"
 

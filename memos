@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# memos — Memos RTC TEK-KOMUT kontrol arayüzü.
+#
+# Dağınık script'leri (launch.sh / run_rtc.sh / tui_daemon.sh / watchdog.sh / engine.sh /
+# reset_state.sh) tek ezberlenir komutun altında toplar — hepsine DELEGE eder (mantık kopyalanmaz).
+# Tüm yollar scripts/.launch.conf'u TEK KAYNAK env olarak kullanır (lib_launchconf.sh).
+#
+#   ./memos config            # başlatma parametrelerini düzenle (interaktif menü → .launch.conf)
+#   ./memos start             # ÖN PLANDA TUI (bu terminalde; .launch.conf env'iyle)
+#   ./memos up                # 7/24 ARKA PLAN: tmux TUI + watchdog (ölü/hung'da auto-restart)
+#   ./memos down              # watchdog + motoru durdur
+#   ./memos restart           # down + up
+#   ./memos status            # motor + watchdog + son heartbeat
+#   ./memos attach            # tmux panellerini canlı izle (bırak: Ctrl-b d)
+#   ./memos logs              # canlı log akışı (trades + heartbeat)
+#   ./memos reset [args...]   # state/log/history reset (reset_state.sh'e geçer; örn: --all -y)
+#   ./memos boot-install      # boot'ta otomatik başlat (systemd --user, TUI/tmux + linger)
+#   ./memos boot-uninstall    # boot otomatiğini kaldır
+#   ./memos build             # sadece release TUI binary'i derle
+set -u
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_DIR" || exit 1
+
+SESSION="${MEMOS_TUI_SESSION:-memos}"
+SERVICE="memos-watchdog"
+UNIT_DST="$HOME/.config/systemd/user/${SERVICE}.service"
+WD_PIDFILE="logs/.watchdog.pid"
+HEARTBEAT="logs/heartbeat.jsonl"
+mkdir -p logs
+
+have_systemd_unit() { [ -f "$UNIT_DST" ]; }
+systemd_active()   { systemctl --user is-active --quiet "$SERVICE" 2>/dev/null; }
+wd_nohup_alive()   { [ -f "$WD_PIDFILE" ] && kill -0 "$(cat "$WD_PIDFILE" 2>/dev/null)" 2>/dev/null; }
+
+build_release() {
+  echo "🔨 release TUI binary derleniyor (gerekirse)..."
+  ./run_rtc.sh --tui --release --build-only
+}
+
+cmd_up() {
+  build_release || { echo "❌ derleme başarısız → up iptal."; exit 1; }
+  rm -f logs/.watchdog.pause 2>/dev/null   # bakım duraklatması varsa kaldır
+  if have_systemd_unit; then
+    systemctl --user start "$SERVICE"
+    echo "✅ up (systemd): '$SERVICE' başlatıldı → watchdog motoru tmux '$SESSION' içinde tutuyor."
+  else
+    if wd_nohup_alive; then echo "ℹ️  watchdog zaten çalışıyor (PID $(cat "$WD_PIDFILE"))."; exit 0; fi
+    WATCHDOG_TARGET=tui nohup ./scripts/watchdog.sh --release >>logs/watchdog.log 2>&1 &
+    echo $! > "$WD_PIDFILE"
+    echo "✅ up (nohup): watchdog (TARGET=tui, PID $(cat "$WD_PIDFILE")) → motoru tmux '$SESSION' içinde tutuyor."
+    echo "   (kalıcı boot için: ./memos boot-install)"
+  fi
+  echo "   izle: ./memos attach · durum: ./memos status · durdur: ./memos down"
+}
+
+cmd_down() {
+  # ÖNCE watchdog'u TAM durdur (yoksa motoru geri başlatır), SONRA motoru kapat.
+  if have_systemd_unit && systemd_active; then
+    systemctl --user stop "$SERVICE"; echo "🛑 watchdog durduruldu (systemd)."
+  fi
+  if wd_nohup_alive; then
+    local wp; wp="$(cat "$WD_PIDFILE" 2>/dev/null)"
+    kill "$wp" 2>/dev/null
+    # watchdog 'sleep 60' içinde olabilir → bash TERM trap'ini sleep bitene dek erteler. Child
+    # sleep'i de kesince trap hemen çalışır (anında çıkış, tek-fazla-kontrol yarışı önlenir).
+    pkill -TERM -P "$wp" 2>/dev/null || true
+    for _ in 1 2 3; do kill -0 "$wp" 2>/dev/null || break; sleep 1; done
+    kill -0 "$wp" 2>/dev/null && kill -9 "$wp" 2>/dev/null   # inatçıysa escalate
+    echo "🛑 watchdog durduruldu (nohup)."
+  fi
+  rm -f "$WD_PIDFILE" 2>/dev/null
+  ./scripts/tui_daemon.sh stop 2>/dev/null || true
+  ./scripts/engine.sh stop 2>/dev/null || true   # olası headless artığı
+  echo "✅ down: watchdog + motor durduruldu."
+}
+
+cmd_status() {
+  echo "── Motor ──────────────────────────────"
+  ./scripts/tui_daemon.sh status
+  echo "── Watchdog ───────────────────────────"
+  if have_systemd_unit; then
+    printf "  systemd: "; systemctl --user is-active "$SERVICE" 2>/dev/null || true
+    systemctl --user is-enabled "$SERVICE" 2>/dev/null | sed 's/^/  boot:    /'
+  elif wd_nohup_alive; then
+    echo "  nohup: çalışıyor (PID $(cat "$WD_PIDFILE"))"
+  else
+    echo "  çalışmıyor (./memos up ile başlat)"
+  fi
+  [ -f logs/.watchdog.pause ] && echo "  ⏸️  DURAKLATILMIŞ (logs/.watchdog.pause var → restart yok)"
+  return 0
+}
+
+cmd_logs() {
+  echo "📜 canlı log (Ctrl-C ile çık) — trades + heartbeat:"
+  tail -n 20 -f logs/robotic_trading.log 2>/dev/null
+}
+
+cmd_boot_install() {
+  build_release || { echo "❌ derleme başarısız → kurulum iptal."; exit 1; }
+  mkdir -p "$(dirname "$UNIT_DST")"
+  cat > "$UNIT_DST" <<UNIT
+# Memos Trading Engine Watchdog — systemd --user (KÖK GEREKTİRMEZ). ./memos boot-install üretir.
+[Unit]
+Description=Memos Trading Engine Watchdog (TUI/tmux)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$REPO_DIR
+ExecStart=$REPO_DIR/scripts/watchdog.sh --release
+Environment=WATCHDOG_TARGET=tui
+Restart=always
+RestartSec=10
+# KillMode=process: systemd YALNIZ watchdog'u yönetir; tmux motorunu cgroup'la öldürmez.
+KillMode=process
+
+[Install]
+WantedBy=default.target
+UNIT
+  systemctl --user daemon-reload
+  systemctl --user enable --now "$SERVICE"
+  loginctl enable-linger "$USER" 2>/dev/null || echo "  ⚠️ linger açılamadı (logout'ta durabilir): loginctl enable-linger $USER"
+  echo "✅ boot-install: '$SERVICE' kuruldu + etkin (boot'ta + logout'ta TUI/tmux 7/24)."
+  echo "   durum: ./memos status · izle: ./memos attach · kaldır: ./memos boot-uninstall"
+}
+
+cmd_boot_uninstall() {
+  if have_systemd_unit; then
+    systemctl --user disable --now "$SERVICE" 2>/dev/null || true
+    rm -f "$UNIT_DST"; systemctl --user daemon-reload
+    echo "✅ boot-uninstall: '$SERVICE' kaldırıldı (motor çalışıyorsa ./memos down ile durdur)."
+  else
+    echo "ℹ️  Kurulu systemd servisi yok."
+  fi
+}
+
+usage() { sed -n '2,19p' "$0"; }
+
+case "${1:-status}" in
+  config)         exec ./scripts/launch.sh ;;
+  start)          exec ./run_rtc.sh --tui --release ;;
+  build)          build_release ;;
+  up)             cmd_up ;;
+  down)           cmd_down ;;
+  restart)        cmd_down; sleep 1; cmd_up ;;
+  status)         cmd_status ;;
+  attach)         exec ./scripts/tui_daemon.sh attach ;;
+  logs)           cmd_logs ;;
+  reset)          shift; exec ./scripts/reset_state.sh "$@" ;;
+  boot-install)   cmd_boot_install ;;
+  boot-uninstall) cmd_boot_uninstall ;;
+  -h|--help|help) usage ;;
+  *) echo "Bilinmeyen komut: $1"; echo; usage; exit 1 ;;
+esac

@@ -15,6 +15,12 @@ set -e
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$WORKSPACE_ROOT"
 
+# .launch.conf RUNTIME env'ini yükle (TEK KAYNAK) → doğrudan ./run_rtc.sh çağrısı da launch.sh
+# menüsüyle aynı ayarları alır. launch.sh zaten export ediyorsa çift-yükleme zararsız (aynı değer).
+# shellcheck source=scripts/lib_launchconf.sh
+. "$WORKSPACE_ROOT/scripts/lib_launchconf.sh"
+load_launch_conf "$WORKSPACE_ROOT/scripts/.launch.conf"
+
 # Varsayılanlar
 TARGET_BIN="rtc_tui"
 BUILD_MODE="debug"

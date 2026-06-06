@@ -38,7 +38,9 @@ cmd_start() {
         exit 1
     fi
     if alive; then echo "ℹ️  TUI zaten çalışıyor (tmux '$SESSION'). 'attach' ya da 'restart'."; exit 0; fi
-    tmux new-session -d -s "$SESSION" "$binary"
+    # .launch.conf env'ini _engine_exec.sh içinden yükle → tmux oturumu interaktif çalıştırmayla
+    # AYNI env'i alır (XS/graded/rejim ayarları daemon'da da geçerli). [[project_daemon_env_pending]]
+    tmux new-session -d -s "$SESSION" "$REPO_DIR/scripts/_engine_exec.sh $REPO_DIR/$binary"
     sleep 1
     if alive; then
         echo "✅ TUI başlatıldı (tmux '$SESSION', $mode). İzle: ./scripts/tui_daemon.sh attach"
