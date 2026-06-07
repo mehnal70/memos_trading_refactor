@@ -26,12 +26,19 @@ SESSION="${MEMOS_TUI_SESSION:-memos}"
 SERVICE="memos-watchdog"
 UNIT_DST="$HOME/.config/systemd/user/${SERVICE}.service"
 WD_PIDFILE="logs/.watchdog.pid"
+DASH_SERVICE="memos-dashboard"
+DASH_UNIT_DST="$HOME/.config/systemd/user/${DASH_SERVICE}.service"
+DASH_PIDFILE="logs/.dashboard.pid"
+DASH_PORT="${MEMOS_DASH_PORT:-8090}"
 HEARTBEAT="logs/heartbeat.jsonl"
 mkdir -p logs
 
 have_systemd_unit() { [ -f "$UNIT_DST" ]; }
 systemd_active()   { systemctl --user is-active --quiet "$SERVICE" 2>/dev/null; }
 wd_nohup_alive()   { [ -f "$WD_PIDFILE" ] && kill -0 "$(cat "$WD_PIDFILE" 2>/dev/null)" 2>/dev/null; }
+have_dash_unit()   { [ -f "$DASH_UNIT_DST" ]; }
+dash_systemd_active() { systemctl --user is-active --quiet "$DASH_SERVICE" 2>/dev/null; }
+dash_alive() { dash_systemd_active || { [ -f "$DASH_PIDFILE" ] && kill -0 "$(cat "$DASH_PIDFILE" 2>/dev/null)" 2>/dev/null; }; }
 
 build_release() {
   echo "🔨 release TUI binary derleniyor (gerekirse)..."
@@ -51,6 +58,7 @@ cmd_up() {
     echo "✅ up (nohup): watchdog (TARGET=tui, PID $(cat "$WD_PIDFILE")) → motoru tmux '$SESSION' içinde tutuyor."
     echo "   (kalıcı boot için: ./memos boot-install)"
   fi
+  echo "── Panel ──"; dash_start || true   # mobil izleme paneli de kalksın
   echo "   izle: ./memos attach · durum: ./memos status · durdur: ./memos down"
 }
 
@@ -72,7 +80,8 @@ cmd_down() {
   rm -f "$WD_PIDFILE" 2>/dev/null
   ./scripts/tui_daemon.sh stop 2>/dev/null || true
   ./scripts/engine.sh stop 2>/dev/null || true   # olası headless artığı
-  echo "✅ down: watchdog + motor durduruldu."
+  dash_stop
+  echo "✅ down: watchdog + motor + panel durduruldu."
 }
 
 cmd_status() {
@@ -121,42 +130,71 @@ KillMode=process
 [Install]
 WantedBy=default.target
 UNIT
+  # Mobil izleme paneli — ayrı systemd --user servisi (boot'ta motorla birlikte kalkar).
+  dash_stop  # olası nohup paneli durdur (port çakışmasını önle)
+  cat > "$DASH_UNIT_DST" <<UNIT
+# Memos mobil izleme paneli — systemd --user (snapshot.json sunar; salt-okuma). ./memos boot-install üretir.
+[Unit]
+Description=Memos RTC Dashboard (mobil izleme)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$REPO_DIR
+ExecStart=/usr/bin/env python3 $REPO_DIR/scripts/dashboard_server.py $DASH_PORT
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+UNIT
   systemctl --user daemon-reload
-  systemctl --user enable --now "$SERVICE"
+  systemctl --user enable --now "$SERVICE" "$DASH_SERVICE"
   loginctl enable-linger "$USER" 2>/dev/null || echo "  ⚠️ linger açılamadı (logout'ta durabilir): loginctl enable-linger $USER"
-  echo "✅ boot-install: '$SERVICE' kuruldu + etkin (boot'ta + logout'ta TUI/tmux 7/24)."
+  echo "✅ boot-install: '$SERVICE' + '$DASH_SERVICE' kuruldu + etkin (boot'ta + logout'ta TUI 7/24 + mobil panel)."
+  dash_print_urls
   echo "   durum: ./memos status · izle: ./memos attach · kaldır: ./memos boot-uninstall"
 }
 
-DASH_PIDFILE="logs/.dashboard.pid"
-DASH_PORT="${MEMOS_DASH_PORT:-8090}"
-dash_alive() { [ -f "$DASH_PIDFILE" ] && kill -0 "$(cat "$DASH_PIDFILE" 2>/dev/null)" 2>/dev/null; }
+dash_print_urls() {
+  local lan; lan="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(192|10|172)\.' | head -1)"
+  [ -n "$lan" ] && echo "   LAN     : http://$lan:$DASH_PORT"
+  local ts; ts="$(tailscale ip -4 2>/dev/null | head -1)"
+  [ -n "$ts" ] && echo "   Tailscale: http://$ts:$DASH_PORT  (her yerden)" \
+               || echo "   Tünel    : Tailscale yok → her-yerden için: curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up"
+}
+dash_start() {  # systemd-farkında: unit kuruluysa systemctl, değilse nohup
+  if dash_alive; then echo "ℹ️  panel zaten çalışıyor (port $DASH_PORT)."; dash_print_urls; return 0; fi
+  if have_dash_unit; then systemctl --user start "$DASH_SERVICE"
+  else
+    nohup python3 scripts/dashboard_server.py "$DASH_PORT" >>logs/dashboard.log 2>&1 &
+    echo $! > "$DASH_PIDFILE"
+  fi
+  sleep 1
+  dash_alive && echo "✅ panel çalışıyor (salt-izleme, port $DASH_PORT):" || { echo "❌ panel başlamadı (logs/dashboard.log)."; return 1; }
+  dash_print_urls
+}
+dash_stop() {
+  if have_dash_unit && dash_systemd_active; then systemctl --user stop "$DASH_SERVICE"; echo "🛑 panel durduruldu (systemd)."; fi
+  if [ -f "$DASH_PIDFILE" ] && kill -0 "$(cat "$DASH_PIDFILE" 2>/dev/null)" 2>/dev/null; then
+    kill "$(cat "$DASH_PIDFILE")" 2>/dev/null; echo "🛑 panel durduruldu (nohup)."
+  fi
+  rm -f "$DASH_PIDFILE"
+}
 cmd_dashboard() {
   case "${1:-start}" in
-    stop)
-      if dash_alive; then kill "$(cat "$DASH_PIDFILE")" 2>/dev/null; rm -f "$DASH_PIDFILE"; echo "🛑 panel durduruldu."
-      else echo "ℹ️  çalışan panel yok."; fi ;;
-    start|"")
-      if dash_alive; then echo "ℹ️  panel zaten çalışıyor (PID $(cat "$DASH_PIDFILE"))."; else
-        nohup python3 scripts/dashboard_server.py "$DASH_PORT" >>logs/dashboard.log 2>&1 &
-        echo $! > "$DASH_PIDFILE"; sleep 1
-        dash_alive || { echo "❌ panel başlamadı (logs/dashboard.log'a bak)."; exit 1; }
-        echo "✅ panel çalışıyor (salt-izleme, port $DASH_PORT):"
-      fi
-      local lan; lan="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(192|10|172)\.' | head -1)"
-      [ -n "$lan" ] && echo "   LAN     : http://$lan:$DASH_PORT"
-      local ts; ts="$(tailscale ip -4 2>/dev/null | head -1)"
-      [ -n "$ts" ] && echo "   Tailscale: http://$ts:$DASH_PORT  (her yerden)" || echo "   Tünel    : Tailscale kurulu değil → her-yerden erişim için: curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up"
-      ;;
+    stop)     dash_stop ;;
+    start|"") dash_start ;;
     *) echo "kullanım: ./memos dashboard {start|stop}" ;;
   esac
 }
 
 cmd_boot_uninstall() {
-  if have_systemd_unit; then
-    systemctl --user disable --now "$SERVICE" 2>/dev/null || true
-    rm -f "$UNIT_DST"; systemctl --user daemon-reload
-    echo "✅ boot-uninstall: '$SERVICE' kaldırıldı (motor çalışıyorsa ./memos down ile durdur)."
+  if have_systemd_unit || have_dash_unit; then
+    systemctl --user disable --now "$SERVICE" "$DASH_SERVICE" 2>/dev/null || true
+    rm -f "$UNIT_DST" "$DASH_UNIT_DST"; systemctl --user daemon-reload
+    echo "✅ boot-uninstall: '$SERVICE' + '$DASH_SERVICE' kaldırıldı (motor çalışıyorsa ./memos down ile durdur)."
   else
     echo "ℹ️  Kurulu systemd servisi yok."
   fi
