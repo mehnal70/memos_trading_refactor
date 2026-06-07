@@ -26,6 +26,7 @@ KEYS=(
   XS_LIVE_MAX_DD_PCT XS_LIVE_CB_COOLDOWN_SECS
   GRADED_ENTRY_ENABLED GRADED_TRANCHE_WEIGHTS GRADED_FAVORABLE_MOVE_PCT
   GRADED_ADVERSE_MOVE_PCT GRADED_REQUIRE_HTF
+  SCREENER_MIN_SCORE SCREENER_TOP_N SCREENER_MIN_VOLUME
 )
 declare -A GROUP TYPE DESC VAL
 set_meta(){ GROUP[$1]=$2; TYPE[$1]=$3; DESC[$1]=$4; }
@@ -71,6 +72,12 @@ set_meta GRADED_TRANCHE_WEIGHTS   "Kademeli" "text"                  "kademe ağ
 set_meta GRADED_FAVORABLE_MOVE_PCT "Kademeli" "text"                 "pyramiding eşiği: lehte hareket %% (trend rejim)"
 set_meta GRADED_ADVERSE_MOVE_PCT  "Kademeli" "text"                  "averaging eşiği: aleyhte hareket %% (ranging rejim)"
 set_meta GRADED_REQUIRE_HTF       "Kademeli" "bool"                  "ek kademe için HTF trend hizası şart"
+# ── Screener (normal/XS-dışı yolun sembol evreni kapıları) ───────────────────────────────────
+# Normal yol screener'ın seçtiği top-N sembolde işler. Edge tabanı + likidite ile junk (düşük-cap
+# alt churn'ü, örn. SIREN) evrene hiç girmez → yalnız gerçek edge'li sembol işlenir. XS bağımsız.
+set_meta SCREENER_MIN_SCORE       "Screener" "text"                  "edge tabanı: composite<bu → evrene girmez (0=kapalı; TUI Top c= ile kalibre)"
+set_meta SCREENER_TOP_N           "Screener" "text"                  "evrene alınacak azami sembol (default 8)"
+set_meta SCREENER_MIN_VOLUME      "Screener" "text"                  "likidite tabanı: ort. mum hacmi < bu → ele (0=kapalı)"
 
 # ── Default'lar (doğrulanmış temiz futures profili) ─────────────────────────────────────────
 defaults(){
@@ -98,6 +105,11 @@ defaults(){
   VAL[GRADED_ENTRY_ENABLED]=0;        VAL[GRADED_TRANCHE_WEIGHTS]="0.4,0.3,0.3"
   VAL[GRADED_FAVORABLE_MOVE_PCT]=1.0; VAL[GRADED_ADVERSE_MOVE_PCT]=1.0
   VAL[GRADED_REQUIRE_HTF]=1
+  # Screener edge tabanı: 0 → kapalı (kod default, mevcut davranış). Normal yolu sıkılaştırmak için
+  # >0 ver (composite = sharpe·0.5+wr·0.3−dd·0.2; 0.35 ≈ anlamlı pozitif sharpe gerektirir). Top-N=8,
+  # likidite tabanı kapalı (mum-hacmi fiyat-bağımlı → güvenilmez; asıl kapı edge tabanı).
+  VAL[SCREENER_MIN_SCORE]=0;          VAL[SCREENER_TOP_N]=8
+  VAL[SCREENER_MIN_VOLUME]=0
 }
 latest_report(){ ls -t reports/edge_sweep_*.json 2>/dev/null | head -1; }
 

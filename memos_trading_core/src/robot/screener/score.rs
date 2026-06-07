@@ -212,17 +212,23 @@ pub struct SelectionDiff {
 ///   - `current_workers`'tan pinned olmayan + selected olmayan her sembol `to_remove`.
 ///
 /// `scored` zaten composite skora göre büyükten küçüğe sıralı olmalı.
+///
+/// `min_score`: EDGE TABANI — composite'i bunun ALTINDA kalan aday evrene HİÇ girmez (top-N dolu
+/// olmasa bile). Zayıf piyasada "en az kötü N"i almak yerine yalnız gerçekten edge taşıyan sembolleri
+/// işler (boşsa normal yol o turda işlem açmaz; XS bağımsız sürer). pinned MUAF (operatör pini her
+/// zaman kalır). 0.0 → kapalı (mevcut davranış birebir, sıfır regresyon). [[feedback_autonomy_first]]
 pub fn select_top_n_diff(
     current_workers: &[String],
     pinned: &[String],
     scored: &[(String, ScreenerScore)],
     top_n: usize,
     max_workers: usize,
+    min_score: f64,
 ) -> SelectionDiff {
     let mut selected: Vec<String> = Vec::new();
     let cap = top_n.min(max_workers);
 
-    // 1) Pinned'i öne koy (max_workers'ı aşmadan).
+    // 1) Pinned'i öne koy (max_workers'ı aşmadan; edge tabanından MUAF).
     for p in pinned {
         if selected.len() >= cap { break; }
         if !selected.iter().any(|s| s == p) {
@@ -230,9 +236,10 @@ pub fn select_top_n_diff(
         }
     }
 
-    // 2) Skorlu adaylardan kalan slotları doldur (pinned ile dup atla).
-    for (name, _) in scored {
+    // 2) Skorlu adaylardan kalan slotları doldur (composite ≥ min_score; pinned ile dup atla).
+    for (name, sc) in scored {
         if selected.len() >= cap { break; }
+        if sc.composite < min_score { continue; } // edge tabanı altı → evrene alma
         if !selected.iter().any(|s| s == name) {
             selected.push(name.clone());
         }
@@ -418,7 +425,7 @@ mod tests {
         let current = vec!["BTCUSDT".into(), "ETHUSDT".into(), "OLDCOIN".into()];
         let pinned  = vec!["BTCUSDT".into()];
         let s = scored(&["ETHUSDT", "SOLUSDT", "AVAXUSDT"]);
-        let d = select_top_n_diff(&current, &pinned, &s, 3, 16);
+        let d = select_top_n_diff(&current, &pinned, &s, 3, 16, 0.0);
         assert_eq!(d.selected, vec!["BTCUSDT".to_string(), "ETHUSDT".into(), "SOLUSDT".into()]);
         assert_eq!(d.to_add, vec!["SOLUSDT".to_string()]);
         assert_eq!(d.to_remove, vec!["OLDCOIN".to_string()]);
@@ -429,7 +436,7 @@ mod tests {
         let current = vec!["BTCUSDT".into()];
         let pinned  = vec!["BTCUSDT".into()];
         // Hiç skorlu aday yok — pinned tek başına kalmalı, kimse to_remove'a girmemeli.
-        let d = select_top_n_diff(&current, &pinned, &[], 5, 16);
+        let d = select_top_n_diff(&current, &pinned, &[], 5, 16, 0.0);
         assert_eq!(d.selected, vec!["BTCUSDT".to_string()]);
         assert!(d.to_add.is_empty());
         assert!(d.to_remove.is_empty());
@@ -439,7 +446,7 @@ mod tests {
     fn diff_caps_at_max_workers_even_with_many_candidates() {
         let pinned = vec!["BTC".into()];
         let s = scored(&["ETH", "SOL", "AVAX", "BNB", "ADA", "DOT"]);
-        let d = select_top_n_diff(&[], &pinned, &s, 10, 4);
+        let d = select_top_n_diff(&[], &pinned, &s, 10, 4, 0.0);
         // max_workers=4: pinned BTC + en yüksek skorlu 3 → 4 toplam
         assert_eq!(d.selected.len(), 4);
         assert_eq!(d.selected[0], "BTC");
@@ -450,7 +457,7 @@ mod tests {
     fn diff_deduplicates_pinned_appearing_in_scored() {
         let pinned = vec!["BTC".into()];
         let s = scored(&["BTC", "ETH", "SOL"]); // BTC skorlu listede de var
-        let d = select_top_n_diff(&[], &pinned, &s, 3, 16);
+        let d = select_top_n_diff(&[], &pinned, &s, 3, 16, 0.0);
         // BTC bir kere
         assert_eq!(d.selected.iter().filter(|s| *s == "BTC").count(), 1);
         assert_eq!(d.selected, vec!["BTC".to_string(), "ETH".into(), "SOL".into()]);
@@ -461,8 +468,23 @@ mod tests {
         let current = vec!["BTC".into(), "ETH".into()];
         let pinned = vec!["BTC".into()];
         let s = scored(&["ETH"]);
-        let d = select_top_n_diff(&current, &pinned, &s, 2, 16);
+        let d = select_top_n_diff(&current, &pinned, &s, 2, 16, 0.0);
         assert!(d.to_add.is_empty());
         assert!(d.to_remove.is_empty());
+    }
+
+    #[test]
+    fn diff_min_score_excludes_weak_candidates() {
+        // scored helper: A=3, B=2, C=1 (composite, sıralı). Edge tabanı=2.5 → yalnız A geçer.
+        let s = scored(&["A", "B", "C"]);
+        let d = select_top_n_diff(&[], &[], &s, 5, 16, 2.5);
+        assert_eq!(d.selected, vec!["A".to_string()], "taban altı B/C evrene girmemeli");
+        // Taban tümünü elerse normal yol o turda boş seçer (XS bağımsız sürer).
+        let none = select_top_n_diff(&[], &[], &s, 5, 16, 99.0);
+        assert!(none.selected.is_empty(), "hiçbiri tabanı geçmezse seçim boş");
+        // Pinned edge tabanından MUAF: düşük skorlu pinned yine kalır.
+        let dp = select_top_n_diff(&[], &["C".into()], &s, 5, 16, 2.5);
+        assert!(dp.selected.contains(&"C".to_string()), "pinned taban-muaf, kalır");
+        assert!(dp.selected.contains(&"A".to_string()), "tabanı geçen A da seçilir");
     }
 }

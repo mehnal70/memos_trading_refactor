@@ -70,6 +70,11 @@ impl Engine {
         let top_n: usize = env_parse("SCREENER_TOP_N", 8);
         let limit: usize = env_parse("SCREENER_CANDLE_LIMIT", 500);
         let min_volume: f64 = env_parse("SCREENER_MIN_VOLUME", 0.0);
+        // EDGE TABANI: composite'i bunun altında kalan aday evrene HİÇ girmez (top-N dolmasa bile).
+        // Zayıf piyasada "en az kötü N" yerine yalnız gerçek edge'li semboller işlenir → normal yolun
+        // junk churn'ü (örn. düşük-cap alt SIREN) kesilir. 0.0 → kapalı (mevcut davranış birebir).
+        // composite = sharpe·0.5 + wr·0.3 − dd·0.2 (score.rs); TUI "🔭 Top: c=…" satırından kalibre et.
+        let min_score: f64 = env_parse("SCREENER_MIN_SCORE", 0.0);
         let extras: Vec<String> = std::env::var("SCREENER_EXTRA_SYMBOLS").ok()
             .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
             .unwrap_or_default();
@@ -158,8 +163,11 @@ impl Engine {
         scored.sort_by(|a, b| b.1.composite.partial_cmp(&a.1.composite)
             .unwrap_or(std::cmp::Ordering::Equal));
 
-        // 6) Selection delta.
-        let diff = select_top_n_diff(&current_workers, &pinned, &scored, top_n, max_workers);
+        // 6) Selection delta (edge tabanı: composite < min_score adaylar evrene alınmaz; pinned muaf).
+        let below_floor = if min_score > 0.0 {
+            scored.iter().filter(|(_, s)| s.composite < min_score).count()
+        } else { 0 };
+        let diff = select_top_n_diff(&current_workers, &pinned, &scored, top_n, max_workers, min_score);
 
         // 7) Orchestrator'a uygula.
         let (added_ok, removed_ok) = {
@@ -180,8 +188,10 @@ impl Engine {
         // 8) Telemetri — özet + top 5 ayrıntı.
         if let Ok(mut st) = state.lock() {
             st.push_log(format!(
-                "🔭 Screener ✓ skorlandı={} seçilen={} eklendi={} düşürüldü={}",
+                "🔭 Screener ✓ skorlandı={} seçilen={} eklendi={} düşürüldü={}{}",
                 scored.len(), diff.selected.len(), added_ok, removed_ok,
+                if min_score > 0.0 { format!(" · edge-taban={:.2} (altı eleme={})", min_score, below_floor) }
+                else { String::new() },
             ));
             let top_brief: Vec<String> = scored.iter().take(5)
                 .map(|(name, s)| {
