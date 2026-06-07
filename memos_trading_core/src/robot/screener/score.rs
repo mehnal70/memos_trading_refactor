@@ -78,6 +78,7 @@ pub struct ScreenerScore {
     pub trades:      usize,
     pub htf_bias:    HtfBias, // seçim anındaki üst-TF hizası (telemetri + sıralama izi)
     pub edge_bonus:  f64, // WF-onaylı edge bonusu (symbol_strategy üyesi → composite'e additif)
+    pub base_composite: f64, // HTF/edge bonusu ÖNCESİ saf backtest kalitesi (edge tabanı buna bakar)
     pub composite:   f64, // sıralama anahtarı (HTF + edge ayarlı); yüksek = iyi
 }
 
@@ -90,7 +91,8 @@ impl ScreenerScore {
         Self {
             avg_volume, atr_pct,
             sharpe: 0.0, win_rate: 0.0, max_dd_pct: 0.0,
-            trades: 0, htf_bias: HtfBias::Neutral, edge_bonus: 0.0, composite: 0.0,
+            trades: 0, htf_bias: HtfBias::Neutral, edge_bonus: 0.0,
+            base_composite: 0.0, composite: 0.0,
         }
     }
 }
@@ -162,6 +164,7 @@ pub fn score_symbol(
         trades: res.total_trades,
         htf_bias: bias,
         edge_bonus,
+        base_composite: base,
         composite,
     }
 }
@@ -213,10 +216,13 @@ pub struct SelectionDiff {
 ///
 /// `scored` zaten composite skora göre büyükten küçüğe sıralı olmalı.
 ///
-/// `min_score`: EDGE TABANI — composite'i bunun ALTINDA kalan aday evrene HİÇ girmez (top-N dolu
-/// olmasa bile). Zayıf piyasada "en az kötü N"i almak yerine yalnız gerçekten edge taşıyan sembolleri
-/// işler (boşsa normal yol o turda işlem açmaz; XS bağımsız sürer). pinned MUAF (operatör pini her
-/// zaman kalır). 0.0 → kapalı (mevcut davranış birebir, sıfır regresyon). [[feedback_autonomy_first]]
+/// `min_score`: EDGE TABANI — aday SAF backtest kalitesini (base_composite, HTF/edge bonusu ÖNCESİ)
+/// geçmeli VE pozitif sharpe taşımalı; yoksa evrene HİÇ girmez (top-N dolu olmasa bile). Tabanı nihai
+/// composite'e DEĞİL base'e uygularız: aksi halde HTF/edge bonusu zayıf sembolü (örn. SIREN base 0.30,
+/// HTF +0.20 ile 0.50) kapının üstüne iter — bonuslar yalnız SIRALAMAYI değiştirmeli, kapıyı geçirmemeli.
+/// sharpe>0 şartı negatif-sharpe seed'leri (edge bonusuyla şişenleri) eler. Zayıf piyasada hiçbiri
+/// geçmezse normal yol o turda işlem açmaz (XS bağımsız sürer). pinned MUAF. 0.0 → kapalı (mevcut
+/// davranış birebir, sıfır regresyon). [[feedback_autonomy_first]] [[project_xs_momentum]]
 pub fn select_top_n_diff(
     current_workers: &[String],
     pinned: &[String],
@@ -236,10 +242,12 @@ pub fn select_top_n_diff(
         }
     }
 
-    // 2) Skorlu adaylardan kalan slotları doldur (composite ≥ min_score; pinned ile dup atla).
+    // 2) Skorlu adaylardan kalan slotları doldur. Edge tabanı (min_score>0): saf backtest kalitesi
+    //    (base_composite) tabanı geçmeli VE sharpe>0 olmalı — yoksa atla. pinned ile dup atla.
+    let gate = min_score > 0.0; // 0 → kapalı (sıfır regresyon)
     for (name, sc) in scored {
         if selected.len() >= cap { break; }
-        if sc.composite < min_score { continue; } // edge tabanı altı → evrene alma
+        if gate && (sc.sharpe <= 0.0 || sc.base_composite < min_score) { continue; }
         if !selected.iter().any(|s| s == name) {
             selected.push(name.clone());
         }
@@ -473,18 +481,31 @@ mod tests {
         assert!(d.to_remove.is_empty());
     }
 
+    // Edge tabanı testi için açık skor: (base_composite, sharpe) belirle. composite sıralama için.
+    fn sc_bs(name: &str, comp: f64, base: f64, sharpe: f64) -> (String, ScreenerScore) {
+        let mut s = ScreenerScore::empty(0.0, 0.0);
+        s.composite = comp; s.base_composite = base; s.sharpe = sharpe; s.trades = 10;
+        (name.to_string(), s)
+    }
+
     #[test]
-    fn diff_min_score_excludes_weak_candidates() {
-        // scored helper: A=3, B=2, C=1 (composite, sıralı). Edge tabanı=2.5 → yalnız A geçer.
-        let s = scored(&["A", "B", "C"]);
-        let d = select_top_n_diff(&[], &[], &s, 5, 16, 2.5);
-        assert_eq!(d.selected, vec!["A".to_string()], "taban altı B/C evrene girmemeli");
-        // Taban tümünü elerse normal yol o turda boş seçer (XS bağımsız sürer).
-        let none = select_top_n_diff(&[], &[], &s, 5, 16, 99.0);
-        assert!(none.selected.is_empty(), "hiçbiri tabanı geçmezse seçim boş");
-        // Pinned edge tabanından MUAF: düşük skorlu pinned yine kalır.
-        let dp = select_top_n_diff(&[], &["C".into()], &s, 5, 16, 2.5);
-        assert!(dp.selected.contains(&"C".to_string()), "pinned taban-muaf, kalır");
-        assert!(dp.selected.contains(&"A".to_string()), "tabanı geçen A da seçilir");
+    fn diff_min_score_gates_on_base_quality_and_positive_sharpe() {
+        // GOOD: base 0.40 ≥ taban + sharpe>0 → geçer.
+        // SIREN-tipi: nihai composite yüksek (0.50, HTF şişmesi) ama base 0.30 < taban → ELENİR.
+        // BEAT-tipi: composite taban-üstü (edge bonusu) ama sharpe<0 → ELENİR.
+        let s = vec![
+            sc_bs("SIREN", 0.50, 0.30, 0.27),  // base düşük → elenmeli
+            sc_bs("BEAT",  0.47, 0.17, -0.24), // neg sharpe → elenmeli
+            sc_bs("GOOD",  0.45, 0.40, 0.60),  // base yüksek + poz sharpe → geçmeli
+        ];
+        let d = select_top_n_diff(&[], &[], &s, 5, 16, 0.35);
+        assert_eq!(d.selected, vec!["GOOD".to_string()], "yalnız base≥taban + sharpe>0 geçer");
+        // min_score=0 → kapı kapalı, hepsi geçer (sıfır regresyon).
+        let off = select_top_n_diff(&[], &[], &s, 5, 16, 0.0);
+        assert_eq!(off.selected.len(), 3, "taban 0 → kapı kapalı, tümü seçilir");
+        // Pinned MUAF: düşük base/neg sharpe pinned yine kalır.
+        let dp = select_top_n_diff(&[], &["SIREN".into()], &s, 5, 16, 0.35);
+        assert!(dp.selected.contains(&"SIREN".to_string()), "pinned taban-muaf");
+        assert!(dp.selected.contains(&"GOOD".to_string()));
     }
 }

@@ -163,9 +163,9 @@ impl Engine {
         scored.sort_by(|a, b| b.1.composite.partial_cmp(&a.1.composite)
             .unwrap_or(std::cmp::Ordering::Equal));
 
-        // 6) Selection delta (edge tabanı: composite < min_score adaylar evrene alınmaz; pinned muaf).
+        // 6) Selection delta (edge tabanı: base_composite < min_score VEYA sharpe≤0 → evrene alınmaz; pinned muaf).
         let below_floor = if min_score > 0.0 {
-            scored.iter().filter(|(_, s)| s.composite < min_score).count()
+            scored.iter().filter(|(_, s)| s.sharpe <= 0.0 || s.base_composite < min_score).count()
         } else { 0 };
         let diff = select_top_n_diff(&current_workers, &pinned, &scored, top_n, max_workers, min_score);
 
