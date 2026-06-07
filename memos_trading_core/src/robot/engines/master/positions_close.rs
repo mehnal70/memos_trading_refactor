@@ -340,6 +340,19 @@ impl Engine {
                 }
             }
 
+            // 💬 Telegram: kapanış özeti (net P&L). Telegram-only — UI log'u aşağıda zaten var.
+            // Per-sembol key → aynı sembolün hızlı yeniden-kapanışı 60s throttle; semboller bağımsız.
+            if let Some(n) = st.notifier.as_ref() {
+                let mark = if net_pnl_val >= 0.0 { "🟢" } else { "🔴" };
+                n.notify(
+                    &format!("close-{symbol}"),
+                    crate::robot::infra::telegram_notifier::Severity::Info,
+                    &format!("{mark} {symbol} {} kapandı · net ${:.2} ({:+.2}%) · {} · {}",
+                        if pos.is_long { "LONG" } else { "SHORT" },
+                        net_pnl_val, net_pnl_pct_val, reason.as_str(), pos.trade_type),
+                );
+            }
+
             // ─── ScalpSwing A3: kanal-bazlı stats güncellemesi ──────────────
             // pos.kind None ise Regular akış (klasik strateji yolu) → no-op.
             // Some(Scalp/Swing) ise ilgili ScalpSwingStats kanal'ına pnl

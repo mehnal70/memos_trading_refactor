@@ -178,10 +178,16 @@ impl Engine {
         let in_cb_cooldown = cb_until.map(|u| cb_now < u).unwrap_or(false);
         let dd_pct = xs_book_drawdown_pct(open_pnl_sum, equity);
         if xs.max_drawdown_pct > 0.0 && dd_pct <= -xs.max_drawdown_pct {
-            // TETİK: cooldown mührü (tek lock); kitap flat → plan açık XS'i kapatır, yeni açmaz.
+            // TETİK: cooldown mührü + 💬 Telegram (Critical, nadir olay → spam yok). Tek lock.
             if let Ok(st) = state.lock() {
                 if let Ok(mut cb) = st.finance.xs_circuit_breaker_until.write() {
                     *cb = Some(cb_now + std::time::Duration::from_secs(xs.cb_cooldown_secs));
+                }
+                if let Some(n) = st.notifier.as_ref() {
+                    n.notify("xs-circuit-breaker",
+                        crate::robot::infra::telegram_notifier::Severity::Critical,
+                        &format!("🔌 XS DEVRE KESİCİ: kitap DD %{:.2} → FLAT + {}sn cooldown",
+                            dd_pct, xs.cb_cooldown_secs));
                 }
             }
             let msg = format!(

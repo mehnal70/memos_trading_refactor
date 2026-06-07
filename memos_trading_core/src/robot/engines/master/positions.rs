@@ -821,6 +821,15 @@ impl Engine {
             kelly_fraction, risk_appetite, ml_conf, tp_pct, sl_pct,
             pos_for_log.leverage, regime.as_str(), strategy_name,
         ));
+        // 💬 Telegram: açılış özeti. Telegram-only — UI log'u yukarıda zaten var. Per-sembol key.
+        if let Some(n) = st.notifier.as_ref() {
+            n.notify(
+                &format!("open-{symbol}"),
+                crate::robot::infra::telegram_notifier::Severity::Info,
+                &format!("📈 {symbol} {} açıldı @ {:.4} · {} · ×{:.1}",
+                    if is_long { "LONG" } else { "SHORT" }, entry, strategy_name, pos_for_log.leverage),
+            );
+        }
         // 📝 Periyodik dosya logu: TRADE_OPEN. Logger Arc'ını lock altında clone'la,
         // unlock sonrası IO yap.
         let logger_for_event = st.trading_logger.clone();

@@ -528,7 +528,12 @@ impl Engine {
             let mut last_screener_at: Option<std::time::Instant> = None;
             let mut last_ml_at: Option<std::time::Instant> = None;
             let mut last_symstatus_at: Option<std::time::Instant> = None;
+            let mut last_report_at: Option<std::time::Instant> = None;
             let mut warmup_done = false;
+
+            // 📊 Periyodik portföy özeti → Telegram (push_alert). Default günlük (1440dk); 0 → kapalı.
+            // Telegram kapalıysa (notifier yok) yalnız UI log'una düşer (zararsız).
+            let report_period: u64 = env_parse("SCHEDULER_REPORT_EVERY_MINS", 1440);
 
             // 🗂️ Sembol-statü registry refresh aralığı (exchangeInfo TRADING/BREAK).
             // exchangeInfo yavaş değişir → default 360dk (6s). 0 → kapalı.
@@ -713,6 +718,34 @@ impl Engine {
                         last_ml_at = Some(now);
                     } else if last_ml_at.is_none() {
                         last_ml_at = Some(now);
+                    }
+                }
+
+                // 📊 Periyodik portföy özeti → Telegram + UI log. İlk tur (None) boot'ta "ayaktayım"
+                // özeti gönderir; sonra report_period'da bir. Tüm okumalar locale alınıp push_alert mut.
+                if report_period > 0 {
+                    let due = match last_report_at {
+                        Some(t) => now.duration_since(t) >= Duration::from_secs(report_period * 60),
+                        None    => true,
+                    };
+                    if due {
+                        if let Ok(mut st) = st_sched.lock() {
+                            let eq = st.finance.equity;
+                            let start = st.finance.starting_capital.max(1.0);
+                            let ret = (eq - start) / start * 100.0;
+                            let (n_open, open_pnl) = st.finance.live_positions.read().ok()
+                                .map(|p| (p.len(), p.values().map(|x| x.calculate_pnl()).sum::<f64>()))
+                                .unwrap_or((0, 0.0));
+                            let closed = st.finance.closed_trades_total.load(Ordering::Relaxed);
+                            let fees = st.finance.live_execution_costs.read().ok()
+                                .map(|c| c.commission_usd).unwrap_or(0.0);
+                            let msg = format!(
+                                "📊 Memos özet · equity ${:.2} ({:+.2}%) · açık {} (P&L ${:+.2}) · kapanan {} · komisyon ${:.2}",
+                                eq, ret, n_open, open_pnl, closed, fees);
+                            st.push_alert("portfolio-report",
+                                crate::robot::infra::telegram_notifier::Severity::Info, msg);
+                        }
+                        last_report_at = Some(now);
                     }
                 }
 
