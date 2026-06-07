@@ -447,6 +447,16 @@ impl Engine {
                 .unwrap_or(default_mult);
             let trailing_stop = if is_long { entry - atr * atr_mult }
                                 else       { entry + atr * atr_mult };
+            // 🧊 KESİTSEL STOPSUZ: XS pozisyonları per-bacak stop KULLANMAZ — risk rank-rebalance +
+            // rejim-gate + portföy devre kesici ile yönetilir (tek-bacak stop market-nötr dengeyi
+            // bozar). Bu döngü XS'i zaten enforce etmiyordu; seviyeleri 0'la → TUI/bot/snapshot "—"
+            // gösterir (yanıltıcı ÖLÜ rakam olmaz). XS çıkışı (StrategySignal) live fiyat kullanır,
+            // stop_loss'a bağlı değil → sıfırlama güvenli. [[project_xs_momentum]]
+            let (stop_loss, take_profit, trailing_stop) = if xs_sizing.is_some() {
+                (0.0, 0.0, 0.0)
+            } else {
+                (stop_loss, take_profit, trailing_stop)
+            };
             // Otonom leverage: ParameterStore.resolve_leverage rejim/conf/win_rate/noise
             // ağırlıklı bir değer döndürür. LEVERAGE_ENABLED=false (default) ise 1.0
             // → spot davranış. Stats yoksa noise faktörü None ile devre dışı.
