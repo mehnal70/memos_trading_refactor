@@ -15,6 +15,7 @@
 #   ./memos logs              # canlı log akışı (trades + heartbeat)
 #   ./memos reset [args...]   # state/log/history reset (reset_state.sh'e geçer; örn: --all -y)
 #   ./memos dashboard         # mobil izleme paneli (telefon tarayıcı; salt-okuma) · stop ile durdur
+#   ./memos bot               # Telegram salt-okuma sorgu botu (/status /pos /pnl /trades) · stop ile durdur
 #   ./memos boot-install      # boot'ta otomatik başlat (systemd --user, TUI/tmux + linger)
 #   ./memos boot-uninstall    # boot otomatiğini kaldır
 #   ./memos build             # sadece release TUI binary'i derle
@@ -30,6 +31,9 @@ DASH_SERVICE="memos-dashboard"
 DASH_UNIT_DST="$HOME/.config/systemd/user/${DASH_SERVICE}.service"
 DASH_PIDFILE="logs/.dashboard.pid"
 DASH_PORT="${MEMOS_DASH_PORT:-8090}"
+BOT_SERVICE="memos-bot"
+BOT_UNIT_DST="$HOME/.config/systemd/user/${BOT_SERVICE}.service"
+BOT_PIDFILE="logs/.bot.pid"
 HEARTBEAT="logs/heartbeat.jsonl"
 mkdir -p logs
 
@@ -39,6 +43,10 @@ wd_nohup_alive()   { [ -f "$WD_PIDFILE" ] && kill -0 "$(cat "$WD_PIDFILE" 2>/dev
 have_dash_unit()   { [ -f "$DASH_UNIT_DST" ]; }
 dash_systemd_active() { systemctl --user is-active --quiet "$DASH_SERVICE" 2>/dev/null; }
 dash_alive() { dash_systemd_active || { [ -f "$DASH_PIDFILE" ] && kill -0 "$(cat "$DASH_PIDFILE" 2>/dev/null)" 2>/dev/null; }; }
+have_bot_unit()    { [ -f "$BOT_UNIT_DST" ]; }
+bot_systemd_active() { systemctl --user is-active --quiet "$BOT_SERVICE" 2>/dev/null; }
+bot_configured() { . scripts/lib_launchconf.sh 2>/dev/null; load_launch_conf 2>/dev/null; [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; }
+bot_alive() { bot_systemd_active || { [ -f "$BOT_PIDFILE" ] && kill -0 "$(cat "$BOT_PIDFILE" 2>/dev/null)" 2>/dev/null; }; }
 
 build_release() {
   echo "🔨 release TUI binary derleniyor (gerekirse)..."
@@ -59,6 +67,7 @@ cmd_up() {
     echo "   (kalıcı boot için: ./memos boot-install)"
   fi
   echo "── Panel ──"; dash_start || true   # mobil izleme paneli de kalksın
+  echo "── Telegram bot ──"; bot_start || true   # salt-okuma sorgu botu
   echo "   izle: ./memos attach · durum: ./memos status · durdur: ./memos down"
 }
 
@@ -81,7 +90,8 @@ cmd_down() {
   ./scripts/tui_daemon.sh stop 2>/dev/null || true
   ./scripts/engine.sh stop 2>/dev/null || true   # olası headless artığı
   dash_stop
-  echo "✅ down: watchdog + motor + panel durduruldu."
+  bot_stop
+  echo "✅ down: watchdog + motor + panel + bot durduruldu."
 }
 
 cmd_status() {
@@ -98,7 +108,11 @@ cmd_status() {
   fi
   [ -f logs/.watchdog.pause ] && echo "  ⏸️  DURAKLATILMIŞ (logs/.watchdog.pause var → restart yok)"
   echo "── Panel ──────────────────────────────"
-  if dash_alive; then echo "  çalışıyor (PID $(cat "$DASH_PIDFILE"), port $DASH_PORT)"; else echo "  kapalı (./memos dashboard ile başlat)"; fi
+  if dash_alive; then echo "  çalışıyor (port $DASH_PORT)"; else echo "  kapalı (./memos dashboard ile başlat)"; fi
+  echo "── Telegram bot ───────────────────────"
+  if bot_alive; then echo "  çalışıyor (/status /pos /pnl /trades /report)"
+  elif ! bot_configured; then echo "  yapılandırılmamış (.launch.conf TELEGRAM_* boş)"
+  else echo "  kapalı (./memos bot ile başlat)"; fi
   return 0
 }
 
@@ -149,10 +163,33 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 UNIT
+  # Telegram sorgu botu — token+chat varsa ayrı systemd servisi olarak kur.
+  local bot_units="$SERVICE $DASH_SERVICE"
+  if bot_configured; then
+    bot_stop  # olası nohup botu durdur
+    cat > "$BOT_UNIT_DST" <<UNIT
+# Memos Telegram salt-okuma sorgu botu — systemd --user. ./memos boot-install üretir.
+[Unit]
+Description=Memos RTC Telegram Bot (salt-okuma sorgu)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$REPO_DIR
+ExecStart=/usr/bin/env python3 $REPO_DIR/scripts/telegram_bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+UNIT
+    bot_units="$bot_units $BOT_SERVICE"
+  fi
   systemctl --user daemon-reload
-  systemctl --user enable --now "$SERVICE" "$DASH_SERVICE"
+  systemctl --user enable --now $bot_units
   loginctl enable-linger "$USER" 2>/dev/null || echo "  ⚠️ linger açılamadı (logout'ta durabilir): loginctl enable-linger $USER"
-  echo "✅ boot-install: '$SERVICE' + '$DASH_SERVICE' kuruldu + etkin (boot'ta + logout'ta TUI 7/24 + mobil panel)."
+  echo "✅ boot-install: $bot_units kuruldu + etkin (boot'ta + logout'ta 7/24)."
   dash_print_urls
   echo "   durum: ./memos status · izle: ./memos attach · kaldır: ./memos boot-uninstall"
 }
@@ -190,17 +227,44 @@ cmd_dashboard() {
   esac
 }
 
+bot_start() {  # Telegram salt-okuma sorgu botu (token+chat yoksa atla). systemd-farkında.
+  if ! bot_configured; then echo "ℹ️  Telegram bot: token/chat boş (.launch.conf) → atlandı."; return 0; fi
+  if bot_alive; then echo "ℹ️  Telegram bot zaten çalışıyor."; return 0; fi
+  if have_bot_unit; then systemctl --user start "$BOT_SERVICE"
+  else
+    nohup python3 scripts/telegram_bot.py >>logs/bot.log 2>&1 &
+    echo $! > "$BOT_PIDFILE"
+  fi
+  sleep 1
+  bot_alive && echo "✅ Telegram bot çalışıyor (/status /pos /pnl /trades /report /help)" \
+            || echo "❌ bot başlamadı (logs/bot.log)."
+}
+bot_stop() {
+  if have_bot_unit && bot_systemd_active; then systemctl --user stop "$BOT_SERVICE"; echo "🛑 Telegram bot durduruldu (systemd)."; fi
+  if [ -f "$BOT_PIDFILE" ] && kill -0 "$(cat "$BOT_PIDFILE" 2>/dev/null)" 2>/dev/null; then
+    kill "$(cat "$BOT_PIDFILE")" 2>/dev/null; echo "🛑 Telegram bot durduruldu (nohup)."
+  fi
+  rm -f "$BOT_PIDFILE"
+}
+cmd_bot() {
+  case "${1:-start}" in
+    stop)     bot_stop ;;
+    start|"") bot_start ;;
+    *) echo "kullanım: ./memos bot {start|stop}" ;;
+  esac
+}
+
 cmd_boot_uninstall() {
-  if have_systemd_unit || have_dash_unit; then
-    systemctl --user disable --now "$SERVICE" "$DASH_SERVICE" 2>/dev/null || true
-    rm -f "$UNIT_DST" "$DASH_UNIT_DST"; systemctl --user daemon-reload
-    echo "✅ boot-uninstall: '$SERVICE' + '$DASH_SERVICE' kaldırıldı (motor çalışıyorsa ./memos down ile durdur)."
+  if have_systemd_unit || have_dash_unit || have_bot_unit; then
+    systemctl --user disable --now "$SERVICE" "$DASH_SERVICE" "$BOT_SERVICE" 2>/dev/null || true
+    rm -f "$UNIT_DST" "$DASH_UNIT_DST" "$BOT_UNIT_DST"; systemctl --user daemon-reload
+    echo "✅ boot-uninstall: motor + panel + bot servisleri kaldırıldı (çalışıyorsa ./memos down ile durdur)."
   else
     echo "ℹ️  Kurulu systemd servisi yok."
   fi
 }
 
-usage() { sed -n '2,20p' "$0"; }
+usage() { sed -n '2,21p' "$0"; }
 
 case "${1:-status}" in
   config)         exec ./scripts/launch.sh ;;
@@ -214,6 +278,7 @@ case "${1:-status}" in
   logs)           cmd_logs ;;
   reset)          shift; exec ./scripts/reset_state.sh "$@" ;;
   dashboard)      shift; cmd_dashboard "$@" ;;
+  bot)            shift; cmd_bot "$@" ;;
   boot-install)   cmd_boot_install ;;
   boot-uninstall) cmd_boot_uninstall ;;
   -h|--help|help) usage ;;
