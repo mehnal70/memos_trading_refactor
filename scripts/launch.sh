@@ -27,6 +27,7 @@ KEYS=(
   GRADED_ENTRY_ENABLED GRADED_TRANCHE_WEIGHTS GRADED_FAVORABLE_MOVE_PCT
   GRADED_ADVERSE_MOVE_PCT GRADED_REQUIRE_HTF
   SCREENER_MIN_SCORE SCREENER_TOP_N SCREENER_MIN_VOLUME
+  TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_COOLDOWN_SECS
 )
 declare -A GROUP TYPE DESC VAL
 set_meta(){ GROUP[$1]=$2; TYPE[$1]=$3; DESC[$1]=$4; }
@@ -78,6 +79,11 @@ set_meta GRADED_REQUIRE_HTF       "Kademeli" "bool"                  "ek kademe 
 set_meta SCREENER_MIN_SCORE       "Screener" "text"                  "edge tabanı: composite<bu → evrene girmez (0=kapalı; TUI Top c= ile kalibre)"
 set_meta SCREENER_TOP_N           "Screener" "text"                  "evrene alınacak azami sembol (default 8)"
 set_meta SCREENER_MIN_VOLUME      "Screener" "text"                  "likidite tabanı: ort. mum hacmi < bu → ele (0=kapalı)"
+# ── Telegram push (kritik olay bildirimi: acil kapanış, anomali, devre kesici, regime) ───────
+# BOT_TOKEN+CHAT_ID dolu → push açık (kod from_env ile otonom yakalar). Boş → kapalı.
+set_meta TELEGRAM_BOT_TOKEN       "Telegram" "text"                  "BotFather token (boş=push kapalı)"
+set_meta TELEGRAM_CHAT_ID         "Telegram" "text"                  "hedef chat id (@userinfobot'tan)"
+set_meta TELEGRAM_COOLDOWN_SECS   "Telegram" "text"                  "aynı olay için min aralık sn (default 60)"
 
 # ── Default'lar (doğrulanmış temiz futures profili) ─────────────────────────────────────────
 defaults(){
@@ -110,6 +116,9 @@ defaults(){
   # likidite tabanı kapalı (mum-hacmi fiyat-bağımlı → güvenilmez; asıl kapı edge tabanı).
   VAL[SCREENER_MIN_SCORE]=0;          VAL[SCREENER_TOP_N]=8
   VAL[SCREENER_MIN_VOLUME]=0
+  # Telegram: token+chat boş → push kapalı (sıfır regresyon). Operatör doldurunca açılır.
+  VAL[TELEGRAM_BOT_TOKEN]="";         VAL[TELEGRAM_CHAT_ID]=""
+  VAL[TELEGRAM_COOLDOWN_SECS]=60
 }
 latest_report(){ ls -t reports/edge_sweep_*.json 2>/dev/null | head -1; }
 
