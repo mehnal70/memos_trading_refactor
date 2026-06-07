@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0e14">
+<title>Memos RTC</title>
+<style>
+  :root { --bg:#0b0e14; --card:#151a23; --card2:#1c2330; --fg:#e6edf3; --dim:#8b97a7;
+          --green:#3fb950; --red:#f85149; --yellow:#d29922; --blue:#58a6ff; --line:#222b38; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 -apple-system,system-ui,Segoe UI,Roboto,sans-serif; padding:env(safe-area-inset-top) 10px 30px; }
+  h1 { font-size:15px; margin:14px 2px 8px; color:var(--dim); font-weight:600; letter-spacing:.5px; }
+  .bar { display:flex; align-items:center; justify-content:space-between; padding:12px 4px 6px; position:sticky; top:0; background:var(--bg); z-index:5; }
+  .bar .t { font-weight:700; font-size:17px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .stat { font-size:12px; color:var(--dim); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin:8px 0; }
+  .eq { font-size:30px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .row { display:flex; justify-content:space-between; gap:8px; margin-top:6px; font-variant-numeric:tabular-nums; }
+  .row .k { color:var(--dim); }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; }
+  .mini { background:var(--card2); border-radius:9px; padding:9px 11px; }
+  .mini .k { color:var(--dim); font-size:11px; }
+  .mini .v { font-size:16px; font-weight:600; font-variant-numeric:tabular-nums; margin-top:2px; }
+  .pos { background:var(--card2); border-radius:10px; padding:10px 12px; margin:7px 0; }
+  .pos .h { display:flex; align-items:center; gap:8px; }
+  .sym { font-weight:700; font-size:15px; }
+  .badge { font-size:10px; padding:2px 7px; border-radius:6px; font-weight:700; }
+  .long { background:#10331c; color:var(--green); }
+  .short { background:#3a1416; color:var(--red); }
+  .tag { font-size:10px; color:var(--dim); border:1px solid var(--line); padding:2px 6px; border-radius:6px; }
+  .pnl { margin-left:auto; font-weight:700; font-variant-numeric:tabular-nums; }
+  .sub { color:var(--dim); font-size:12px; margin-top:5px; font-variant-numeric:tabular-nums; display:flex; flex-wrap:wrap; gap:10px; }
+  .pos-green { color:var(--green); } .pos-red { color:var(--red); }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; font-variant-numeric:tabular-nums; }
+  td,th { text-align:right; padding:6px 4px; border-bottom:1px solid var(--line); }
+  td:first-child, th:first-child { text-align:left; }
+  th { color:var(--dim); font-weight:600; }
+  .logs { font:11px/1.5 ui-monospace,Menlo,monospace; color:var(--dim); white-space:pre-wrap; word-break:break-word; }
+  .empty { color:var(--dim); text-align:center; padding:14px; }
+  #banner { display:none; background:#3a1416; color:var(--red); border:1px solid var(--red); border-radius:10px; padding:10px 12px; margin:8px 0; font-weight:600; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <div class="t">Memos RTC</div>
+    <div class="stat"><span id="dot" class="dot"></span><span id="age">…</span> · <span id="phase">—</span></div>
+  </div>
+  <div id="banner">⚠️ Snapshot bayat — motor durmuş olabilir.</div>
+
+  <div class="card">
+    <div id="equity" class="eq">—</div>
+    <div id="ret" class="stat">—</div>
+    <div class="grid">
+      <div class="mini"><div class="k">Açık P&L</div><div id="open" class="v">—</div></div>
+      <div class="mini"><div class="k">Realize P&L</div><div id="real" class="v">—</div></div>
+      <div class="mini"><div class="k">Komisyon</div><div id="fees" class="v">—</div></div>
+      <div class="mini"><div class="k">Anomali</div><div id="anom" class="v">—</div></div>
+    </div>
+  </div>
+
+  <h1>AÇIK POZİSYONLAR (<span id="poscount">0</span>)</h1>
+  <div id="positions"></div>
+
+  <h1>SON KAPANANLAR</h1>
+  <div class="card" id="closedwrap"><div class="empty" id="closedempty">—</div>
+    <table id="closedtbl" style="display:none"><thead><tr><th>Sembol</th><th>Yön</th><th>Net</th><th>Kom.</th><th>Neden</th></tr></thead><tbody id="closed"></tbody></table>
+  </div>
+
+  <h1>SON OLAYLAR</h1>
+  <div class="card"><div id="logs" class="logs">—</div></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = (n,d=2) => (n==null||isNaN(n)) ? '—' : Number(n).toLocaleString('tr-TR',{minimumFractionDigits:d,maximumFractionDigits:d});
+const signCls = n => n>0 ? 'pos-green' : n<0 ? 'pos-red' : '';
+const signStr = (n,d=2,suf='') => (n>=0?'+':'') + fmt(n,d) + suf;
+
+async function tick() {
+  try {
+    const r = await fetch('snapshot.json?_=' + Date.now(), {cache:'no-store'});
+    if (!r.ok) throw new Error(r.status);
+    const age = parseInt(r.headers.get('X-Snapshot-Age') || '0', 10);
+    render(await r.json(), age);
+    $('dot').style.background = age > 30 ? 'var(--yellow)' : 'var(--green)';
+  } catch(e) {
+    $('dot').style.background = 'var(--red)';
+    $('age').textContent = 'bağlantı yok';
+  }
+}
+
+function render(d, age=0) {
+  const f = d.finance || {};
+  const eq = f.total_equity, start = f.starting_capital || 10000;
+  const ret = ((eq - start) / start) * 100;
+  $('equity').textContent = '$' + fmt(eq);
+  $('equity').className = 'eq ' + signCls(ret);
+  $('ret').textContent = signStr(ret,2,'%') + ' · başlangıç $' + fmt(start,0);
+  set('open', f.open_pnl, '$'); set('real', f.realize_pnl, '$');
+  $('fees').textContent = '-$' + fmt(f.total_fees);
+  const anom = Array.isArray(d.anomalies) ? d.anomalies.length : (d.anomalies||0);
+  $('anom').textContent = anom; $('anom').className = 'v ' + (anom>0?'pos-red':'');
+  $('phase').textContent = d.phase || '—';
+
+  // tazelik: snapshot dosya yaşı (X-Snapshot-Age). >30s → motor durmuş olabilir.
+  $('age').textContent = age <= 2 ? 'canlı' : age + 's önce';
+  $('banner').style.display = age > 30 ? 'block' : 'none';
+  if (age > 30) $('banner').textContent = `⚠️ Snapshot ${age}s bayat — motor durmuş olabilir.`;
+
+  // pozisyonlar
+  const P = d.positions || [];
+  $('poscount').textContent = P.length;
+  $('positions').innerHTML = P.length ? P.map(p => {
+    const long = p.is_long, e = p.entry_price, c = p.current_price, lev = p.leverage||1;
+    const up = ((c-e)/e*100) * (long?1:-1) * lev;
+    return `<div class="pos"><div class="h">
+      <span class="sym">${p.symbol}</span>
+      <span class="badge ${long?'long':'short'}">${long?'LONG':'SHORT'}</span>
+      <span class="tag">${p.trade_type||''} ${p.interval||''}</span>
+      <span class="pnl ${signCls(up)}">${signStr(up,2,'%')}</span></div>
+      <div class="sub"><span>giriş ${fmt(e,4)} → ${fmt(c,4)}</span>
+      <span>SL ${fmt(p.stop_loss,4)}</span><span>TP ${fmt(p.take_profit,4)}</span>
+      <span>×${fmt(lev,1)}</span></div></div>`;
+  }).join('') : '<div class="card empty">açık pozisyon yok</div>';
+
+  // kapananlar (net P&L)
+  const T = (d.trade_history || []).slice(-15).reverse();
+  if (T.length) {
+    $('closedtbl').style.display=''; $('closedempty').style.display='none';
+    $('closed').innerHTML = T.map(t => {
+      const net = t.net_pnl!=null ? t.net_pnl : t.pnl;
+      return `<tr><td>${t.symbol}</td><td>${t.is_long?'LONG':'SHORT'}</td>
+        <td class="${signCls(net)}">${signStr(net)}</td>
+        <td class="pos-red">-${fmt(t.commission||0)}</td>
+        <td>${(t.exit_reason||'').replace('_',' ')}</td></tr>`;
+    }).join('');
+  } else { $('closedtbl').style.display='none'; $('closedempty').style.display=''; $('closedempty').textContent='henüz kapanan işlem yok'; }
+
+  // loglar
+  const L = (d.logs || []).slice(-8).map(l => typeof l==='string' ? l : (l.message||'')).reverse();
+  $('logs').textContent = L.length ? L.join('\n') : '—';
+}
+function set(id,v,pre=''){ const el=$(id); el.textContent=(v<0?'-':'+')+pre+fmt(Math.abs(v)); el.className='v '+signCls(v); }
+
+tick(); setInterval(tick, 2000);
+</script>
+</body>
+</html>

@@ -14,6 +14,7 @@
 #   ./memos attach            # tmux panellerini canlı izle (bırak: Ctrl-b d)
 #   ./memos logs              # canlı log akışı (trades + heartbeat)
 #   ./memos reset [args...]   # state/log/history reset (reset_state.sh'e geçer; örn: --all -y)
+#   ./memos dashboard         # mobil izleme paneli (telefon tarayıcı; salt-okuma) · stop ile durdur
 #   ./memos boot-install      # boot'ta otomatik başlat (systemd --user, TUI/tmux + linger)
 #   ./memos boot-uninstall    # boot otomatiğini kaldır
 #   ./memos build             # sadece release TUI binary'i derle
@@ -87,6 +88,8 @@ cmd_status() {
     echo "  çalışmıyor (./memos up ile başlat)"
   fi
   [ -f logs/.watchdog.pause ] && echo "  ⏸️  DURAKLATILMIŞ (logs/.watchdog.pause var → restart yok)"
+  echo "── Panel ──────────────────────────────"
+  if dash_alive; then echo "  çalışıyor (PID $(cat "$DASH_PIDFILE"), port $DASH_PORT)"; else echo "  kapalı (./memos dashboard ile başlat)"; fi
   return 0
 }
 
@@ -125,6 +128,30 @@ UNIT
   echo "   durum: ./memos status · izle: ./memos attach · kaldır: ./memos boot-uninstall"
 }
 
+DASH_PIDFILE="logs/.dashboard.pid"
+DASH_PORT="${MEMOS_DASH_PORT:-8090}"
+dash_alive() { [ -f "$DASH_PIDFILE" ] && kill -0 "$(cat "$DASH_PIDFILE" 2>/dev/null)" 2>/dev/null; }
+cmd_dashboard() {
+  case "${1:-start}" in
+    stop)
+      if dash_alive; then kill "$(cat "$DASH_PIDFILE")" 2>/dev/null; rm -f "$DASH_PIDFILE"; echo "🛑 panel durduruldu."
+      else echo "ℹ️  çalışan panel yok."; fi ;;
+    start|"")
+      if dash_alive; then echo "ℹ️  panel zaten çalışıyor (PID $(cat "$DASH_PIDFILE"))."; else
+        nohup python3 scripts/dashboard_server.py "$DASH_PORT" >>logs/dashboard.log 2>&1 &
+        echo $! > "$DASH_PIDFILE"; sleep 1
+        dash_alive || { echo "❌ panel başlamadı (logs/dashboard.log'a bak)."; exit 1; }
+        echo "✅ panel çalışıyor (salt-izleme, port $DASH_PORT):"
+      fi
+      local lan; lan="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(192|10|172)\.' | head -1)"
+      [ -n "$lan" ] && echo "   LAN     : http://$lan:$DASH_PORT"
+      local ts; ts="$(tailscale ip -4 2>/dev/null | head -1)"
+      [ -n "$ts" ] && echo "   Tailscale: http://$ts:$DASH_PORT  (her yerden)" || echo "   Tünel    : Tailscale kurulu değil → her-yerden erişim için: curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up"
+      ;;
+    *) echo "kullanım: ./memos dashboard {start|stop}" ;;
+  esac
+}
+
 cmd_boot_uninstall() {
   if have_systemd_unit; then
     systemctl --user disable --now "$SERVICE" 2>/dev/null || true
@@ -135,7 +162,7 @@ cmd_boot_uninstall() {
   fi
 }
 
-usage() { sed -n '2,19p' "$0"; }
+usage() { sed -n '2,20p' "$0"; }
 
 case "${1:-status}" in
   config)         exec ./scripts/launch.sh ;;
@@ -148,6 +175,7 @@ case "${1:-status}" in
   attach)         exec ./scripts/tui_daemon.sh attach ;;
   logs)           cmd_logs ;;
   reset)          shift; exec ./scripts/reset_state.sh "$@" ;;
+  dashboard)      shift; cmd_dashboard "$@" ;;
   boot-install)   cmd_boot_install ;;
   boot-uninstall) cmd_boot_uninstall ;;
   -h|--help|help) usage ;;
