@@ -106,6 +106,7 @@ fn position_pos_id_round_trip_via_position_id() {
         opened_at: "2026-05-18T00:00:00Z".into(),
         stop_loss: 95.0, take_profit: 105.0, trailing_stop: 0.0,
         max_favorable_price: 100.0, breakeven_activated: false, kind: None,
+        entry_commission: 0.0,
     };
 
     // Round-trip: string -> PositionId -> aynı hash anahtarı

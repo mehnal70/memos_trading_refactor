@@ -37,6 +37,7 @@ fn open_position(
         opened_at: "2026-05-18T00:00:00Z".into(),
         stop_loss: 0.0, take_profit: 0.0, trailing_stop: 0.0,
         max_favorable_price: entry, breakeven_activated: false, kind: None,
+        entry_commission: 0.0,
     };
     let st = state.lock().unwrap();
     st.finance.live_positions.write().unwrap().insert(symbol.into(), pos);

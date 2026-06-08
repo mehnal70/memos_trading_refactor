@@ -17,10 +17,15 @@ fn trade(symbol: &str, pnl: f64, exit_reason: &str, closed_at: &str) -> ClosedTr
         is_long: true,
         pnl,
         pnl_pct: 0.0,
+        net_pnl: pnl,
+        net_pnl_pct: 0.0,
+        commission: 0.0,
         exit_reason: exit_reason.into(),
         closed_at: closed_at.into(),
         opened_at: String::new(),
         leverage: 1.0,
+        entry_price: 0.0,
+        exit_price: 0.0,
     }
 }
 

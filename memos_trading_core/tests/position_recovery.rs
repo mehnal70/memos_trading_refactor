@@ -35,6 +35,7 @@ fn mk_pos(symbol: &str) -> PositionModel {
         max_favorable_price: 100.0,
         breakeven_activated: false,
         kind: None,
+        entry_commission: 0.0,
     }
 }
 

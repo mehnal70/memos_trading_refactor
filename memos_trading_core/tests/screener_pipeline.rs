@@ -67,7 +67,7 @@ fn scored(named_scores: &[(&str, f64)]) -> Vec<(String, ScreenerScore)> {
 
 #[test]
 fn empty_pool_returns_empty_diff() {
-    let d: SelectionDiff = select_top_n_diff(&[], &[], &[], 8, 16);
+    let d: SelectionDiff = select_top_n_diff(&[], &[], &[], 8, 16, 0.0);
     assert!(d.selected.is_empty());
     assert!(d.to_add.is_empty());
     assert!(d.to_remove.is_empty());
@@ -77,7 +77,7 @@ fn empty_pool_returns_empty_diff() {
 fn pinned_only_keeps_pinned_no_churn() {
     let pinned = vec!["BTCUSDT".to_string()];
     let current = vec!["BTCUSDT".to_string()];
-    let d = select_top_n_diff(&current, &pinned, &[], 8, 16);
+    let d = select_top_n_diff(&current, &pinned, &[], 8, 16, 0.0);
     assert_eq!(d.selected, vec!["BTCUSDT".to_string()]);
     assert!(d.to_add.is_empty());
     assert!(d.to_remove.is_empty());
@@ -88,7 +88,7 @@ fn promotion_and_demotion_in_single_cycle() {
     let current = vec!["BTCUSDT".to_string(), "OLDCOIN".to_string()];
     let pinned  = vec!["BTCUSDT".to_string()];
     let s = scored(&[("ETHUSDT", 1.2), ("AVAXUSDT", 0.9), ("OLDCOIN", 0.1)]);
-    let d = select_top_n_diff(&current, &pinned, &s, 3, 16);
+    let d = select_top_n_diff(&current, &pinned, &s, 3, 16, 0.0);
     // Sıra: BTC (pinned), ETH, AVAX → 3 slot dolu; OLDCOIN düşer.
     assert_eq!(d.selected, vec!["BTCUSDT".to_string(), "ETHUSDT".into(), "AVAXUSDT".into()]);
     assert!(d.to_add.iter().any(|s| s == "ETHUSDT"));
@@ -101,7 +101,7 @@ fn top_n_zero_with_pinned_still_does_not_drop_pinned() {
     // top_n=0 patolojik: kapasitenin 0 olmaması beklenir ama pinned korunmalı.
     let pinned = vec!["BTC".to_string()];
     let current = vec!["BTC".to_string(), "ETH".to_string()];
-    let d = select_top_n_diff(&current, &pinned, &[], 0, 16);
+    let d = select_top_n_diff(&current, &pinned, &[], 0, 16, 0.0);
     // top_n=0 → cap=0 → selected boş; ama pinned'i removal listesine almıyoruz
     // (semantik: pinned hiçbir koşulda düşürülmez).
     assert!(d.selected.is_empty());
@@ -113,7 +113,7 @@ fn top_n_zero_with_pinned_still_does_not_drop_pinned() {
 fn max_workers_cap_applies_after_top_n() {
     let pinned = vec!["BTC".to_string()];
     let s = scored(&[("ETH", 3.0), ("SOL", 2.0), ("AVAX", 1.0), ("BNB", 0.5)]);
-    let d = select_top_n_diff(&[], &pinned, &s, 10, 3); // max_workers=3
+    let d = select_top_n_diff(&[], &pinned, &s, 10, 3, 0.0); // max_workers=3
     assert_eq!(d.selected.len(), 3);
     assert_eq!(d.selected, vec!["BTC".to_string(), "ETH".into(), "SOL".into()]);
 }

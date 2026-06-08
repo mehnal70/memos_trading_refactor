@@ -26,10 +26,15 @@ fn push_closed_trade(state: &AppState, pnl: f64, pnl_pct: f64) {
         is_long: true,
         pnl,
         pnl_pct,
+        net_pnl: pnl,
+        net_pnl_pct: pnl_pct,
+        commission: 0.0,
         exit_reason: "TP".into(),
         closed_at: chrono::Utc::now().to_rfc3339(),
         opened_at: chrono::Utc::now().to_rfc3339(),
         leverage: 1.0,
+        entry_price: 0.0,
+        exit_price: 0.0,
     };
     if let Ok(mut tl) = state.finance.live_closed_trades.write() {
         tl.push(trade);
