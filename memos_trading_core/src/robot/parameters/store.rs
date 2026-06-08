@@ -333,6 +333,8 @@ impl ParameterStore {
             regime_gate: parse_env_bool("XS_LIVE_REGIME_GATE").unwrap_or(d.regime_gate),
             max_drawdown_pct: parse_env_f64("XS_LIVE_MAX_DD_PCT").unwrap_or(d.max_drawdown_pct),
             cb_cooldown_secs: std::env::var("XS_LIVE_CB_COOLDOWN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(d.cb_cooldown_secs),
+            take_profit_pct: parse_env_f64("XS_LIVE_TP_PCT").unwrap_or(d.take_profit_pct),
+            tp_cooldown_secs: std::env::var("XS_LIVE_TP_COOLDOWN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(d.tp_cooldown_secs),
         };
         if store.xs_live.enabled {
             log::info!("📐 kesitsel adanmış mod AÇIK: {} sembol · lookback={} · top_k={} · band={} · {}",

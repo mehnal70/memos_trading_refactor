@@ -198,7 +198,32 @@ impl Engine {
             longs.clear();
             shorts.clear();
         } else if in_cb_cooldown {
-            // Cooldown sürüyor → kitabı flat tut (felaket sonrası aceleci yeniden-giriş churn'ü önlenir).
+            // Cooldown sürüyor → kitabı flat tut (felaket/kâr-al sonrası aceleci yeniden-giriş churn'ü önlenir).
+            longs.clear();
+            shorts.clear();
+        } else if xs.take_profit_pct > 0.0 && dd_pct >= xs.take_profit_pct {
+            // 💰 PORTFÖY-DÜZEYİ TAKE-PROFIT (devre kesicinin KÂR-tarafı simetrik ikizi): açık kitabın
+            // toplam realize-olmamış kârı equity'nin take_profit_pct'ini aştı → TÜM kitabı flat'a çek
+            // (her bacak close_paper_position'dan geçer → kâr equity'ye realize olur, live'da gerçek emir)
+            // + tp_cooldown_secs boyunca yeniden kurma (aynı xs_circuit_breaker_until mekanizması; etki
+            // birebir flat-tut). Tek-bacak TP YERİNE — bacak TP'si market-nötr dengeyi + turnover-edge'i
+            // bozar. [[project_xs_momentum]]
+            if let Ok(st) = state.lock() {
+                if let Ok(mut cb) = st.finance.xs_circuit_breaker_until.write() {
+                    *cb = Some(cb_now + std::time::Duration::from_secs(xs.tp_cooldown_secs));
+                }
+                if let Some(n) = st.notifier.as_ref() {
+                    n.notify("xs-take-profit",
+                        crate::robot::infra::telegram_notifier::Severity::Info,
+                        &format!("💰 XS TAKE-PROFIT: kitap kârı %{:.2} ≥ %{:.2} → FLAT + {}sn cooldown (kâr realize)",
+                            dd_pct, xs.take_profit_pct, xs.tp_cooldown_secs));
+                }
+            }
+            let msg = format!(
+                "💰 kesitsel TAKE-PROFIT: kitap kârı %{:.2} ≥ %{:.2} → FLAT + {}sn cooldown (kâr realize edildi)",
+                dd_pct, xs.take_profit_pct, xs.tp_cooldown_secs);
+            push_state_log(state, msg.clone());
+            log::info!("{}", msg);
             longs.clear();
             shorts.clear();
         }
@@ -310,6 +335,10 @@ mod xs_live_tests {
         let dd = xs_book_drawdown_pct(-800.0, 10_000.0); // −%8
         assert!(dd <= -5.0, "−%8, −%5 eşiğini tetiklemeli");
         assert!(!(dd <= -10.0), "−%8, −%10 eşiğini tetiklememeli");
+        // Take-profit eşik mantığı (simetrik): kitap KÂRI ≥ +threshold tetikler.
+        let tp = xs_book_drawdown_pct(600.0, 10_000.0); // +%6
+        assert!(tp >= 5.0, "+%6, +%5 take-profit eşiğini tetiklemeli");
+        assert!(!(tp >= 10.0), "+%6, +%10 take-profit eşiğini tetiklememeli");
     }
 
     #[test]

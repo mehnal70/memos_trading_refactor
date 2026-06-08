@@ -207,6 +207,15 @@ pub struct XsLiveParams {
     /// Devre kesici tetiklenince kitabı flat tutma süresi (sn). max_drawdown_pct=0 iken etkisiz.
     /// Default 3600 (1 saat) — felaket sonrası aceleci yeniden-giriş churn'ünü önler.
     pub cb_cooldown_secs: u64,
+    /// PORTFÖY-DÜZEYİ TAKE-PROFIT (devre kesicinin KÂR-tarafı simetrik ikizi): açık XS bacaklarının
+    /// toplam realize-olmamış KÂRI equity'nin bu yüzdesini aşarsa TÜM kitap flat'a çekilir (kâr realize
+    /// edilir) + `tp_cooldown_secs` boyunca yeniden kurulmaz. Tek-bacak TP YERİNE — bacak TP'si market-nötr
+    /// dengeyi ve turnover-edge'ini bozar; bu kitap-geneli kâr-aldır (aynı cooldown mekanizması). 0.0 →
+    /// kapalı (default; opt-in). [[project_xs_momentum]]
+    pub take_profit_pct: f64,
+    /// Take-profit tetiklenince kitabı flat tutma süresi (sn). take_profit_pct=0 iken etkisiz. Default 3600
+    /// (1 saat) — kâr realize edildikten sonra anında aynı kitabı yeniden açıp round-trip komisyon yemeyi önler.
+    pub tp_cooldown_secs: u64,
 }
 
 impl Default for XsLiveParams {
@@ -224,6 +233,8 @@ impl Default for XsLiveParams {
             regime_gate: true,  // Volatile rejimde kitabı flat'a çek (kriz koruması)
             max_drawdown_pct: 0.0, // devre kesici KAPALI (opt-in; rejim-gate birincil koruma)
             cb_cooldown_secs: 3600, // tetiklenirse 1 saat flat kal
+            take_profit_pct: 0.0,   // kitap-düzeyi take-profit KAPALI (opt-in)
+            tp_cooldown_secs: 3600, // tetiklenirse 1 saat flat kal (kâr realize sonrası churn koruması)
         }
     }
 }
