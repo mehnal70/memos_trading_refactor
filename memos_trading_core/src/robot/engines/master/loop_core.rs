@@ -336,6 +336,16 @@ impl Engine {
                 }
             }
 
+            // ─── 📐 GİRİŞ-KARARI PENCERESİ: kapalı-bar (forming dışlanmış) ───────────────
+            // Live'da SQLite'ın son barı forming (REST kline forming barı da yazar) → strateji/edge/
+            // rejim tamamlanmamış bar üzerinde = backtest'in kapalı-bar kararıyla skew + bar-içi repaint.
+            // signal_candles forming barı dışlar → tüm GİRİŞ kararları (rejim/scalp-swing/strateji/sinyal/
+            // edge) bunu kullanır → live=backtest. ÇIKIŞLAR (1.5 yukarıda) ve giriş FİYATI
+            // (open_paper_position → fleet.live_price) tam mumu/anlık fiyatı kullanmaya devam eder.
+            // Escape: SIGNAL_CLOSED_BAR_ONLY=0 → tam pencere (eski davranış). [[project_math_audit]]
+            let signal_candles: &[Candle] = closed_bar_window(
+                &candles, interval_secs, tuning.signal_closed_bar_only, chrono::Utc::now());
+
             // ─── Adım 1: rejim bağlamı (HTF-tercihli, cache'li) — ERKEN, tek-kaynak ───
             // Eskiden rejim regular yolda (aşağıda) hesaplanıyordu; scalp_swing açarsa
             // atlanıyordu → scalp/swing auto-gate base-1m classify_regime kullanıyordu
@@ -357,7 +367,7 @@ impl Engine {
             let htf_slice: Option<&[crate::core::types::Candle]> =
                 if htf_candles_vec.is_empty() { None } else { Some(&htf_candles_vec) };
             let regime = Self::regime_for_cycle(
-                state, symbol, &candles, interval, htf_slice,
+                state, symbol, signal_candles, interval, htf_slice,
                 tuning.regime_context_ttl_secs, tuning.regime_gbt, tuning.regime_adaptive_pctl,
             );
             Self::ensure_regime_patch(state, regime.as_str());
@@ -379,14 +389,14 @@ impl Engine {
             // (has_seed_strategy) fırsatçı ScalpSwing PAS geçilir → keşfedilmiş edge o sembolde
             // gerçekten koşar (aksi halde ScalpSwing önce açıp baypas ederdi). [[project_edge_scan]].
             if !(has_seed_strategy && tuning.seed_strategy_priority)
-                && Self::try_open_scalp_swing(state, symbol, &candles, regime, regime_directional_eff).await {
+                && Self::try_open_scalp_swing(state, symbol, signal_candles, regime, regime_directional_eff).await {
                 return;
             }
 
             // 3) Strateji seçimi: brain.live_strategy "Default"/"AUTO" ise otonom seç.
             // Rejim eşikleri (sabit ya da adaptif sembol-relatif) tek noktada üretilir;
             // hem eval-path Volatile savunması hem default-path select_best aynısını kullanır.
-            let regime_thr = tuning.regime_thresholds(&candles);
+            let regime_thr = tuning.regime_thresholds(signal_candles);
             let strategy_name = if live_strategy.eq_ignore_ascii_case("default")
                                   || live_strategy.eq_ignore_ascii_case("auto")
                                   || live_strategy.is_empty() {
@@ -395,7 +405,7 @@ impl Engine {
                     // mini-backtest skoruna göre yarışır (param_spec optimizasyonu
                     // seçime de girer). Volatile rejimde IDLE savunması korunur.
                     use crate::robot::logic::market_regime::{detect_adx_regime_with, AdxRegime};
-                    if matches!(detect_adx_regime_with(&candles, &regime_thr), AdxRegime::Volatile) {
+                    if matches!(detect_adx_regime_with(signal_candles, &regime_thr), AdxRegime::Volatile) {
                         crate::robot::ml_engine::strategy_selector::IDLE_PROTECT.to_string()
                     } else {
                         let ps = state.lock().ok().map(|st| std::sync::Arc::clone(&st.brain.parameters));
@@ -403,7 +413,7 @@ impl Engine {
                             &crate::robot::strategies::default_registry(),
                             &["SUPERTREND", "MA_CROSSOVER", "EMA_CROSSOVER", "RSI", "MACD", "BB", "DONCHIAN"],
                         );
-                        let (best_name, _sig) = sel.select_best_name_resolved(&candles, |name| {
+                        let (best_name, _sig) = sel.select_best_name_resolved(signal_candles, |name| {
                             ps.as_ref()
                                 .and_then(|p| p.read().ok().map(|g| g.resolve_strategy_params(name)))
                                 .unwrap_or_default()
@@ -413,7 +423,7 @@ impl Engine {
                 } else {
                     // Default: rejim→strateji lookup (param-free, hızlı, kanıtlı savunma).
                     let sel = crate::robot::ml_engine::strategy_selector::StrategySelector::new();
-                    sel.select_best_with(&candles, &crate::core::types::StrategyParams::default(), &regime_thr).to_string()
+                    sel.select_best_with(signal_candles, &crate::core::types::StrategyParams::default(), &regime_thr).to_string()
                 }
             } else {
                 live_strategy.to_string()
@@ -442,7 +452,7 @@ impl Engine {
             // (HTF mumları + rejim yukarıda ERKEN yüklendi — htf_slice/regime burada hazır.)
 
             // ─── Faz 3 (StrategyEval): sinyal üretimi ─────────────────────
-            let signal = match strategy.generate_signal(&candles, &strat_params, None, htf_slice) {
+            let signal = match strategy.generate_signal(signal_candles, &strat_params, None, htf_slice) {
                 Ok(s) => {
                     Self::mark_pipeline_stage(state, PipelineStage::StrategyEval, StepStatus::Done);
                     s
@@ -466,8 +476,8 @@ impl Engine {
             //
             // GBT_EDGE_LEGACY=1 → eski per-tick predict_confidence yolu (geri-dönüş).
             let ml_conf_used: f64 = if tuning.gbt_edge_legacy {
-                let gbt_conf = if candles.len() >= 30 {
-                    let tail = &candles[candles.len().saturating_sub(200)..];
+                let gbt_conf = if signal_candles.len() >= 30 {
+                    let tail = &signal_candles[signal_candles.len().saturating_sub(200)..];
                     let fv = crate::robot::ml_engine::FeatureExtractor::extract(tail);
                     state.lock().ok().and_then(|st| {
                         st.brain.intelligence_hub.read().ok()
@@ -482,7 +492,7 @@ impl Engine {
                 ml_confidence
             };
 
-            let edge = Self::compute_edge_score(&candles, &signal, ml_conf_used);
+            let edge = Self::compute_edge_score(signal_candles, &signal, ml_conf_used);
             Self::mark_pipeline_stage(state, PipelineStage::FeatureExtract, StepStatus::Done);
             // ML henüz hazır değilse (cold-start) gevşek eşik; modele güven arttıkça katılaşır.
             // Faz 2 c4: edge_threshold rejim-bazlı override'a açık.
@@ -741,6 +751,34 @@ pub(crate) fn effective_stale_feed_age(configured: i64, interval_secs: i64) -> i
     }
 }
 
+/// SAF: son bar hâlâ forming (tamamlanmamış) mı? `candle.timestamp` bar AÇILIŞ zamanı →
+/// kapanış = `timestamp + interval`. Kapanış `now`'dan ilerideyse bar henüz oluşuyor (forming).
+/// `interval_secs <= 0` (bilinmiyor) → false (güvenli: forming sayma → dışlama). Testli.
+pub(crate) fn last_bar_is_forming(
+    candles: &[Candle], interval_secs: i64, now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if interval_secs <= 0 { return false; }
+    match candles.last() {
+        Some(c) => c.timestamp + chrono::Duration::seconds(interval_secs) > now,
+        None => false,
+    }
+}
+
+/// SAF: GİRİŞ-KARARI penceresi (strateji sinyali + rejim + edge). `enabled` ve son bar forming ise
+/// son barı dışla → live, backtest'in kapalı-bar karar semantiğiyle hizalanır (repaint/skew biter).
+/// Dışlayınca ≥1 bar kalmazsa ya da bar kapalıysa pencere olduğu gibi döner (aşırı-düşme yok).
+/// ÇIKIŞLAR bu yolu KULLANMAZ — SL/TP fleet.live_price ile anlık kalır. Testli.
+pub(crate) fn closed_bar_window<'a>(
+    candles: &'a [Candle], interval_secs: i64, enabled: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> &'a [Candle] {
+    if enabled && candles.len() >= 2 && last_bar_is_forming(candles, interval_secs, now) {
+        &candles[..candles.len() - 1]
+    } else {
+        candles
+    }
+}
+
 /// Sembolün AÇIK pozisyonu var mı (live_positions symbol-keyed). Çoklu-iz dispatch'i bununla
 /// tek-pozisyon invariantını korur: flat'ken izleri sırayla dener, biri açınca durur. Lock
 /// edinilemezse "var" sayar (güvenli taraf → fazladan açılış denenmez).
@@ -766,5 +804,50 @@ mod tests {
         assert_eq!(effective_stale_feed_age(0, 3600), 0, "0 → gate kapalı");
         // >0 → operatör sabit override (interval'den bağımsız)
         assert_eq!(effective_stale_feed_age(300, 3600), 300, "operatör 300s zorlar");
+    }
+
+    use super::{last_bar_is_forming, closed_bar_window};
+    use crate::core::types::Candle;
+
+    fn c_at(ts: chrono::DateTime<chrono::Utc>, close: f64) -> Candle {
+        Candle { timestamp: ts, open: close, high: close, low: close, close, volume: 1.0, ..Default::default() }
+    }
+
+    #[test]
+    fn forming_bar_detection() {
+        let now = chrono::Utc::now();
+        let iv = 3600; // 1h
+        // Son bar 10dk önce açıldı → kapanış 50dk ileride → forming.
+        let forming = vec![c_at(now - chrono::Duration::minutes(10), 100.0)];
+        assert!(last_bar_is_forming(&forming, iv, now), "açılış+interval > now → forming");
+        // Son bar 2 saat önce açıldı → kapanış 1 saat önce → kapalı.
+        let closed = vec![c_at(now - chrono::Duration::hours(2), 100.0)];
+        assert!(!last_bar_is_forming(&closed, iv, now), "açılış+interval ≤ now → kapalı");
+        // interval bilinmiyor → forming sayma (güvenli).
+        assert!(!last_bar_is_forming(&forming, 0, now), "interval≤0 → false");
+        assert!(!last_bar_is_forming(&[], iv, now), "boş → false");
+    }
+
+    #[test]
+    fn closed_bar_window_drops_only_forming() {
+        let now = chrono::Utc::now();
+        let iv = 3600;
+        // [kapalı, kapalı, forming] → enabled ise son (forming) düşer.
+        let v = vec![
+            c_at(now - chrono::Duration::hours(3), 1.0),
+            c_at(now - chrono::Duration::hours(2), 2.0),
+            c_at(now - chrono::Duration::minutes(5), 3.0), // forming
+        ];
+        let w = closed_bar_window(&v, iv, true, now);
+        assert_eq!(w.len(), 2, "forming bar dışlandı");
+        assert_eq!(w.last().unwrap().close, 2.0, "son = kapalı bar");
+        // enabled=false → escape: tam pencere.
+        assert_eq!(closed_bar_window(&v, iv, false, now).len(), 3, "escape → tam");
+        // Son bar kapalıysa → tam pencere (aşırı-düşme yok).
+        let closed = vec![c_at(now - chrono::Duration::hours(3), 1.0), c_at(now - chrono::Duration::hours(2), 2.0)];
+        assert_eq!(closed_bar_window(&closed, iv, true, now).len(), 2, "kapalı son bar düşmez");
+        // Tek forming bar (len<2) → düşme (boş pencere üretme).
+        let one = vec![c_at(now - chrono::Duration::minutes(5), 3.0)];
+        assert_eq!(closed_bar_window(&one, iv, true, now).len(), 1, "tek bar korunur");
     }
 }

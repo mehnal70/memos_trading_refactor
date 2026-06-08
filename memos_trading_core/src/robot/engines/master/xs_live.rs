@@ -134,7 +134,12 @@ impl Engine {
                         }
                     }
                 }
-                let closes: Vec<f64> = c.iter().map(|k| k.close).collect();
+                // 📐 KAPALI-BAR sinyali: momentum forming barı dışlayan pencereden (live=backtest;
+                // 1d XS'te forming gün-içi bar tüm gün oynar → repaint). candles_map'e TAM mum girer
+                // (open/close fiyat referansı anlık kalsın). Escape: SIGNAL_CLOSED_BAR_ONLY=0.
+                let sig_c = super::loop_core::closed_bar_window(
+                    &c, interval_secs, tuning.signal_closed_bar_only, chrono::Utc::now());
+                let closes: Vec<f64> = sig_c.iter().map(|k| k.close).collect();
                 if let Some(s) = latest_signal(&closes, xs.lookback) {
                     signals.push((sym.clone(), s));
                     candles_map.insert(sym.clone(), c);

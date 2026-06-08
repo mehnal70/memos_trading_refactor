@@ -287,6 +287,12 @@ pub struct RuntimeTuning {
     /// [0,interval) olduğundan sabit eşik kısa interval'i gevşek/uzun interval'i sıkı
     /// bırakıyordu). `0` → kapalı. `>0` → operatör sabit override (sn). Env STALE_FEED_MAX_AGE_SECS.
     pub stale_feed_max_age_secs: i64,
+    /// 📐 KAPALI-BAR GİRİŞ KARARI: live'da SQLite'ın son barı forming (oluşmakta olan) olur
+    /// (REST kline endpoint'i forming barı da yazar) → strateji sinyali/edge/rejim tamamlanmamış bar
+    /// üzerinde hesaplanır = backtest'le (kapalı-bar karar) train/serve skew + bar-içi repaint churn.
+    /// true (default) → giriş-kararı penceresinden forming bar dışlanır (live=backtest). ÇIKIŞLAR
+    /// ETKİLENMEZ (fleet.live_price ile anlık). 0/false/off → kapalı (escape). Env SIGNAL_CLOSED_BAR_ONLY.
+    pub signal_closed_bar_only: bool,
     /// 🔢 Eş-zamanlı açık LONG pozisyon tavanı (0 → sınırsız). Env MAX_CONCURRENT_LONGS.
     /// open_paper_position'da uçuş-rezervasyonuyla atomik uygulanır (paralel açılış race'i).
     pub max_concurrent_longs: u32,
@@ -370,6 +376,7 @@ impl Default for RuntimeTuning {
             fallback_tp_pct: 3.0,
             fallback_sl_pct: 1.5,
             stale_feed_max_age_secs: -1, // -1 = auto (interval-farkında: 2×interval). 0=kapalı, >0=sabit override.
+            signal_closed_bar_only: true, // giriş kararı kapalı-barda (live=backtest); çıkışlar etkilenmez
             max_concurrent_longs: 5,   // dokümante edilen niyet (adaptive_params); 0=sınırsız
             max_concurrent_shorts: 2,
             reentry_cooldown_secs: 0,
@@ -439,6 +446,8 @@ impl RuntimeTuning {
                 if v.is_finite() && v > 0.0 { v } else { d.fallback_sl_pct }
             },
             stale_feed_max_age_secs: env_parse("STALE_FEED_MAX_AGE_SECS", d.stale_feed_max_age_secs),
+            // Default açık (0/false/off → kapat) — giriş kararı kapalı-barda; live=backtest, repaint churn yok.
+            signal_closed_bar_only: !matches!(std::env::var("SIGNAL_CLOSED_BAR_ONLY").ok().as_deref(), Some("0") | Some("false") | Some("off")),
             max_concurrent_longs:  env_parse("MAX_CONCURRENT_LONGS", d.max_concurrent_longs),
             max_concurrent_shorts: env_parse("MAX_CONCURRENT_SHORTS", d.max_concurrent_shorts),
             reentry_cooldown_secs: env_parse("REENTRY_COOLDOWN_SECS", d.reentry_cooldown_secs),
