@@ -51,7 +51,7 @@ impl Engine {
             };
 
         match status.as_str() {
-            "FILLED" => Self::process_user_fill_status(state, &status, &symbol).await,
+            "FILLED" => Self::process_user_fill_status(state, &status, &symbol, &order_id).await,
             "PARTIALLY_FILLED" =>
                 Self::process_partial_fill(
                     state, &symbol, &side, orig_qty, cum_qty, last_qty, last_price,
@@ -303,16 +303,34 @@ impl Engine {
     }
 
     /// FILLED event'inin tek/uniform işleyicisi (spot + futures için ortak).
-    pub(crate) async fn process_user_fill_status(state: &Arc<Mutex<AppState>>, status: &str, symbol: &str) {
+    /// `order_id`: dolan emrin borsa id'si — YALNIZ koruma (SL/TP) emri fill'i pozisyon-kapandı
+    /// sinyalidir. Giriş emri de FILLED event üretir → order_id kontrolü olmadan yeni açılan pozisyon
+    /// (özellikle koruma emri taşımayan stopsuz XS) entry-fill ile anında kapanırdı. Eşleşmeyen
+    /// (giriş/bilinmeyen) → no-op; gerçek koruma fill'i kaçarsa psync (30s) yedek kalır.
+    pub(crate) async fn process_user_fill_status(state: &Arc<Mutex<AppState>>, status: &str, symbol: &str, order_id: &str) {
         if status != "FILLED" || symbol.is_empty() { return; }
 
-        let (executor, db_path, interval, has_local) = {
+        let (executor, db_path, interval, has_local, is_protection_fill) = {
             let st = match state.lock() { Ok(s) => s, Err(_) => return };
             let has = st.finance.live_positions.read().map(|p| p.contains_key(symbol)).unwrap_or(false);
+            // order_id kayıtlı SL veya TP id'sine eşleşiyor mu? (quote-normalize — bazı yanıtlar id'yi
+            // string olarak verir → to_string() tırnak ekleyebilir; close yolu da trim_matches('"') yapar.)
+            let oid = order_id.trim_matches('"');
+            let is_prot = st.finance.live_orders.read().ok()
+                .and_then(|m| m.get(symbol).map(|r| {
+                    let m = |s: &Option<String>| s.as_deref().map(|x| x.trim_matches('"')) == Some(oid);
+                    m(&r.sl_order_id) || m(&r.tp_order_id)
+                }))
+                .unwrap_or(false);
             (st.live_executor.clone(), st.config.db_path.clone(),
-             st.config.interval.clone(), has)
+             st.config.interval.clone(), has, is_prot)
         };
         if !has_local { return; } // bot bilmediği bir sembol için event aldı
+        if !is_protection_fill {
+            // Giriş emri / bilinmeyen order fill'i → pozisyon kapatma TETİKLEME (XS stopsuz: koruma id'si
+            // yok → hiç eşleşmez → entry-fill ile yanlış kapanış olmaz).
+            return;
+        }
 
         if let Some(exec) = executor {
             let _ = exec.cancel_all_orders(symbol).await;

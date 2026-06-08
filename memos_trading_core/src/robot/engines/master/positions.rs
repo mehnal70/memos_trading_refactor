@@ -707,57 +707,80 @@ impl Engine {
                 // Bot ölse / network kopsa bile pozisyon korumalı kalır.
                 let pos_sl = new_pos.stop_loss;
                 let pos_tp = new_pos.take_profit;
-                let (sl_res, tp_res) = executor.place_protection_orders(
-                    symbol, is_long, qty_val, pos_sl, pos_tp,
-                ).await;
-                let sl_id = sl_res.as_ref().ok()
-                    .and_then(|r| r.get("orderId").map(|v| v.to_string()));
-                let tp_id = tp_res.as_ref().ok()
-                    .and_then(|r| r.get("orderId").map(|v| v.to_string()));
-                let sl_status = match &sl_res {
-                    Ok(_)  => format!("SL ✓ ({})", sl_id.as_deref().unwrap_or("?")),
-                    Err(e) => format!("SL ❌ {:?}", e),
-                };
-                let tp_status = match &tp_res {
-                    Ok(_)  => format!("TP ✓ ({})", tp_id.as_deref().unwrap_or("?")),
-                    Err(e) => format!("TP ❌ {:?}", e),
-                };
-                // Order ID eşlemesini state'e mühürle (cancel için audit trail).
-                if let Ok(mut st2) = state.lock() {
-                    if let Ok(mut map) = st2.finance.live_orders.write() {
-                        map.insert(symbol.to_string(), crate::core::model::LiveOrderRefs {
-                            entry_order_id: live_order_id.clone(),
-                            sl_order_id: sl_id.clone(),
-                            tp_order_id: tp_id.clone(),
-                            placed_at: chrono::Utc::now().to_rfc3339(),
-                        });
-                    }
-                    st2.push_log(format!(
-                        "🛡️ [LIVE-PROTECT] {} @ SL={:.4} TP={:.4} · {} · {}",
-                        symbol, pos_sl, pos_tp, sl_status, tp_status,
-                    ));
-                }
-
-                // Kritik uyarı: SL emri başarısızsa pozisyon korumasız — emergency.
-                if sl_res.is_err() {
+                // 🧊 STOPSUZ POZİSYON (XS: SL=TP=0) → borsa koruma emri ATLA. Riski kitap-düzeyinde
+                // (rank-rebalance + devre kesici + kitap take-profit) yönetilir. stopPrice=0 emri borsa
+                // tarafından reddedilir → sl_res=Err → emergency-close zinciri tetiklenir → her XS açılışı
+                // anında kapanır + Critical alarm spam'i + komisyon churn'ü. Stopsuzsa koruma yolu komple
+                // baypas edilir; live_orders'a yalnız entry id mühürlenir (kapanışta cancel_all fallback).
+                // [[project_xs_momentum]]
+                if pos_sl <= 0.0 && pos_tp <= 0.0 {
                     if let Ok(mut st2) = state.lock() {
-                        st2.push_alert(
-                            "LIVE-EMERGENCY",
-                            crate::robot::infra::telegram_notifier::Severity::Critical,
-                            format!(
-                                "[LIVE-EMERGENCY] {} SL emri verilemedi → pozisyon acil kapatılıyor",
-                                symbol,
-                            ),
-                        );
-                        st2.guardian.repair_log.push_back(format!(
-                            "[{}] live SL hatası: {} emergency close",
-                            chrono::Local::now().format("%H:%M:%S"), symbol,
+                        if let Ok(mut map) = st2.finance.live_orders.write() {
+                            map.insert(symbol.to_string(), crate::core::model::LiveOrderRefs {
+                                entry_order_id: live_order_id.clone(),
+                                sl_order_id: None,
+                                tp_order_id: None,
+                                placed_at: chrono::Utc::now().to_rfc3339(),
+                            });
+                        }
+                        st2.push_log(format!(
+                            "🛡️ [LIVE-PROTECT] {} stopsuz pozisyon → borsa SL/TP atlandı (risk kitap-düzeyinde)",
+                            symbol,
                         ));
-                        while st2.guardian.repair_log.len() > 100 { st2.guardian.repair_log.pop_front(); }
                     }
-                    // Hemen pozisyonu kapat — koruma sağlanamadı.
-                    let _ = executor.close_position(symbol).await;
-                    return;
+                } else {
+                    let (sl_res, tp_res) = executor.place_protection_orders(
+                        symbol, is_long, qty_val, pos_sl, pos_tp,
+                    ).await;
+                    let sl_id = sl_res.as_ref().ok()
+                        .and_then(|r| r.get("orderId").map(|v| v.to_string()));
+                    let tp_id = tp_res.as_ref().ok()
+                        .and_then(|r| r.get("orderId").map(|v| v.to_string()));
+                    let sl_status = match &sl_res {
+                        Ok(_)  => format!("SL ✓ ({})", sl_id.as_deref().unwrap_or("?")),
+                        Err(e) => format!("SL ❌ {:?}", e),
+                    };
+                    let tp_status = match &tp_res {
+                        Ok(_)  => format!("TP ✓ ({})", tp_id.as_deref().unwrap_or("?")),
+                        Err(e) => format!("TP ❌ {:?}", e),
+                    };
+                    // Order ID eşlemesini state'e mühürle (cancel için audit trail).
+                    if let Ok(mut st2) = state.lock() {
+                        if let Ok(mut map) = st2.finance.live_orders.write() {
+                            map.insert(symbol.to_string(), crate::core::model::LiveOrderRefs {
+                                entry_order_id: live_order_id.clone(),
+                                sl_order_id: sl_id.clone(),
+                                tp_order_id: tp_id.clone(),
+                                placed_at: chrono::Utc::now().to_rfc3339(),
+                            });
+                        }
+                        st2.push_log(format!(
+                            "🛡️ [LIVE-PROTECT] {} @ SL={:.4} TP={:.4} · {} · {}",
+                            symbol, pos_sl, pos_tp, sl_status, tp_status,
+                        ));
+                    }
+
+                    // Kritik uyarı: SL emri BEKLENİYORDU (pos_sl>0) ama başarısız → pozisyon korumasız → emergency.
+                    if pos_sl > 0.0 && sl_res.is_err() {
+                        if let Ok(mut st2) = state.lock() {
+                            st2.push_alert(
+                                "LIVE-EMERGENCY",
+                                crate::robot::infra::telegram_notifier::Severity::Critical,
+                                format!(
+                                    "[LIVE-EMERGENCY] {} SL emri verilemedi → pozisyon acil kapatılıyor",
+                                    symbol,
+                                ),
+                            );
+                            st2.guardian.repair_log.push_back(format!(
+                                "[{}] live SL hatası: {} emergency close",
+                                chrono::Local::now().format("%H:%M:%S"), symbol,
+                            ));
+                            while st2.guardian.repair_log.len() > 100 { st2.guardian.repair_log.pop_front(); }
+                        }
+                        // Hemen pozisyonu kapat — koruma sağlanamadı.
+                        let _ = executor.close_position(symbol).await;
+                        return;
+                    }
                 }
             }
         }

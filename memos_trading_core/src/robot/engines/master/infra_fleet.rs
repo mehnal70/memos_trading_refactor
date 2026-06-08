@@ -789,15 +789,22 @@ impl Engine {
                 let (executor, db_path, interval, active_symbols, live_dry_run) = {
                     let st = match st_psync.lock() { Ok(s) => s, Err(_) => break };
                     let executor = st.live_executor.clone();
-                    let active: Vec<String> = st.finance.live_positions.read()
-                        .map(|m| m.keys().cloned().collect()).unwrap_or_default();
+                    // (symbol, stopsuz?): stopsuz pozisyon (XS: SL=TP=0) borsada koruma emri taşımaz →
+                    // psync'in "n<2 = tetiklendi" sezgisi yanlış alarm verir (0<2 → XS'i 30sn'de bir kapatır).
+                    let active: Vec<(String, bool)> = st.finance.live_positions.read()
+                        .map(|m| m.iter()
+                            .map(|(k, v)| (k.clone(), v.stop_loss <= 0.0 && v.take_profit <= 0.0))
+                            .collect())
+                        .unwrap_or_default();
                     (executor, st.config.db_path.clone(), st.config.interval.clone(),
                      active, st.live_dry_run)
                 };
 
                 // Yalnız Live mode + dry-run değil
                 if let (Some(exec), false) = (executor, live_dry_run) {
-                    for symbol in &active_symbols {
+                    for (symbol, stopless) in &active_symbols {
+                        // Stopsuz pozisyon → borsa SL/TP emri yok; sync devre dışı (risk kitap-düzeyinde).
+                        if *stopless { continue; }
                         match exec.get_open_orders(symbol).await {
                             Ok(orders) => {
                                 let n = orders.len();
