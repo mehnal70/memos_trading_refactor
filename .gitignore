@@ -73,3 +73,10 @@ secrets.json
 
 # launcher yerel tercih dosyası
 scripts/.launch.conf
+
+# Python bytecode cache (her import'ta yeniden üretilir)
+__pycache__/
+*.pyc
+
+# Scheduler runtime lock (restart'ta yeniden üretilir)
+.claude/scheduled_tasks.lock
