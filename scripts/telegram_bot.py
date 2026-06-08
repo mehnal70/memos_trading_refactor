@@ -92,7 +92,10 @@ def cmd_trades(d):
     out = ["<b>📜 Son kapananlar</b>"]
     for t in T:
         net = t.get("net_pnl", t.get("pnl", 0)); mark = "🟢" if net >= 0 else "🔴"
-        out.append(f"{mark} {t.get('symbol')} {'LONG' if t.get('is_long') else 'SHORT'} "
+        ep, xp = t.get("entry_price", 0), t.get("exit_price", 0)
+        # Giriş→çıkış fiyatı (eski kayıtlarda 0 → atla, yanıltıcı sıfır gösterme).
+        px = f" · {fmt(ep,4)}→{fmt(xp,4)}" if (ep and xp) else ""
+        out.append(f"{mark} {t.get('symbol')} {'LONG' if t.get('is_long') else 'SHORT'}{px} "
                    f"net ${fmt(net)} · {str(t.get('exit_reason','')).replace('_',' ')}")
     return "\n".join(out)
 

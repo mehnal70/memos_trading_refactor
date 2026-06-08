@@ -55,10 +55,15 @@ pub fn draw_trade_history(f: &mut ratatui::Frame, area: Rect, snap: &MissionCont
         // Renk + değerler NET (komisyon-dahil): "Net PnL" başlığı artık gerçekten net. Bir BREAKEVEN
         // gross 0 olsa da round-trip fee'yi yansıtır (Komisyon kolonu fee'yi ayrıca gösterir).
         let pnl_color = if t.net_pnl >= 0.0 { Color::LightGreen } else { Color::LightRed };
+        // Giriş/Çıkış fiyatı: eski kayıtlarda 0.0 (serde default) → "—" göster (yanıltıcı sıfır olmaz).
+        let entry_s = if t.entry_price > 0.0 { format!("{:.4}", t.entry_price) } else { "—".into() };
+        let exit_s  = if t.exit_price  > 0.0 { format!("{:.4}", t.exit_price)  } else { "—".into() };
         Row::new(vec![
             format!("{}", t.closed_at),
             t.symbol.clone(),
             if t.is_long { "▲ LONG".into() } else { "▼ SHORT".into() },
+            entry_s,
+            exit_s,
             format!("{:+.2} USDT", t.net_pnl),
             format!("{:+.2}%", t.net_pnl_pct),
             format!("-{:.2}", t.commission),
@@ -70,12 +75,14 @@ pub fn draw_trade_history(f: &mut ratatui::Frame, area: Rect, snap: &MissionCont
         Constraint::Length(20), // Zaman
         Constraint::Length(10), // Sembol
         Constraint::Length(8),  // Yön
+        Constraint::Length(11), // Giriş
+        Constraint::Length(11), // Çıkış
         Constraint::Length(14), // Net PnL
         Constraint::Length(9),  // ROE%
         Constraint::Length(9),  // Komisyon
         Constraint::Min(12),    // Neden
     ])
-    .header(Row::new(vec!["Kapanış", "Sembol", "Yön", "Net PnL", "ROE%", "Komisyon", "Çıkış Nedeni"])
+    .header(Row::new(vec!["Kapanış", "Sembol", "Yön", "Giriş", "Çıkış", "Net PnL", "ROE%", "Komisyon", "Çıkış Nedeni"])
         .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
     .block(Block::default().title(" 📜 Kapanmış İşlemler (Son 50) ").borders(Borders::ALL));
 

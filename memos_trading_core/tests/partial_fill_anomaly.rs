@@ -53,6 +53,7 @@ fn open_position(
         max_favorable_price: entry,
         breakeven_activated: false,
         kind: None,
+        entry_commission: 0.0,
     };
     let st = state.lock().unwrap();
     st.finance.live_positions.write().unwrap().insert(symbol.into(), pos);

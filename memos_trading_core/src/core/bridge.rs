@@ -76,6 +76,8 @@ pub fn get_snapshot(st: &AppState) -> MissionControl {
                 closed_at: t.closed_at.clone(),
                 opened_at: t.opened_at.clone(),
                 leverage: t.leverage,
+                entry_price: t.entry_price,
+                exit_price: t.exit_price,
             }
         }).collect();
 
@@ -413,6 +415,8 @@ mod tests {
             opened_at: opened.into(),
             closed_at: closed.into(),
             leverage: 1.0,
+            entry_price: 0.0,
+            exit_price: 0.0,
         }
     }
 

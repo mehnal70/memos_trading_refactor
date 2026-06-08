@@ -2,6 +2,21 @@
 // Faz 2 modülerleştirme: positions.rs'ten ayrıldı (davranış birebir korunur).
 use super::*;
 
+/// SAF: borsa MARKET emir yanıtından gerçekleşen ortalama dolum fiyatını çıkarır.
+/// Futures → `avgPrice`; spot MARKET → `cummulativeQuoteQty / executedQty` (avgPrice taşımaz).
+/// İkisi de yoksa/geçersizse None → çağıran snapshot tahminine düşer. Açılış yolundaki
+/// (positions.rs) avgPrice mutabakatının kapanış-tarafı simetrik ikizi. [[project_canli_dogrulama]]
+pub(crate) fn extract_fill_price(resp: &serde_json::Value) -> Option<f64> {
+    let parse = |k: &str| resp.get(k).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+    if let Some(p) = parse("avgPrice") {
+        if p > 0.0 { return Some(p); }
+    }
+    match (parse("cummulativeQuoteQty"), parse("executedQty")) {
+        (Some(c), Some(e)) if c > 0.0 && e > 0.0 => Some(c / e),
+        _ => None,
+    }
+}
+
 impl Engine {
 
     /// 🛡️ POZİSYON ÇIKIŞ KONTROLÜ: Açık her pozisyon için SL/TP/Trailing/Breakeven
@@ -145,6 +160,9 @@ impl Engine {
             (target_pos, exec, dry, tag)
         }; // st burada otomatik drop olur
 
+        // LIVE gerçek dolum fiyatı (close_position MARKET yanıtından). Açılışla simetrik: yoksa
+        // (paper / dry-run / yanıt taşımıyor) None kalır → exit_price snapshot tahminine düşer.
+        let mut live_fill_price: Option<f64> = None;
         if let Some(executor) = live_executor.as_ref() {
             if live_dry_run {
                 if let Ok(mut st2) = state.lock() {
@@ -222,11 +240,14 @@ impl Engine {
                 // 2. Pozisyonu market emir ile kapat.
                 match executor.close_position(symbol).await {
                     Ok(resp) => {
+                        // Gerçek dolum fiyatını yakala (exit_price bunu kullanacak; snapshot tahmini yerine).
+                        live_fill_price = extract_fill_price(&resp);
                         if let Ok(mut st2) = state.lock() {
                             st2.push_log(format!(
-                                "💱 [LIVE] {} close ({:?}) ✓ order={}",
+                                "💱 [LIVE] {} close ({:?}) ✓ order={} fill={}",
                                 symbol, reason,
                                 resp.get("orderId").map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+                                live_fill_price.map(|p| format!("{:.4}", p)).unwrap_or_else(|| "?".into()),
                             ));
                         }
                     }
@@ -262,6 +283,10 @@ impl Engine {
                 ExitReason::StrategySignal => fleet_live_price.unwrap_or(last_candle.close),
             };
             let exit_price = if exit_price > 0.0 { exit_price } else { last_candle.close };
+            // LIVE gerçek dolum fiyatı varsa onu kullan (snapshot/seviye tahmini yerine) → açılışla
+            // simetrik; sahte exit PnL biter, kapanış fiyatı gösterimi gerçek fill'i yansıtır. Paper/
+            // dry-run/yanıt-taşımayan → None → yukarıdaki tahmin korunur (sıfır regresyon).
+            let exit_price = live_fill_price.filter(|&p| p > 0.0).unwrap_or(exit_price);
 
             // Phase C: TRAILING_STOP kapanışı sonrası 60sn olgunluk gözlemi için kuyruğa al.
             // Periyodik processor (spawn_trail_feedback_processor) bunu evalue eder ve
@@ -331,6 +356,8 @@ impl Engine {
                 closed_at: chrono::Utc::now().to_rfc3339(),
                 opened_at: pos.opened_at.clone(),
                 leverage: pos.leverage,
+                entry_price: pos.entry_price,
+                exit_price,
             };
 
             // [DÜZELTME]: Arşiv listesine itme işlemi izole skopa alındı
@@ -502,5 +529,39 @@ impl Engine {
         let mut st = state.lock().unwrap();
         let reward = crate::core::math::calculate_trade_reward(last_trade.pnl_pct, 0, 0.0);
         st.push_log(format!("🧠 Tecrübe Mühürlendi: {} | Ödül: {:.2}", last_trade.symbol, reward));
+    }
+}
+
+#[cfg(test)]
+mod fill_price_tests {
+    use super::extract_fill_price;
+    use serde_json::json;
+
+    #[test]
+    fn futures_uses_avg_price() {
+        let resp = json!({"orderId": 42, "avgPrice": "0.6346", "executedQty": "397.21"});
+        assert_eq!(extract_fill_price(&resp), Some(0.6346));
+    }
+
+    #[test]
+    fn spot_falls_back_to_quote_over_qty() {
+        // Spot MARKET avgPrice taşımaz → cummulativeQuoteQty/executedQty.
+        let resp = json!({"orderId": 7, "cummulativeQuoteQty": "1000.0", "executedQty": "400.0"});
+        assert_eq!(extract_fill_price(&resp), Some(2.5));
+    }
+
+    #[test]
+    fn zero_avg_price_falls_back() {
+        // avgPrice "0" (futures bazı MARKET yanıtları) → quote/qty'ye düş.
+        let resp = json!({"avgPrice": "0", "cummulativeQuoteQty": "500.0", "executedQty": "250.0"});
+        assert_eq!(extract_fill_price(&resp), Some(2.0));
+    }
+
+    #[test]
+    fn missing_fields_returns_none() {
+        // Hiç fill alanı yok → None (çağıran snapshot tahminine düşer).
+        assert_eq!(extract_fill_price(&json!({"orderId": 1})), None);
+        // executedQty 0 → bölme yok, None.
+        assert_eq!(extract_fill_price(&json!({"cummulativeQuoteQty": "10", "executedQty": "0"})), None);
     }
 }

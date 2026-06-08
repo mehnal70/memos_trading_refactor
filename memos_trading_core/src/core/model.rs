@@ -465,6 +465,14 @@ pub struct ClosedTradeModel {
     /// Round-trip toplam komisyon (giriş + çıkış, USD). Eski/DB kayıt → 0.0.
     #[serde(default)]
     pub commission: f64,
+    /// Pozisyonun giriş fiyatı. close anında `PositionModel.entry_price`'tan kopyalanır.
+    /// TUI/Telegram "kapanmış işlemler" gösteriminde giriş↔çıkış farkı görünsün diye. Eski kayıt → 0.0.
+    #[serde(default)]
+    pub entry_price: f64,
+    /// Pozisyonun gerçekleşen çıkış (kapanış) fiyatı. close anında hesaplanan `exit_price`'tan
+    /// kopyalanır (SL/TP/trailing seviyesi ya da StrategySignal'da live/son-mum fiyatı). Eski kayıt → 0.0.
+    #[serde(default)]
+    pub exit_price: f64,
 }
 
 fn default_leverage_one() -> f64 { 1.0 }

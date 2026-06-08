@@ -390,6 +390,8 @@ impl Engine {
                     closed_at: chrono::Utc::now().to_rfc3339(),
                     opened_at: pos.opened_at.clone(),
                     leverage: pos.leverage,
+                    entry_price: pos.entry_price,
+                    exit_price: pos.entry_price, // delisted force-close: PnL 0 → çıkış=giriş
                 };
                 if let Ok(mut closed_list) = st.finance.live_closed_trades.write() {
                     closed_list.push(closed_trade);
