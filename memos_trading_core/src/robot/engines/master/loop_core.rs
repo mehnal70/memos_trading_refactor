@@ -448,7 +448,7 @@ impl Engine {
             // yoksa global. Sembolün kendi optimize indikatör seti → canlı. [[project_param_optimize_tool]].
             let strat_params = state.lock().ok()
                 .and_then(|st| st.brain.parameters.read().ok()
-                    .map(|p| p.resolve_strategy_params_for(symbol, &strategy_name)))
+                    .map(|p| p.resolve_strategy_params_for(symbol, interval, &strategy_name)))
                 .unwrap_or_default();
 
             // (HTF mumları + rejim yukarıda ERKEN yüklendi — htf_slice/regime burada hazır.)
