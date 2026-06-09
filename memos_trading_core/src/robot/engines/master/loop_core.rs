@@ -519,6 +519,25 @@ impl Engine {
                 Signal::Buy => "BUY", Signal::Sell => "SELL", Signal::Hold => "HOLD",
             };
 
+            // 🔂 Bar-başına tek-işlem (churn kökü): kapalı-bar sinyali bar boyu SABİT kalır
+            // (signal_closed_bar_only). Motor her tarama (~1/dk) aynı kapalı-barın Buy/Sell'ini
+            // yeniden yayıp yeniden işliyordu → tek bar içinde aç→stop→aynı-bar-Buy→tekrar-aç
+            // (60sn re-entry cooldown yalnız bant-yardımı, barın sinyali değişmediği için kapatamaz)
+            // + her tarama SIGNAL log spam'i. Bu sembolde bu kapalı-barı zaten işlediysek (cur==last)
+            // yeni bar kapanana kadar pas geç → açılış/kapanış/blok hepsi bar başına BİR kez. Çıkışlar
+            // (SL/TP/trailing) ayrı denetimden (cycle_try_close_open_position) gittiği için ETKİLENMEZ.
+            // xs_last_rebalance_bar'ın regular-yol per-sembol ikizi; tek state-lock altında atomik
+            // check-and-set (TOCTOU yok). Escape: SIGNAL_CLOSED_BAR_ONLY=0 → kapalı (forming-bar kimliği
+            // akışkan = eski davranış). [[project_closed_bar_signal]]
+            if tuning.signal_closed_bar_only && matches!(signal, Signal::Buy | Signal::Sell) {
+                if let Some(bar_ts) = signal_candles.last().map(|c| c.timestamp) {
+                    let fresh_bar = state.lock().ok()
+                        .map(|st| st.finance.claim_signal_bar(symbol, bar_ts))
+                        .unwrap_or(true); // state lock zehirliyse fail-open
+                    if !fresh_bar { return; }
+                }
+            }
+
             // SIGNAL eventi: yalnız Buy/Sell için logla (HOLD spam yapmasın).
             if matches!(signal, Signal::Buy | Signal::Sell) {
                 // Referans fiyat: fleet.live_price (5sn REST) > candle close — exit

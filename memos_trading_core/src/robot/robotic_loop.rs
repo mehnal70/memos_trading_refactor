@@ -64,6 +64,14 @@ pub struct FinanceVault {
     /// yazar, open_paper_position okur: REENTRY_COOLDOWN_SECS içinde yeniden açılış
     /// engellenir (churn/flip-flop koruması). Monotonik Instant; persist edilmez.
     pub last_close_at: Arc<RwLock<HashMap<String, std::time::Instant>>>,
+    /// 📐 Sembol → strateji-sinyal yolunun son İŞLEDİĞİ kapalı-bar (sinyal mumu open-time).
+    /// `xs_last_rebalance_bar`'ın regular-yol per-sembol karşılığı: kapalı-bar sinyali bar boyu
+    /// sabit kaldığından (signal_closed_bar_only) aynı bara birden çok kez tepki vermek intra-bar
+    /// churn doğurur (aç→stop→aynı-bar-Buy→tekrar aç; 60sn cooldown bunu kapatmaz). evaluate_and_trade
+    /// bir kapalı-barı sembol başına BİR kez işler (cur_bar==last → atla); aç/kapa/blok hepsi sayılır.
+    /// Yeni bar kapanınca tekrar serbest. signal_closed_bar_only kapalıyken devre dışı (eski davranış).
+    /// Persist edilmez. [[project_closed_bar_signal]]
+    pub last_signal_bar: Arc<RwLock<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
     /// 🔌 XS portföy-düzeyi devre kesici cooldown'u: tetiklenince bu ana kadar kitap flat tutulur
     /// (process_xs_book yazar+okur). None → cooldown yok. Monotonik Instant; persist edilmez.
     pub xs_circuit_breaker_until: Arc<RwLock<Option<std::time::Instant>>>,
@@ -86,7 +94,30 @@ pub struct FinanceVault {
     pub pending_open_short: Arc<std::sync::atomic::AtomicU32>,
 }
 
+/// Bar-başına tek-işlem check-and-set'in saf çekirdeği: `map`'te `symbol`→`bar_ts` İLK
+/// kez ise kaydeder + `true`; aynıysa `false`. Tek write-lock altında atomik. Poison → `true`
+/// (fail-open). `claim_signal_bar` bunun ince sarmalı (FinanceVault'tan ayrık → birim test edilebilir).
+fn claim_bar_in(
+    map: &RwLock<HashMap<String, chrono::DateTime<chrono::Utc>>>,
+    symbol: &str,
+    bar_ts: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    match map.write() {
+        Ok(m) if m.get(symbol).copied() == Some(bar_ts) => false,
+        Ok(mut m) => { m.insert(symbol.to_string(), bar_ts); true }
+        Err(_) => true,
+    }
+}
+
 impl FinanceVault {
+    /// Bar-başına tek-işlem kapısı: `symbol` için `bar_ts` kapalı-barı İLK kez görülüyorsa
+    /// kaydeder ve `true` döner; aynı bar tekrar gelirse `false` (zaten işlendi → çağıran pas geçer).
+    /// Tek write-lock altında atomik check-and-set (TOCTOU yok). Lock zehirliyse fail-open (`true`).
+    /// evaluate_and_trade kullanır — intra-bar churn + SIGNAL spam kökünü kapatır. [[project_closed_bar_signal]]
+    pub fn claim_signal_bar(&self, symbol: &str, bar_ts: chrono::DateTime<chrono::Utc>) -> bool {
+        claim_bar_in(&self.last_signal_bar, symbol, bar_ts)
+    }
+
     /// Mevcut sermayenin başlangıca oranı → risk iştahı çarpanı.
     /// >1.0 ise kasada kar var (daha cesur), <1.0 ise zarar (daha temkinli). [0.5, 2.0] aralığına clamp.
     pub fn calculate_risk_appetite(&self) -> f64 {
@@ -293,6 +324,7 @@ impl AppState {
             live_orders: Arc::new(RwLock::new(HashMap::new())),
             closed_trades_total: Arc::new(AtomicUsize::new(0)),
             last_close_at: Arc::new(RwLock::new(HashMap::new())),
+            last_signal_bar: Arc::new(RwLock::new(HashMap::new())),
             xs_circuit_breaker_until: Arc::new(RwLock::new(None)),
             xs_last_rebalance_bar: Arc::new(RwLock::new(None)),
             graded_tranches: Arc::new(RwLock::new(HashMap::new())),
@@ -558,5 +590,49 @@ impl AppState {
              if let Some(t) = self.fleet.triggers.get("execution") { t.store(true, Ordering::Relaxed) }
              self.push_log("🚀 Otonom Karar: Koşullar optimal, harekât başlatıldı.".into());
         }
+    }
+}
+
+#[cfg(test)]
+mod claim_bar_tests {
+    use super::claim_bar_in;
+    use std::sync::RwLock;
+    use std::collections::HashMap;
+    use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn ayni_bar_sembol_basina_bir_kez_islenir() {
+        let map = RwLock::new(HashMap::new());
+        let bar = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+
+        // İLK görüş → işlenir (churn'cü ilk açılış).
+        assert!(claim_bar_in(&map, "BEATUSDT", bar), "ilk görüş fresh olmalı");
+        // Aynı bar tekrar (stop sonrası ~60sn cooldown bitince re-evaluate) → BLOK = churn kapandı.
+        assert!(!claim_bar_in(&map, "BEATUSDT", bar), "aynı bar ikinci kez blok olmalı");
+        assert!(!claim_bar_in(&map, "BEATUSDT", bar), "aynı bar tekrar tekrar blok (SIGNAL spam kapandı)");
+    }
+
+    #[test]
+    fn yeni_bar_kapaninca_tekrar_serbest() {
+        let map = RwLock::new(HashMap::new());
+        let bar1 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let bar2 = Utc.timestamp_opt(1_700_003_600, 0).unwrap(); // +1h
+
+        assert!(claim_bar_in(&map, "BEATUSDT", bar1));
+        assert!(!claim_bar_in(&map, "BEATUSDT", bar1));
+        // Yeni kapalı-bar → yeni karar serbest (meşru trend takibi bozulmaz).
+        assert!(claim_bar_in(&map, "BEATUSDT", bar2), "yeni bar fresh olmalı");
+        assert!(!claim_bar_in(&map, "BEATUSDT", bar2));
+    }
+
+    #[test]
+    fn semboller_birbirinden_bagimsiz() {
+        let map = RwLock::new(HashMap::new());
+        let bar = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+
+        assert!(claim_bar_in(&map, "BEATUSDT", bar));
+        // Farklı sembol aynı barda kendi ilk kararını verebilir (per-sembol izolasyon).
+        assert!(claim_bar_in(&map, "ETHUSDT", bar), "farklı sembol bağımsız olmalı");
+        assert!(!claim_bar_in(&map, "BEATUSDT", bar));
     }
 }
