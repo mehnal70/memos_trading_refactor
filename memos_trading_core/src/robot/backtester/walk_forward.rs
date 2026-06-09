@@ -506,7 +506,9 @@ pub(crate) fn score_config_over_windows(
 /// (run()'ın stepping aritmetiğiyle aynı). `score_config_over_windows` için HAFİF pencere
 /// kaynağı: pool-wide interval eval'de full WalkForwardTester (per-pencere param re-opt)
 /// yerine kullanılır → ucuz + ekseni (interval) izole eder. tp/sl alanları kullanılmaz.
-pub(crate) fn wf_oos_windows(n: usize, is_bars: usize, oos_bars: usize, step: usize) -> Vec<WindowResult> {
+/// `pub`: examples/param_optimize gibi araçlar `wf_cross_check` ile birlikte AYNI pencere
+/// disiplinini yeniden kullansın (DRY) — [[feedback_modular_dry_perf]].
+pub fn wf_oos_windows(n: usize, is_bars: usize, oos_bars: usize, step: usize) -> Vec<WindowResult> {
     let window_size = is_bars + oos_bars;
     let step = step.max(1);
     let mut out = Vec::new();

@@ -64,13 +64,17 @@ rep = json.load(open(sys.argv[1]))
 champs = rep.get("champions", [])
 with open(sys.argv[2], "w", newline="") as f:
     w = csv.writer(f)
-    w.writerow(["symbol","interval","strategy","robust",
-                "oos_score","oos_pnl_pct","oos_win_rate","oos_trades","params"])
+    w.writerow(["symbol","interval","strategy","wf_robust","robust",
+                "oos_score","wf_pooled_pf","wf_consistency","wf_pvalue","wf_windows",
+                "oos_pnl_pct","oos_win_rate","oos_trades","params"])
     for c in champs:
         params = ";".join(f"{p['name']}={p['value']:g}" for p in c.get("params", []))
-        w.writerow([c["symbol"], c["interval"], c["strategy"], int(c["robust"]),
-                    f"{c['oos_score']:.4f}", f"{c['oos_pnl_pct']:.4f}",
-                    f"{c['oos_win_rate']:.2f}", c["oos_trades"], params])
+        w.writerow([c["symbol"], c["interval"], c["strategy"],
+                    int(c.get("wf_robust", False)), int(c["robust"]),
+                    f"{c['oos_score']:.4f}", f"{c.get('wf_pooled_pf',0):.4f}",
+                    f"{c.get('wf_consistency',0):.4f}", f"{c.get('wf_pvalue',1):.4f}",
+                    c.get("wf_windows",0),
+                    f"{c['oos_pnl_pct']:.4f}", f"{c['oos_win_rate']:.2f}", c["oos_trades"], params])
 print(f"📋 Şampiyon CSV: {sys.argv[2]} ({len(champs)} sembol)")
 PY
 else

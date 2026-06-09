@@ -11,7 +11,7 @@ pub use backtest_engine::{Backtester, BacktestConfig, BacktestResult, DirectionM
 //pub use backtest_engine::{ProfileComparisonResult, ProfilePerformance};
 pub use parameter_optimizer::ParameterOptimizer;
 pub use walk_forward::{WalkForwardTester, WalkForwardConfig, WalkForwardResult, WindowResult,
-    evaluate_symbol_interval, evaluate_symbol_strategy, wf_cross_check, WfCrossCheck};
+    evaluate_symbol_interval, evaluate_symbol_strategy, wf_cross_check, WfCrossCheck, wf_oos_windows};
 pub use edge_scan::{EdgeScanConfig, EdgeScanReport, EdgeRow, GroupSummary, SeedRobustness, SeedEntry,
     run_edge_scan, run_edge_scan_with_progress, summarize_by_group, scan_one_series,
     seed_symbol_plan, seed_symbol_plan_from_file,
