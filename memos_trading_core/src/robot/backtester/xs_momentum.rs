@@ -17,7 +17,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::core::types::Candle;
 use crate::persistence::reader::read_candles_market;
+use crate::robot::sr_detector::{SrDetector, SrDetectorConfig, SrZone, ZoneType};
 use super::walk_forward::WfCrossCheck;
 
 /// Kesitsel strateji parametreleri. Sepet + momentum/reversal yönü + maliyet + anlamlılık penceresi.
@@ -55,6 +57,20 @@ pub struct XsConfig {
     pub wf_window: usize,
     /// Yıllık bar sayısı (Sharpe/yıllık-getiri annualize). 1d → 365, 1h → 8760.
     pub bars_per_year: f64,
+    /// 🧱 S/R EĞİMİ (opt-in, default 0 = KAPALI = close-only eski yol birebir). Kesitsel skoru sıralama
+    /// ÖNCESİ S/R-karşıtlığına göre 0'a doğru kısar: long-eğilimli aday yakın güçlü DİRENCİN altındaysa
+    /// (veya short-eğilimli aday güçlü DESTEĞİN üstündeyse) skor·(1 − sr_tilt·karşıtlık). Kapı DEĞİL eğim →
+    /// market-nötr k-long/k-short dengesi korunur (yalnız HANGİ sembol seçilir değişir). OHLC ister
+    /// (align_ohlc); 0 ise OHLC hiç yüklenmez. A/B kanıtlanmadan canlıya bağlanmaz. [[project_sr_display_only]]
+    pub sr_tilt: f64,
+    /// S/R yakınlık bandı (%): fiyata bu kadar %'den yakın engelleyici zone karşıtlık=1'e yaklaşır, band
+    /// dışı → 0. Default 3.0.
+    pub sr_band_pct: f64,
+    /// Yalnız bu güç-eşiğinin üstündeki zone'lar karşıtlık sayılır (SrDetector kendi min_strength'ini de
+    /// uygular). Default 0 = dedektörün döndürdüğü tüm zone'lar.
+    pub sr_min_strength: f64,
+    /// S/R tespiti için sembol başına geriye-dönük mum penceresi (bar). Default 120 (~4 ay 1d).
+    pub sr_window: usize,
 }
 
 impl Default for XsConfig {
@@ -75,6 +91,10 @@ impl Default for XsConfig {
             leverage: 1.0,      // risk-hedefleme; Sharpe/t-invariant
             wf_window: 30,    // ~aylık pencere (1d) → tutarlılık binom kapısı
             bars_per_year: 365.0,
+            sr_tilt: 0.0,       // S/R eğimi KAPALI (opt-in; default = close-only eski yol birebir)
+            sr_band_pct: 3.0,
+            sr_min_strength: 0.0,
+            sr_window: 120,
         }
     }
 }
@@ -130,16 +150,27 @@ fn erfc(x: f64) -> f64 {
 ///  2) sırala → momentum: top-k long / bottom-k short; reversal: ters. Ağırlık long Σ=+1, short Σ=−1.
 ///  3) gerçekleşen getiri = Σ w_j·(close[t+1]/close[t]−1); maliyet = Σ|w−w_prev|·fee_rate.
 pub fn evaluate_xs(closes: &[Vec<Option<f64>>], cfg: &XsConfig) -> XsResult {
+    evaluate_xs_with_ohlc(closes, None, cfg)
+}
+
+/// `evaluate_xs`'in OHLC-FARKINDA sürümü: S/R eğimi (`cfg.sr_tilt`>0) için `closes` ile birebir hizalı
+/// OHLC matrisi alır. `ohlc=None` → close-only (evaluate_xs ile BİREBİR, sıfır regresyon); `Some` +
+/// sr_tilt>0 → compute_weights sıralama-öncesi S/R eğimini uygular.
+pub fn evaluate_xs_with_ohlc(
+    closes: &[Vec<Option<f64>>], ohlc: Option<&[Vec<Option<Candle>>]>, cfg: &XsConfig,
+) -> XsResult {
     let n_sym = if closes.is_empty() { 0 } else { closes[0].len() };
     let mut res = XsResult { symbols_used: n_sym, ..Default::default() };
-    let (rets, turnovers) = xs_returns(closes, cfg);
+    let (rets, turnovers) = xs_returns(closes, ohlc, cfg);
     finalize_metrics(&mut res, &rets, &turnovers, cfg);
     res
 }
 
 /// SAF: kesitsel portföyün bar-bar NET getiri + turnover serisini üretir (metriklerden ayrı →
 /// WF gibi çağrılar OOS dilimlerinin HAM getirisini birleştirebilir). evaluate_xs bunu sarar.
-fn xs_returns(closes: &[Vec<Option<f64>>], cfg: &XsConfig) -> (Vec<f64>, Vec<f64>) {
+fn xs_returns(
+    closes: &[Vec<Option<f64>>], ohlc: Option<&[Vec<Option<Candle>>]>, cfg: &XsConfig,
+) -> (Vec<f64>, Vec<f64>) {
     let n_bars = closes.len();
     let n_sym = if n_bars > 0 { closes[0].len() } else { 0 };
     if n_bars <= cfg.lookback + 1 || n_sym < 2 || cfg.top_k == 0 {
@@ -161,7 +192,7 @@ fn xs_returns(closes: &[Vec<Option<f64>>], cfg: &XsConfig) -> (Vec<f64>, Vec<f64
         let mut changed = false;
         if is_rebalance {
             // No-trade band: MEVCUT kitabı (prev_long/short) histerezisle koruyarak yeni hedef.
-            if let Some((tw, longs, shorts)) = compute_weights(closes, t, cfg, &prev_long, &prev_short) {
+            if let Some((tw, longs, shorts)) = compute_weights(closes, ohlc, t, cfg, &prev_long, &prev_short) {
                 w = tw;
                 prev_long = longs;
                 prev_short = shorts;
@@ -202,7 +233,7 @@ fn xs_returns(closes: &[Vec<Option<f64>>], cfg: &XsConfig) -> (Vec<f64>, Vec<f64
 /// sinyal_j = close[t]/close[t−lookback]−1; reversal'da sinyal ters çevrilir → "long edilecek uç" hep baş.
 /// `select_books` rank-histerezisiyle mevcut kitabı korur (no-trade band). long Σ=+1, short Σ=−1.
 fn compute_weights(
-    closes: &[Vec<Option<f64>>], t: usize, cfg: &XsConfig,
+    closes: &[Vec<Option<f64>>], ohlc: Option<&[Vec<Option<Candle>>]>, t: usize, cfg: &XsConfig,
     prev_long: &HashSet<usize>, prev_short: &HashSet<usize>,
 ) -> Option<(Vec<f64>, HashSet<usize>, HashSet<usize>)> {
     let n_sym = closes[t].len();
@@ -217,6 +248,24 @@ fn compute_weights(
     let need = if cfg.long_short { 2 * cfg.top_k } else { cfg.top_k };
     if sig.len() < need {
         return None;
+    }
+    // 🧱 S/R EĞİMİ (opt-in): SIRALAMA ÖNCESİ skoru S/R-karşıtlığına göre 0'a doğru kıs → karşıtı yüksek
+    // sembol sıralamada uca çıkamaz (top/bottom-k dışına düşer). KAPI DEĞİL eğim: k-long/k-short sayısı
+    // korunur → market-nötrlük bozulmaz. ohlc=None || sr_tilt=0 → atla (close-only birebir). dir: momentum'da
+    // pozitif skor=long-eğilim; reversal'da ters (sig.reverse aşağıda yönü çevirir, eğim ham skor·dir ile).
+    if let (Some(ohlc), true) = (ohlc, cfg.sr_tilt > 0.0) {
+        let detector = SrDetector::new(SrDetectorConfig::default());
+        let dir = if cfg.momentum { 1.0 } else { -1.0 };
+        for (j, s) in sig.iter_mut() {
+            let price = match closes[t][*j] { Some(p) if p > 0.0 => p, _ => continue };
+            let window = collect_sym_window(ohlc, t, *j, cfg.sr_window);
+            if window.len() < 2 { continue; }
+            let zones = detector.detect(&window);
+            if zones.is_empty() { continue; }
+            let lean_long = (*s * dir) >= 0.0;
+            let opp = sr_opposition(&zones, price, lean_long, cfg.sr_band_pct, cfg.sr_min_strength);
+            *s *= 1.0 - cfg.sr_tilt * opp; // karşıtlık büyükse skor 0'a çekilir → uçtan geri düşer
+        }
     }
     sig.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     if !cfg.momentum {
@@ -238,6 +287,50 @@ fn compute_weights(
         }
     }
     Some((w, longs.into_iter().collect(), shorts.into_iter().collect()))
+}
+
+/// SAF: `ohlc` matrisinden sembol `j` için t'de biten son `window` barlık BİTİŞİK mum dizisini toplar
+/// (None'ları atlar → hizalama boşlukları S/R'yi bozmaz). Look-ahead'siz (yalnız ≤t; t barı kapalı).
+fn collect_sym_window(ohlc: &[Vec<Option<Candle>>], t: usize, j: usize, window: usize) -> Vec<Candle> {
+    let lo = (t + 1).saturating_sub(window.max(1));
+    (lo..=t)
+        .filter_map(|b| ohlc.get(b).and_then(|row| row.get(j)).and_then(|c| c.clone()))
+        .collect()
+}
+
+/// SAF: işlem yönüne KARŞI duran en yakın güçlü S/R'nin yakınlığı ∈[0,1] (0=engel yok/uzak, 1=fiyat tam
+/// engelde). long-eğilim → ÜSTteki DİRENÇ karşıt; short-eğilim → ALTtaki DESTEK karşıt. Engelin fiyata
+/// bakan kenarı kullanılır (direnç alt=price_low, destek üst=price_high); band içinde lineer
+/// (1 − mesafe%/band), band dışı 0, fiyat zone İÇİNDEyse 1. Yanlış taraftaki zone karşıt değil. Testli.
+fn sr_opposition(zones: &[SrZone], price: f64, lean_long: bool, band_pct: f64, min_strength: f64) -> f64 {
+    if price <= 0.0 || band_pct <= 0.0 {
+        return 0.0;
+    }
+    let mut best = 0.0_f64;
+    for z in zones {
+        if z.strength < min_strength {
+            continue;
+        }
+        let opposes = if lean_long {
+            matches!(z.zone_type, ZoneType::Resistance)
+        } else {
+            matches!(z.zone_type, ZoneType::Support)
+        };
+        if !opposes {
+            continue;
+        }
+        let prox = if z.contains(price) {
+            1.0
+        } else if lean_long && z.price_low > price {
+            (1.0 - (z.price_low - price) / price * 100.0 / band_pct).max(0.0)
+        } else if !lean_long && z.price_high < price {
+            (1.0 - (price - z.price_high) / price * 100.0 / band_pct).max(0.0)
+        } else {
+            0.0 // engel yanlış tarafta (long için altta kalan direnç vb.) → karşıt değil
+        };
+        best = best.max(prox);
+    }
+    best.clamp(0.0, 1.0)
 }
 
 /// CANLI hedef-kitap skorlayıcısı (DRY: backtest `select_books`'in sembol-anahtarlı sarmalayıcısı).
@@ -412,9 +505,39 @@ pub fn align_closes(cfg: &XsConfig) -> Vec<Vec<Option<f64>>> {
         .collect()
 }
 
-/// DB-YÜKLEYEN sürüm: kapanışları hizalar → `evaluate_xs`.
+/// `align_closes` ile AYNI union ts-ızgarasında hizalı OHLC matrisi (S/R eğimi için). closes ile
+/// bar×sym indeksleri BİREBİR örtüşür (eksik = None). Market-saf. Yalnız sr_tilt>0'da yüklenir (maliyet).
+pub fn align_ohlc(cfg: &XsConfig) -> Vec<Vec<Option<Candle>>> {
+    let mut per_sym: Vec<BTreeMap<i64, Candle>> = Vec::with_capacity(cfg.symbols.len());
+    let mut grid: BTreeMap<i64, ()> = BTreeMap::new();
+    for sym in &cfg.symbols {
+        let candles =
+            read_candles_market(&cfg.db_path, sym, &cfg.interval, &cfg.market, cfg.candle_limit)
+                .unwrap_or_default();
+        let mut m = BTreeMap::new();
+        for c in &candles {
+            let ts = c.timestamp.timestamp_millis();
+            m.insert(ts, c.clone());
+            grid.insert(ts, ());
+        }
+        per_sym.push(m);
+    }
+    let stamps: Vec<i64> = grid.keys().copied().collect();
+    stamps
+        .iter()
+        .map(|ts| per_sym.iter().map(|m| m.get(ts).cloned()).collect())
+        .collect()
+}
+
+/// DB-YÜKLEYEN sürüm: kapanışları hizalar → `evaluate_xs`. sr_tilt>0 ise OHLC de yüklenir → S/R eğimi.
 pub fn run_xs_momentum(cfg: &XsConfig) -> XsResult {
-    evaluate_xs(&align_closes(cfg), cfg)
+    let closes = align_closes(cfg);
+    if cfg.sr_tilt > 0.0 {
+        let ohlc = align_ohlc(cfg);
+        evaluate_xs_with_ohlc(&closes, Some(&ohlc), cfg)
+    } else {
+        evaluate_xs(&closes, cfg)
+    }
 }
 
 /// Rolling walk-forward kalibrasyonu: aday config kümesinden HER IS penceresinde en iyiyi (IS Sharpe)
@@ -440,9 +563,12 @@ pub struct XsWfResult {
 /// SAF WF çekirdeği (hizalanmış matris üzerinde, DB'siz testlenir).
 pub fn evaluate_xs_walkforward(
     closes: &[Vec<Option<f64>>],
+    ohlc: Option<&[Vec<Option<Candle>>]>,
     base: &XsConfig,
     wf: &XsWfConfig,
 ) -> XsWfResult {
+    // closes ile birebir hizalı OHLC dilimi (S/R eğimi IS-seçim + OOS-uygulamada AYNI uygulanmalı → A/B sadık).
+    let osl = |lo: usize, hi: usize| ohlc.map(|o| &o[lo..hi]);
     let n = closes.len();
     let n_sym = if n > 0 { closes[0].len() } else { 0 };
     let mut oos_rets: Vec<f64> = Vec::new();
@@ -457,7 +583,7 @@ pub fn evaluate_xs_walkforward(
         let mut best: Option<((usize, bool), f64)> = None;
         for &(lb, mom) in &wf.candidates {
             let cfg = XsConfig { lookback: lb, momentum: mom, ..base.clone() };
-            let is_res = evaluate_xs(&closes[is_lo..oos_start], &cfg);
+            let is_res = evaluate_xs_with_ohlc(&closes[is_lo..oos_start], osl(is_lo, oos_start), &cfg);
             if is_res.bars > 0 && best.is_none_or(|(_, s)| is_res.ann_sharpe > s) {
                 best = Some(((lb, mom), is_res.ann_sharpe));
             }
@@ -470,9 +596,9 @@ pub fn evaluate_xs_walkforward(
         let lead = sel.0.min(oos_start);
         let seg_hi = (oos_start + wf.oos_bars).min(n);
         let cfg = XsConfig { lookback: sel.0, momentum: sel.1, ..base.clone() };
-        let (rets, turns) = xs_returns(&closes[oos_start - lead..seg_hi], &cfg);
+        let (rets, turns) = xs_returns(&closes[oos_start - lead..seg_hi], osl(oos_start - lead, seg_hi), &cfg);
         let oos_mean = if rets.is_empty() { 0.0 } else { rets.iter().sum::<f64>() / rets.len() as f64 };
-        let is_sharpe = evaluate_xs(&closes[is_lo..oos_start],
+        let is_sharpe = evaluate_xs_with_ohlc(&closes[is_lo..oos_start], osl(is_lo, oos_start),
             &XsConfig { lookback: sel.0, momentum: sel.1, ..base.clone() }).ann_sharpe;
         oos_rets.extend(rets);
         oos_turn.extend(turns);
@@ -488,7 +614,13 @@ pub fn evaluate_xs_walkforward(
 
 /// DB-YÜKLEYEN WF sürümü: hizala → `evaluate_xs_walkforward`.
 pub fn run_xs_walkforward(base: &XsConfig, wf: &XsWfConfig) -> XsWfResult {
-    evaluate_xs_walkforward(&align_closes(base), base, wf)
+    let closes = align_closes(base);
+    if base.sr_tilt > 0.0 {
+        let ohlc = align_ohlc(base);
+        evaluate_xs_walkforward(&closes, Some(&ohlc), base, wf)
+    } else {
+        evaluate_xs_walkforward(&closes, None, base, wf)
+    }
 }
 
 #[cfg(test)]
@@ -715,7 +847,7 @@ mod tests {
             is_bars: 40, oos_bars: 20,
             candidates: vec![(3, true), (3, false), (7, true), (7, false)], // mom + rev adayları
         };
-        let r = evaluate_xs_walkforward(&closes, &base, &wf);
+        let r = evaluate_xs_walkforward(&closes, None, &base, &wf);
         assert!(r.windows >= 2, "birden çok OOS penceresi üretilmeli");
         assert!(r.oos.bars > 0 && r.oos.mean_ret > 0.0, "OOS getiri pozitif (trend kör-test'te sürer)");
         assert!(r.selections.iter().all(|(_, mom)| *mom),
@@ -729,5 +861,90 @@ mod tests {
         assert_eq!(evaluate_xs(&[], &cfg).bars, 0, "boş matris → 0 bar");
         let short = vec![vec![Some(1.0), Some(1.0)]; 3];
         assert_eq!(evaluate_xs(&short, &cfg).bars, 0, "lookback'ten kısa → 0 bar");
+    }
+
+    // ─── S/R EĞİMİ ───
+    fn zone(zt: ZoneType, low: f64, high: f64, strength: f64) -> SrZone {
+        SrZone {
+            price_low: low, price_high: high, midpoint: (low + high) / 2.0,
+            zone_type: zt, strength, touch_count: 3, vol_weight: 1.0,
+        }
+    }
+    fn cdl(close: f64) -> Candle {
+        Candle {
+            timestamp: chrono::Utc::now(), open: close, high: close, low: close,
+            close, volume: 1.0, symbol: "X".into(), interval: "1d".into(),
+        }
+    }
+
+    // sr_opposition: yön + band + içeride + yanlış-taraf + güç-eşiği.
+    #[test]
+    fn sr_opposition_directional_and_banded() {
+        let band = 3.0;
+        // long-eğilim: ÜSTteki direnç karşıt. [101,102] → dist=1% → 1−1/3≈0.667.
+        let near = vec![zone(ZoneType::Resistance, 101.0, 102.0, 5.0)];
+        assert!((sr_opposition(&near, 100.0, true, band, 0.0) - (1.0 - 1.0 / 3.0)).abs() < 1e-6);
+        // band dışı direnç (10%) → 0.
+        let far = vec![zone(ZoneType::Resistance, 110.0, 111.0, 5.0)];
+        assert_eq!(sr_opposition(&far, 100.0, true, band, 0.0), 0.0, "uzak direnç karşıtlık yok");
+        // fiyat direnç İÇİNDE → 1.0 (en güçlü engel).
+        let inside = vec![zone(ZoneType::Resistance, 99.5, 100.5, 5.0)];
+        assert_eq!(sr_opposition(&inside, 100.0, true, band, 0.0), 1.0, "zone içinde tam karşıtlık");
+        // long-eğilime ALTtaki destek karşıt DEĞİL.
+        let sup = vec![zone(ZoneType::Support, 98.0, 99.0, 5.0)];
+        assert_eq!(sr_opposition(&sup, 100.0, true, band, 0.0), 0.0, "long'a destek karşıt değil");
+        // short-eğilim: ALTtaki destek karşıt. [98,99] → dist=1% → ≈0.667.
+        assert!((sr_opposition(&sup, 100.0, false, band, 0.0) - (1.0 - 1.0 / 3.0)).abs() < 1e-6);
+        // KIRILMIŞ direnç (fiyatın altında) long'a karşıt değil.
+        let broken = vec![zone(ZoneType::Resistance, 98.0, 99.0, 5.0)];
+        assert_eq!(sr_opposition(&broken, 100.0, true, band, 0.0), 0.0, "altta kalan direnç karşıt değil");
+        // güç-eşiği: zayıf zone elenir.
+        assert_eq!(sr_opposition(&near, 100.0, true, band, 9.0), 0.0, "min_strength altı zone sayılmaz");
+    }
+
+    // collect_sym_window: None'ları atlar, son `window` barı toplar, look-ahead'siz (>t dahil değil).
+    #[test]
+    fn collect_window_skips_gaps_and_respects_horizon() {
+        // 5 bar × 2 sembol; sembol 0'da bar 2 None.
+        let ohlc: Vec<Vec<Option<Candle>>> = vec![
+            vec![Some(cdl(10.0)), Some(cdl(20.0))],
+            vec![Some(cdl(11.0)), None],
+            vec![None,            Some(cdl(22.0))],
+            vec![Some(cdl(13.0)), Some(cdl(23.0))],
+            vec![Some(cdl(14.0)), Some(cdl(24.0))],
+        ];
+        // t=3, window=3 → barlar 1..=3, sembol 0: bar2 None → [11.0, 13.0].
+        let w = collect_sym_window(&ohlc, 3, 0, 3);
+        assert_eq!(w.iter().map(|c| c.close).collect::<Vec<_>>(), vec![11.0, 13.0]);
+        // t=2 → bar 4'ü (gelecek) ASLA içermez (look-ahead yok).
+        let w2 = collect_sym_window(&ohlc, 2, 1, 10);
+        assert!(w2.iter().all(|c| c.close <= 22.0), "gelecek bar sızmamalı");
+    }
+
+    // SIFIR REGRESYON: ohlc=None VEYA sr_tilt=0 → evaluate_xs ile BİREBİR (S/R eklentisi eski yolu bozmaz).
+    #[test]
+    fn sr_tilt_zero_is_bit_identical() {
+        let mut a = 100.0;
+        let mut c = 100.0;
+        let mut closes = Vec::new();
+        for _ in 0..60 {
+            closes.push(vec![Some(a), Some(100.0), Some(c)]);
+            a *= 1.02;
+            c *= 0.98;
+        }
+        let cfg = XsConfig {
+            symbols: vec!["A".into(), "B".into(), "C".into()],
+            top_k: 1, lookback: 5, fee_rate: 0.001, ..Default::default()
+        };
+        let base = evaluate_xs(&closes, &cfg);
+        // ohlc=None → birebir.
+        let none = evaluate_xs_with_ohlc(&closes, None, &cfg);
+        assert_eq!(base.bars, none.bars);
+        assert_eq!(base.total_return.to_bits(), none.total_return.to_bits(), "None → birebir");
+        // Some(ohlc) ama sr_tilt=0 → eğim bloğu atlanır → yine birebir (ohlc içeriği önemsiz).
+        let dummy: Vec<Vec<Option<Candle>>> = vec![vec![None, None, None]; closes.len()];
+        let tilt0 = evaluate_xs_with_ohlc(&closes, Some(&dummy), &XsConfig { sr_tilt: 0.0, ..cfg.clone() });
+        assert_eq!(base.total_return.to_bits(), tilt0.total_return.to_bits(), "sr_tilt=0 → birebir");
+        assert_eq!(base.t_stat.to_bits(), tilt0.t_stat.to_bits());
     }
 }

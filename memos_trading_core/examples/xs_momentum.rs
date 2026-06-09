@@ -59,11 +59,19 @@ fn main() {
     let lookbacks: Vec<usize> = std::env::var("XS_LOOKBACKS").ok()
         .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
         .unwrap_or_else(|| vec![1, 3, 7, 14, 30]);
+    // S/R EĞİMİ (opt-in): XS_SR_TILT>0 → sıralama-öncesi skoru S/R-karşıtlığına göre kıs (OHLC yüklenir).
+    let sr_tilt: f64 = std::env::var("XS_SR_TILT").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let sr_band_pct: f64 = std::env::var("XS_SR_BAND").ok().and_then(|s| s.parse().ok()).unwrap_or(3.0);
+    let sr_min_strength: f64 = std::env::var("XS_SR_MIN_STRENGTH").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let sr_window: usize = std::env::var("XS_SR_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
+    // Sembol başına yüklenen en-yeni mum tavanı. Düşük TF + derin geçmişte (4h 5y ≈ 10950 bar) artır.
+    let candle_limit: usize = std::env::var("XS_CANDLE_LIMIT").ok().and_then(|s| s.parse().ok()).unwrap_or(5000);
 
     let base = XsConfig {
         db_path, market: market.clone(), interval: interval.clone(), symbols: symbols.clone(),
-        candle_limit: 5000, top_k, fee_rate, long_short, wf_window, rebalance_every, exit_buffer, leverage,
-        bars_per_year: bars_per_year(&interval), ..Default::default()
+        candle_limit, top_k, fee_rate, long_short, wf_window, rebalance_every, exit_buffer, leverage,
+        bars_per_year: bars_per_year(&interval), sr_tilt, sr_band_pct, sr_min_strength, sr_window,
+        ..Default::default() // lookback/momentum: aile döngüsünde override edilir
     };
 
     // Aile: her lookback × {momentum, reversal}. Šidák test-başı eşik = 1−(1−α)^(1/N).
@@ -86,6 +94,9 @@ fn main() {
         symbols.len());
     println!("   top_k={top_k} · fee={:.4}/turnover · {} · rebalance={rebalance_every} · band={exit_buffer} · lev={leverage} · aile={} · Šidák p≤{:.4}",
         fee_rate, if long_short { "LONG-SHORT" } else { "LONG-ONLY" }, configs.len(), sidak);
+    if sr_tilt > 0.0 {
+        println!("   🧱 S/R EĞİMİ AÇIK: tilt={sr_tilt} · band={sr_band_pct}% · min_güç={sr_min_strength} · pencere={sr_window} bar");
+    }
     println!();
     println!("   {:>4} {:>9} | {:>5} {:>8} {:>7} {:>6} | {:>7} {:>7} | {:>4}/{:<4} {:>7} | verdikt",
         "lb", "yön", "bar", "annRet%", "Sharpe", "win%", "t-stat", "t-p", "wfW", "wfN", "binom-p");
