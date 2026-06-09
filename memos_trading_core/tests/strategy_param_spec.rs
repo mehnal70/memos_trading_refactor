@@ -4,29 +4,7 @@
 // step>0. Yeni strateji eklenince bu test onu otomatik kapsar (canonical_pool).
 
 use memos_trading_core::core::types::StrategyParams;
-use memos_trading_core::robot::strategies::{default_registry, apply_param, build_params};
-
-/// apply_param'ın tanıdığı alan adları — param_spec adları bu kümede olmalı.
-const BILINEN_ALANLAR: &[&str] = &[
-    "fast", "slow", "period", "fast_period", "slow_period",
-    "signal_period", "bb_period", "overbought", "oversold", "std_dev",
-];
-
-fn alan_okunabilir(p: &StrategyParams, name: &str) -> bool {
-    match name {
-        "fast" => p.fast.is_some(),
-        "slow" => p.slow.is_some(),
-        "period" => p.period.is_some(),
-        "fast_period" => p.fast_period.is_some(),
-        "slow_period" => p.slow_period.is_some(),
-        "signal_period" => p.signal_period.is_some(),
-        "bb_period" => p.bb_period.is_some(),
-        "overbought" => p.overbought.is_some(),
-        "oversold" => p.oversold.is_some(),
-        "std_dev" => p.std_dev.is_some(),
-        _ => false,
-    }
-}
+use memos_trading_core::robot::strategies::{default_registry, apply_param, build_params, keys};
 
 #[test]
 fn her_strateji_param_spec_tutarli() {
@@ -35,9 +13,9 @@ fn her_strateji_param_spec_tutarli() {
         let strat = reg.make(&name);
         let specs = strat.param_spec();
         for spec in &specs {
-            // (1) ad tanınıyor mu?
+            // (1) ad tanınıyor mu? (keys::ALL tek-kaynak sözlük)
             assert!(
-                BILINEN_ALANLAR.contains(&spec.name),
+                keys::is_known(spec.name),
                 "Strateji '{}' param_spec'inde bilinmeyen alan '{}' — apply_param sessizce yok sayar (typo?)",
                 name, spec.name,
             );
@@ -49,7 +27,7 @@ fn her_strateji_param_spec_tutarli() {
             let mut p = StrategyParams::default();
             apply_param(&mut p, spec.name, spec.sample(0.5));
             assert!(
-                alan_okunabilir(&p, spec.name),
+                p.get(spec.name).is_some(),
                 "'{}': '{}' apply_param sonrası StrategyParams'a yazılmadı",
                 name, spec.name,
             );

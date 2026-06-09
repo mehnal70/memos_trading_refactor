@@ -1,0 +1,149 @@
+Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Strateji parametre modülerliği: god-bag → inline KV-torba (DRY + OOP)
+
+ Context
+
+ core/types.rs::StrategyParams bugün sabit 10-alanlı "god parameter bag" (her alan Option<…>).
+ Bu kapalı kelime-dağarcığı, strateji denetiminin (project_strategy_param_audit) bulduğu kök
+ mimari sınır:
+
+ - Yeni bir karar eşiği (doji oranı, HTF periyodu, StochRSI smooth, funding eşiği) açmak için
+ üç yeri birden değiştirmek gerekiyor: struct alanı + apply_param match kolu + serde.
+ - Bu yüzden gömülü sabitler optimize/config edilemez halde kalmış:
+   - HTF filtre 10/30 — standard.rs::finalize, oscillator.rs, volatility.rs'te SABİT
+ (tutarsız: trend.rs::EmaCrossover doğru yapıp kendi periyodunu geçiriyor).
+   - StochRSI smooth_k=3 / smooth_d=3 gömülü.
+   - PriceAction doji 0.10 / engulf 1.1 / pin 2.0.
+   - ICT FVG yakınlık 0.01.
+   - FundingContrarian threshold=0.0005 (struct alanı ama param sisteminde yok).
+
+ Hedef: StrategyParams'ı açık-kelime-dağarcıklı, Copy, allocation-free inline KV-torbaya
+ çevirip (DRY: tek-satır set; OOP: her strateji kendi paramını param_spec'le bildirir),
+ ardından yukarıdaki gömülü sabitleri torbadan okunabilir hale getirmek — makul varsayılanlarla,
+ param_spec'e EKLEMEDEN. Yani davranış birebir korunur (optimizer bu yeni paramları
+ otomatik tunelemez → overfit yok), ama config/ParameterStore'dan ayarlanabilir olurlar.
+
+ Kritik kısıtlar (keşifte doğrulandı):
+ - StrategyParams Copy ve grid search'te Vec<StrategyParams> / .copied() kullanılıyor →
+ alloc-free + Copy korunmalı (HashMap olmaz). Inline sabit-kapasiteli dizi bunu sağlar.
+ - ParameterStore diske yazılıp geri okunmuyor (persistence.rs:65: "from_env tek-kaynak,
+ disk reload yok") → serde formatının geriye-uyum derdi YOK; iç temsili özgürce değiştirebiliriz.
+ - İndikatörler (core/indicators.rs) zaten parametreli (calculate_rsi(c, period)…); iç sabitleri
+ (Wilder 1/period, %K=3) formül TANIMI → dokunulmaz (aşırı-parametreleme tuzağı).
+
+ ---
+ Faz 1 — Mimari: inline KV-torba
+
+ 1a. core/types.rs — yeni StrategyParams
+
+ Copy, sabit kapasiteli (CAP = 16, mevcut maks ~4 param/strateji'ye bol pay) inline harita:
+
+ #[derive(Debug, Clone, Copy)]
+ pub struct StrategyParams {
+     keys: [&'static str; Self::CAP],
+     vals: [f64; Self::CAP],
+     len: usize,
+ }
+ impl StrategyParams {
+     pub const CAP: usize = 16;
+     pub const fn new() -> Self { /* boş */ }
+     pub fn get(&self, key: &str) -> Option<f64>;          // lineer tarama (≤16, ucuz)
+     pub fn usize_or(&self, key: &str, d: usize) -> usize; // round().max(1) — periyot okuma
+     pub fn f64_or(&self, key: &str, d: f64) -> f64;       // eşik/çarpan okuma
+     pub fn set(&mut self, key: &'static str, v: f64);     // upsert; kapasite dolarsa warn+atla
+     pub fn with(self, key: &'static str, v: f64) -> Self; // builder (test/kurulum)
+     pub fn is_empty(&self) -> bool;
+ }
+ impl Default for StrategyParams { /* boş torba */ }
+
+ - Yuvarlama politikası tek-noktaya taşınır: torba ham f64 saklar, periyotlar okuma anında
+ usize_or ile yuvarlanır (eski apply_param'daki yazma-anı as_period yerine). Davranış-eşdeğer
+ (Int paramları ParamSpec::sample/grid_values zaten tam-sayı üretiyor).
+ - Serde: elle Serialize (dolu keys[..len] → vals map'i) + Deserialize (BTreeMap<String,f64>
+ oku, keys::intern ile bilinen anahtarlara eşle, bilinmeyeni at). Persist edilmediği için kayıpsızlık
+ zorunlu değil ama testler/rapor için temiz map formu. parameters/mod.rs:702 rapor serileştirmesi
+ map formuyla çalışmaya devam eder (alan-pattern'i yok).
+
+ 1b. Yeni src/robot/strategies/keys.rs — tek-kaynak anahtar sözlüğü
+
+ Tüm param adları pub const &str (typo → derleme hatası, grep'lenebilir). core/types.rs bunlara
+ bağımlı değil (katman temiz: anahtarlar robot::strategies katmanında, torba API'si nötr &str alır).
+
+ pub const FAST: &str = "fast"; SLOW; PERIOD; FAST_PERIOD; SLOW_PERIOD;
+ pub const SIGNAL_PERIOD; BB_PERIOD; OVERBOUGHT; OVERSOLD; STD_DEV;     // mevcut 10
+ pub const HTF_FAST; HTF_SLOW; SMOOTH_K; SMOOTH_D;                      // Faz 2
+ pub const DOJI_RATIO; ENGULF_RATIO; PIN_RATIO; FVG_PROXIMITY; FUNDING_THRESHOLD;
+ pub const ALL: &[&str] = &[ … ];          // deser interning + test doğrulama kaynağı
+ pub fn intern(s: &str) -> Option<&'static str>;
+
+ 1c. param_spec.rs — apply_param DRY çöküşü
+
+ pub fn apply_param(p: &mut StrategyParams, name: &str, value: f64) {
+     if let Some(key) = keys::intern(name) { p.set(key, value); }  // ← tek satır, match yok
+ }
+ build_params aynen apply_param'ı çağırır (spec.name → intern). "Bilinmeyen ad sessiz no-op"
+ semantiği korunur (strategy_param_spec testi bunu kontrol ediyor).
+
+ 1d. Okuma sitelerini migrate et (~24 site, davranış-aynı)
+
+ Pattern: params.<field>.unwrap_or(d) → params.usize_or(keys::<KEY>, d) (periyot) /
+ params.f64_or(keys::<KEY>, d) (eşik). Dosyalar:
+ - strategies/standard.rs (RSI/MACD/Supertrend/ICT/SMC — 12 site)
+ - strategies/oscillator.rs (StochRSI/CCI — 7) · strategies/volatility.rs (BB/Donchian — 3)
+ - strategies/trend.rs (EmaCrossover — 2)
+ - ml_engine/hyperopt.rs: 2 struct-literal kurulumu (StrategyParams { fast: Some(..), ..Default }
+ ve ..*best) → builder zincirine (*best/default().with(keys::FAST, ..)…); okumalar usize_or.
+
+ core/indicators.rs değişmez (param.<field> eşleşmeleri yanlış-pozitif: yerel period dilimleme).
+
+ ---
+ Faz 2 — Gömülü sabitleri aç (param_spec'e EKLEMEDEN, davranış birebir)
+
+ Hepsi varsayılanı eski literal değere eşit → davranış değişmez; sadece config/store ile
+ override edilebilir hale gelir. Hiçbiri ilgili stratejinin param_spec()'ine eklenmez
+ (feedback: "donuk-makul sabit > tunable-overfit param"; her açılan param WF ister).
+
+ - HTF 10/30: utils.rs'e htf_periods(p) -> (usize,usize) =
+ (p.usize_or(keys::HTF_FAST,10), p.usize_or(keys::HTF_SLOW,30)).
+   - standard.rs::finalize(raw, params, htf, name) imzasına params eklenir, htf_periods kullanır;
+ tüm finalize(...) çağrıları params geçer (PriceAction'da _: &StrategyParams → params).
+   - oscillator.rs (StochRSI/CCI) ve volatility.rs (BB/Donchian) literal htf_trend_filter(raw,htf,10,30,…)
+ → htf_periods ile.
+   - trend.rs::EmaCrossover: (p.usize_or(keys::HTF_FAST, fast_p), p.usize_or(keys::HTF_SLOW, slow_p))
+ — varsayılan = kendi periyodu (mevcut davranış korunur), override onurlanır.
+ - StochRSI smooth: p.usize_or(keys::SMOOTH_K, 3), p.usize_or(keys::SMOOTH_D, 3).
+ - PriceAction: doji f64_or(DOJI_RATIO,0.10), engulf f64_or(ENGULF_RATIO,1.1),
+ pin f64_or(PIN_RATIO,2.0). (Karşı-gölge 0.5 katsayısı yapısal guard olarak literal kalır — knob azalt.)
+ - ICT FVG: yakınlık f64_or(FVG_PROXIMITY,0.01). (Composite'teki 6 pencere yapısal lookback → literal.)
+ - Funding: funding.rs p.f64_or(keys::FUNDING_THRESHOLD, self.threshold) — bag override eder,
+ struct alanı inşa-anı varsayılan olarak kalır.
+
+ ---
+ Testler
+
+ Güncellenecek (alan→API):
+ - param_spec.rs birim testleri (apply_param_alanlara_yazar, build_params_paralel_vektor) → get/usize_or.
+ - tests/strategy_param_spec.rs::alan_okunabilir → p.get(name).is_some() (match listesi siliniyor — DRY).
+ - tests/strategy_param_optimize.rs (sp.period = Some(11) / .overbought / assert'ler) → .with() + .get().
+
+ Eklenecek birim testleri:
+ - Torba: get/set upsert, kapasite-doluluk no-op, usize_or yuvarlama, with builder, serde roundtrip.
+ - keys::intern bilinen/bilinmeyen; ALL ⊇ tüm strateji param_spec adları (kayma yakalama).
+ - Faz 2: htf_periods varsayılan (10/30) + override; EmaCrossover override; StochRSI/doji/funding
+ varsayılanları eski literal sonucu birebir veriyor (davranış-koruma assertion'ları).
+
+ Doğrulama
+
+ cargo build -p memos_trading_core
+ cargo test  -p memos_trading_core           # 272+ lib + entegrasyon yeşil kalmalı
+ cargo clippy -p memos_trading_core           # yeni uyarı sızdırma
+ - Davranış-koruma kanıtı: Faz 2 sonrası strateji sinyal testleri (tests/strategy_signals.rs)
+ default paramla DEĞİŞMEDEN geçmeli (defaultlar eski literallere eşit). Bu, "refactor + sabit-açma
+ ama davranış aynı" iddiasının regresyon kapısı.
+ - İsteğe bağlı kısa canlı duman: rtc_headless ~60sn — sinyal akışı bozulmadı mı (defaultlar aktif).
+
+ Kapsam dışı (ayrı tur, A/B+WF ile)
+
+ - Faz 2 paramlarını param_spec'e ekleyip optimizer'a açmak (overfit riski — kanıt ister).
+ - ICT/SMC yapısal lookback'lerini (FVG penceresi 6, swing) param'a çevirmek.

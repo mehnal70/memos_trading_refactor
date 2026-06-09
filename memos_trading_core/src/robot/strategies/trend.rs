@@ -6,6 +6,7 @@ use crate::core::indicators::calculate_ema;
 use crate::core::types::{Candle, Signal, StrategyParams, FundingRatePoint};
 use crate::robot::strategies::base::Strategy;
 use crate::robot::strategies::param_spec::ParamSpec;
+use crate::robot::strategies::keys;
 use crate::robot::strategies::utils::htf_trend_filter;
 use crate::Result;
 
@@ -21,8 +22,8 @@ impl Strategy for EmaCrossoverStrategy {
         ]
     }
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
-        let fast_p = params.fast.unwrap_or(9);
-        let slow_p = params.slow.unwrap_or(21);
+        let fast_p = params.usize_or(keys::FAST, 9);
+        let slow_p = params.usize_or(keys::SLOW, 21);
         let n = candles.len();
         if n < slow_p + 2 { return Ok(Signal::Hold); }
 
@@ -38,6 +39,10 @@ impl Strategy for EmaCrossoverStrategy {
         let raw = if pf <= ps && cf > cs { Signal::Buy }
                   else if pf >= ps && cf < cs { Signal::Sell }
                   else { Signal::Hold };
-        Ok(htf_trend_filter(raw, htf, fast_p, slow_p, "EMA Crossover"))
+        // HTF filtre periyodu: ayarlıysa override, değilse kendi sinyal periyodu
+        // (mevcut davranış korunur — EmaCrossover deseni torbaya genelleştirildi).
+        let hf = params.usize_or(keys::HTF_FAST, fast_p);
+        let hs = params.usize_or(keys::HTF_SLOW, slow_p);
+        Ok(htf_trend_filter(raw, htf, hf, hs, "EMA Crossover"))
     }
 }

@@ -6,7 +6,12 @@ use std::time::Duration;
 use std::fs;
 use std::thread::sleep;
 
+// Çevreye-bağımlı smoke testi: BAŞKA bir dizine (memos_trading) hard-coded mutlak
+// yol bekler ve canlı otomasyonun oraya log/DB yazmış olmasını şart koşar. Temiz
+// checkout'ta deterministik değil → #[ignore] (network/env testleriyle aynı sınıf,
+// bkz. scripts/run_flaky_check.sh). Elle çalıştır: `cargo test -- --ignored`.
 #[test]
+#[ignore = "çevreye-bağımlı: harici memos_trading dizinine canlı log/DB yazılmasını gerektirir"]
 fn test_otomasyon_akisi_baslatma_ve_log_kontrol() {
     let log_path = "/home/ulas/PyCharmMiscProject/memos_trading/logs/trade_history.jsonl";
     let db_path = "/home/ulas/PyCharmMiscProject/memos_trading/data/trader.db";

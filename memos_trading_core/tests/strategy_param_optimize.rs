@@ -54,9 +54,11 @@ fn spec_search_strateji_uzayindan_orneklenir() {
 
     // Bulunan en iyi paramlar RSI uzayının aralığında mı?
     let p = res.best_params;
-    let period = p.period.expect("period set olmalı");
+    assert!(p.get("period").is_some(), "period set olmalı");
+    let period = p.usize_or("period", 0);
     assert!((7..=21).contains(&period), "period {} 7..=21 dışında", period);
-    let ob = p.overbought.expect("overbought set olmalı");
+    assert!(p.get("overbought").is_some(), "overbought set olmalı");
+    let ob = p.f64_or("overbought", 0.0);
     assert!((65.0..=85.0).contains(&ob), "overbought {} 65..=85 dışında", ob);
     assert!(res.combinations_tested > 0);
 }
@@ -112,17 +114,15 @@ fn use_htf_dususta_buy_filtreler() {
 #[test]
 fn parameter_store_set_resolve_roundtrip() {
     let mut ps = ParameterStore::default();
-    // Yokken default döner.
-    assert_eq!(ps.resolve_strategy_params("RSI").period, None);
+    // Yokken boş torba döner.
+    assert_eq!(ps.resolve_strategy_params("RSI").get("period"), None);
 
-    let mut sp = StrategyParams::default();
-    sp.period = Some(11);
-    sp.overbought = Some(73.0);
+    let sp = StrategyParams::default().with("period", 11.0).with("overbought", 73.0);
     ps.set_strategy_params("RSI", sp);
 
     let got = ps.resolve_strategy_params("RSI");
-    assert_eq!(got.period, Some(11));
-    assert_eq!(got.overbought, Some(73.0));
+    assert_eq!(got.usize_or("period", 0), 11);
+    assert_eq!(got.f64_or("overbought", 0.0), 73.0);
     // Başka strateji etkilenmez.
-    assert_eq!(ps.resolve_strategy_params("MACD").period, None);
+    assert_eq!(ps.resolve_strategy_params("MACD").get("period"), None);
 }

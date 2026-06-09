@@ -12,7 +12,8 @@ use crate::core::indicators::calculate_bollinger;
 use crate::core::types::{Candle, Signal, StrategyParams, FundingRatePoint};
 use crate::robot::strategies::base::Strategy;
 use crate::robot::strategies::param_spec::ParamSpec;
-use crate::robot::strategies::utils::htf_trend_filter;
+use crate::robot::strategies::keys;
+use crate::robot::strategies::utils::{htf_trend_filter, htf_periods};
 use crate::Result;
 
 pub struct BollingerBandsStrategy;
@@ -26,8 +27,8 @@ impl Strategy for BollingerBandsStrategy {
         ]
     }
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
-        let period = params.period.unwrap_or(20);
-        let mult = params.std_dev.unwrap_or(2.0);
+        let period = params.usize_or(keys::PERIOD, 20);
+        let mult = params.f64_or(keys::STD_DEV, 2.0);
         if candles.len() < period { return Ok(Signal::Hold); }
 
         let bands = calculate_bollinger(candles, period, mult);
@@ -38,7 +39,8 @@ impl Strategy for BollingerBandsStrategy {
         let raw = if last_close < lower { Signal::Buy }
                   else if last_close > upper { Signal::Sell }
                   else { Signal::Hold };
-        Ok(htf_trend_filter(raw, htf, 10, 30, "Bollinger Bands"))
+        let (hf, hs) = htf_periods(params);
+        Ok(htf_trend_filter(raw, htf, hf, hs, "Bollinger Bands"))
     }
 }
 
@@ -50,7 +52,7 @@ impl Strategy for DonchianChannelStrategy {
         vec![ParamSpec::int("period", 10.0, 40.0, 2.0)] // breakout penceresi
     }
     fn generate_signal(&self, candles: &[Candle], params: &StrategyParams, _: Option<&[FundingRatePoint]>, htf: Option<&[Candle]>) -> Result<Signal> {
-        let period = params.period.unwrap_or(20);
+        let period = params.usize_or(keys::PERIOD, 20);
         let n = candles.len();
         if n < period + 1 { return Ok(Signal::Hold); }
 
@@ -63,7 +65,8 @@ impl Strategy for DonchianChannelStrategy {
         let raw = if last_close > highest { Signal::Buy }
                   else if last_close < lowest { Signal::Sell }
                   else { Signal::Hold };
-        Ok(htf_trend_filter(raw, htf, 10, 30, "Donchian"))
+        let (hf, hs) = htf_periods(params);
+        Ok(htf_trend_filter(raw, htf, hf, hs, "Donchian"))
     }
 }
 

@@ -5,6 +5,7 @@
 
 use crate::core::types::{Candle, Signal, StrategyParams, FundingRatePoint};
 use crate::robot::strategies::base::Strategy;
+use crate::robot::strategies::keys;
 use crate::Result;
 
 pub struct FundingRateContrarianStrategy {
@@ -20,7 +21,7 @@ impl Strategy for FundingRateContrarianStrategy {
     fn generate_signal(
         &self,
         _candles: &[Candle],
-        _params: &StrategyParams,
+        params: &StrategyParams,
         funding_rates: Option<&[FundingRatePoint]>,
         _htf: Option<&[Candle]>,
     ) -> Result<Signal> {
@@ -33,8 +34,10 @@ impl Strategy for FundingRateContrarianStrategy {
             None => return Ok(Signal::Hold),
         };
 
-        let raw = if last.funding_rate >=  self.threshold { Signal::Sell }
-                  else if last.funding_rate <= -self.threshold { Signal::Buy }
+        // Eşik torbadan override edilebilir; ayarsızsa inşa-anı struct alanı (default 0.0005).
+        let threshold = params.f64_or(keys::FUNDING_THRESHOLD, self.threshold);
+        let raw = if last.funding_rate >=  threshold { Signal::Sell }
+                  else if last.funding_rate <= -threshold { Signal::Buy }
                   else { Signal::Hold };
         Ok(raw)
     }

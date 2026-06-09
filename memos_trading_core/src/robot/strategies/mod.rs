@@ -4,6 +4,7 @@
 // Indicator hesaplamaları core::indicators'a delege edilir.
 
 pub mod base;
+pub mod keys;
 pub mod param_spec;
 pub mod utils;
 pub mod standard;
@@ -25,7 +26,7 @@ pub use param_spec::{ParamSpec, ParamKind, apply_param, build_params};
 pub use registry::{default_registry, StrategyFactory, StrategyRegistry};
 
 // Yardımcılar (HTF filter, optimizer)
-pub use utils::{htf_trend_filter, grid_search_optimization};
+pub use utils::{htf_trend_filter, htf_periods, grid_search_optimization};
 
 // Standart bank: trend + osilatör + price action + SMC ailesi
 pub use standard::{

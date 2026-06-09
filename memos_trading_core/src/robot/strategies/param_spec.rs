@@ -89,23 +89,13 @@ impl ParamSpec {
     }
 }
 
-/// TEK-KAYNAK: bir `StrategyParams` alanını ADIYLA set eder. Bilinmeyen ad sessizce
-/// yok sayılır. utils.rs grid_search_optimization ve HyperOpt spec-araması aynı
-/// haritayı kullanır → yeni alan eklerken yalnız burası güncellenir.
+/// TEK-KAYNAK: bir `StrategyParams` torbasına ADIYLA değer yazar. Bilinmeyen ad
+/// (`keys::is_known` dışı) sessizce yok sayılır → param_spec typo'su sessiz no-op
+/// olur (test bunu yakalar). Periyot yuvarlaması artık okuma anında (`usize_or`)
+/// yapılır; torba ham `f64` saklar. Yeni param eklemek = `keys`'e bir sabit.
 pub fn apply_param(p: &mut StrategyParams, name: &str, value: f64) {
-    let as_period = || value.round().max(1.0) as usize;
-    match name {
-        "fast"          => p.fast = Some(as_period()),
-        "slow"          => p.slow = Some(as_period()),
-        "period"        => p.period = Some(as_period()),
-        "fast_period"   => p.fast_period = Some(as_period()),
-        "slow_period"   => p.slow_period = Some(as_period()),
-        "signal_period" => p.signal_period = Some(as_period()),
-        "bb_period"     => p.bb_period = Some(as_period()),
-        "overbought"    => p.overbought = Some(value),
-        "oversold"      => p.oversold = Some(value),
-        "std_dev"       => p.std_dev = Some(value),
-        _ => {}
+    if crate::robot::strategies::keys::is_known(name) {
+        p.set(name, value);
     }
 }
 
@@ -155,10 +145,11 @@ mod tests {
         apply_param(&mut p, "std_dev", 2.5);
         apply_param(&mut p, "overbought", 72.0);
         apply_param(&mut p, "bilinmeyen", 9.0); // sessiz yok sayılır
-        assert_eq!(p.fast, Some(5)); // 5.4 → round 5
-        assert_eq!(p.slow, Some(20));
-        assert_eq!(p.std_dev, Some(2.5));
-        assert_eq!(p.overbought, Some(72.0));
+        assert_eq!(p.usize_or("fast", 0), 5); // 5.4 ham saklanır, okuma anında round → 5
+        assert_eq!(p.usize_or("slow", 0), 20);
+        assert_eq!(p.f64_or("std_dev", 0.0), 2.5);
+        assert_eq!(p.f64_or("overbought", 0.0), 72.0);
+        assert_eq!(p.get("bilinmeyen"), None); // bilinmeyen ad torbaya girmedi
     }
 
     #[test]
@@ -168,7 +159,7 @@ mod tests {
             ParamSpec::pct("overbought", 65.0, 85.0, 5.0),
         ];
         let p = build_params(&specs, &[14.0, 70.0]);
-        assert_eq!(p.period, Some(14));
-        assert_eq!(p.overbought, Some(70.0));
+        assert_eq!(p.usize_or("period", 0), 14);
+        assert_eq!(p.f64_or("overbought", 0.0), 70.0);
     }
 }

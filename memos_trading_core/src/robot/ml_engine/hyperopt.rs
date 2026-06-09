@@ -9,6 +9,7 @@
 use crate::core::types::{Candle, StrategyParams};
 use crate::robot::backtester::{Backtester, BacktestConfig};
 use crate::robot::strategies::param_spec::{ParamSpec, build_params};
+use crate::robot::strategies::keys;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -87,15 +88,14 @@ impl HyperOpt {
     /// §87.2: Random Search - Geniş arama uzayını rastgele örnekler.
     pub fn random_search(candles: &[Candle], n: usize, b_cfg: &BacktestConfig, seed: Option<u64>) -> Option<HyperOptResult> {
         let mut prng = SrivastavaPrng::new(seed);
-        let random_grid: Vec<_> = (0..n).map(|_| StrategyParams {
-            fast: Some(prng.range(3, 15) as usize),
-            slow: Some(prng.range(20, 60) as usize),
-            period: Some(prng.range(7, 21) as usize),
-            overbought: Some(prng.float(65.0, 82.0)),
-            oversold: Some(prng.float(18.0, 35.0)),
-            bb_period: Some(prng.range(10, 30) as usize),
-            ..Default::default()
-        }).collect();
+        let random_grid: Vec<_> = (0..n).map(|_| StrategyParams::new()
+            .with(keys::FAST, prng.range(3, 15) as f64)
+            .with(keys::SLOW, prng.range(20, 60) as f64)
+            .with(keys::PERIOD, prng.range(7, 21) as f64)
+            .with(keys::OVERBOUGHT, prng.float(65.0, 82.0))
+            .with(keys::OVERSOLD, prng.float(18.0, 35.0))
+            .with(keys::BB_PERIOD, prng.range(10, 30) as f64)
+        ).collect();
 
         Self::grid_search(candles, &random_grid, b_cfg)
     }
@@ -111,13 +111,14 @@ impl HyperOpt {
             let d_s = prng.range(0, 4) as i64 - 2;
             let d_p = prng.range(0, 2) as i64 - 1;
 
-            let fast = (best.fast.unwrap_or(10) as i64 + d_f).max(3) as usize;
-            StrategyParams {
-                fast: Some(fast),
-                slow: Some((best.slow.unwrap_or(30) as i64 + d_s).max(fast as i64 + 1) as usize),
-                period: Some((best.period.unwrap_or(14) as i64 + d_p).max(5) as usize),
-                ..*best
-            }
+            let fast = (best.usize_or(keys::FAST, 10) as i64 + d_f).max(3) as usize;
+            let slow = (best.usize_or(keys::SLOW, 30) as i64 + d_s).max(fast as i64 + 1) as usize;
+            let period = (best.usize_or(keys::PERIOD, 14) as i64 + d_p).max(5) as usize;
+            // `*best`'ten başla (tüm anahtarları korur), fast/slow/period'i override et.
+            (*best)
+                .with(keys::FAST, fast as f64)
+                .with(keys::SLOW, slow as f64)
+                .with(keys::PERIOD, period as f64)
         }).collect();
 
         let exploit = Self::grid_search(candles, &exploit_grid, b_cfg)?;

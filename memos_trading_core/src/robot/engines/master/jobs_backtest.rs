@@ -551,11 +551,16 @@ impl Engine {
             ));
             // Yapısal parametre araması özeti (Faz 1b).
             match &best_strategy_params {
-                Some((sp, score, tested)) => st.push_log(format!(
-                    "🧩 '{}' param_spec ({} kombinasyon, skor={:.3}): fast={:?} slow={:?} period={:?} std_dev={:?} ob={:?} os={:?}",
-                    best_name, tested, score,
-                    sp.fast, sp.slow, sp.period, sp.std_dev, sp.overbought, sp.oversold,
-                )),
+                Some((sp, score, tested)) => {
+                    let params_str: String = sp.iter()
+                        .map(|(k, v)| format!("{}={:.3}", k, v))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    st.push_log(format!(
+                        "🧩 '{}' param_spec ({} kombinasyon, skor={:.3}): {}",
+                        best_name, tested, score, params_str,
+                    ))
+                }
                 None => st.push_log(format!(
                     "🧩 '{}' yapısal parametre uzayı boş veya arama sonuç vermedi → default paramlar",
                     best_name,

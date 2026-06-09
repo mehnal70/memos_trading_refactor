@@ -17,11 +17,13 @@ fn lock_env() -> MutexGuard<'static, ()> {
 }
 
 #[test]
-fn default_threshold_is_one_hour() {
+fn default_threshold_is_auto_interval_aware() {
     let _env = lock_env();
     std::env::remove_var("STALE_FEED_MAX_AGE_SECS");
     let t = &AppState::new(RoboticLoopConfig::default()).tuning;
-    assert_eq!(t.stale_feed_max_age_secs, 3600, "default 1 saat (3600sn) olmalı");
+    // Default artık -1 = auto (interval-farkında: 2×interval, sub-1m için 60s taban).
+    // 0=kapalı, >0=operatör sabit override (bkz. effective_stale_feed_age).
+    assert_eq!(t.stale_feed_max_age_secs, -1, "default auto (-1) olmalı");
 }
 
 #[test]

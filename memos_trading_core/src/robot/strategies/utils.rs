@@ -5,6 +5,15 @@
 
 use crate::core::indicators::CoreIndicatorEngine;
 use crate::core::types::{Candle, Signal, StrategyParams};
+use crate::robot::strategies::keys;
+
+/// HTF filtre periyotlarını torbadan çözer; ayarlı değilse makul varsayılan (10/30).
+/// Eskiden bu sabitler pattern/osilatör/volatilite stratejilerine gömülüydü; artık
+/// tek-kaynaktan okunur (config/store ile override edilebilir, default-davranış aynı).
+#[inline]
+pub fn htf_periods(params: &StrategyParams) -> (usize, usize) {
+    (params.usize_or(keys::HTF_FAST, 10), params.usize_or(keys::HTF_SLOW, 30))
+}
 
 /// HTF (Higher Timeframe) trend filtresi — Buy/Sell sinyalini üst dilimdeki MA durumuyla doğrular.
 /// Üst dilim ters yöndeyse sinyali Hold'a çevirir; aksi halde olduğu gibi geçirir.
