@@ -94,6 +94,12 @@ pub struct ParameterStore {
     /// İlk iz `symbol_interval`/`symbol_strategy` ile tutarlıdır (anchor). [[project_edge_scan]].
     #[serde(default)]
     pub symbol_tracks: HashMap<String, Vec<(String, String)>>,
+    /// param_sweep ŞAMPİYON indikatör paramları: key = sembol, value = (şampiyon_strateji, params).
+    /// `PARAM_SWEEP_REPORT` ile yüklenir (yalnız wf_robust). Strateji bağı KORUNUR: canlı çözülen
+    /// strateji şampiyonunkiyle eşleşmezse uygulanmaz (CCI eşiğini RSI'ya verme hatasını önler).
+    /// Boş → mevcut davranış (global strategy_params/default), sıfır regresyon. [[project_param_optimize_tool]].
+    #[serde(default)]
+    pub symbol_strategy_params: HashMap<String, (String, crate::core::types::StrategyParams)>,
     /// Kesitsel (cross-sectional) relatif-güç ADANMIŞ MOD parametreleri ([[project_xs_momentum]]).
     /// enabled iken sepet sembolleri market-nötr long/short kitabıyla yönetilir (ScalpSwing/seed pas).
     /// Default disabled → sıfır regresyon. `from_env` XS_LIVE_* ile doldurur.
@@ -128,6 +134,44 @@ fn default_strategy_trail_targets() -> HashMap<String, f64> {
     m
 }
 
+/// param_sweep JSON'undan (champions[]) per-sembol şampiyon indikatör paramlarını yükler.
+/// `require_wf` → yalnız wf_robust şampiyonlar. report.market `engine_market`'a uymuyorsa (ve
+/// ignore_market değilse) hiç yüklenmez. Dönüş: (symbol, champion_strategy, StrategyParams).
+/// Bozuk/yok dosya → boş (no-op, sıfır regresyon). [[project_param_optimize_tool]].
+fn load_param_sweep_champions(
+    path: &str, require_wf: bool, engine_market: &str, ignore_market: bool,
+) -> Vec<(String, String, crate::core::types::StrategyParams)> {
+    #[derive(Deserialize)]
+    struct PsParam { name: String, value: f64 }
+    #[derive(Deserialize)]
+    struct PsChampion {
+        symbol: String,
+        strategy: String,
+        #[serde(default)] wf_robust: bool,
+        #[serde(default)] params: Vec<PsParam>,
+    }
+    #[derive(Deserialize)]
+    struct PsReport {
+        #[serde(default)] market: String,
+        #[serde(default)] champions: Vec<PsChampion>,
+    }
+    let Ok(txt) = std::fs::read_to_string(path) else { return Vec::new(); };
+    let Ok(rep) = serde_json::from_str::<PsReport>(&txt) else { return Vec::new(); };
+    if !ignore_market && !rep.market.is_empty() && !rep.market.eq_ignore_ascii_case(engine_market) {
+        return Vec::new();
+    }
+    rep.champions.into_iter()
+        .filter(|c| !require_wf || c.wf_robust)
+        .map(|c| {
+            let mut sp = crate::core::types::StrategyParams::default();
+            for p in &c.params {
+                crate::robot::strategies::param_spec::apply_param(&mut sp, &p.name, p.value);
+            }
+            (c.symbol, c.strategy, sp)
+        })
+        .collect()
+}
+
 /// Hysteresis: yeni rejim drift sayılmadan önce kaç ardışık cycle gözlemlenmeli.
 pub const DRIFT_CONFIRMATION_TURNS: u32 = 3;
 /// Cooldown: iki ardışık drift arasında en az kaç saniye geçmeli (saniye, epoch).
@@ -155,6 +199,7 @@ impl Default for ParameterStore {
             symbol_interval: HashMap::new(),
             symbol_strategy: HashMap::new(),
             symbol_tracks: HashMap::new(),
+            symbol_strategy_params: HashMap::new(),
             xs_live: XsLiveParams::default(),
             graded_entry: GradedEntryParams::default(),
         }
@@ -311,6 +356,30 @@ impl ParameterStore {
                         "🪢 çoklu-iz seed: {} sembol >1 TF-edge taşıyor ({} iz toplam, max={}/sembol)",
                         store.symbol_tracks.len(), tracks_total, max_tracks);
                 }
+            }
+        }
+
+        // param_sweep ŞAMPİYON PARAMLARI (opt-in): PARAM_SWEEP_REPORT bir param_sweep JSON'una
+        // işaret ederse, wf_robust şampiyonların indikatör paramları symbol_strategy_params'a
+        // (sembol→(strateji,params)) yüklenir. EDGE_SEED_REPORT'un kardeşi: o "hangi strateji+TF",
+        // bu "hangi indikatör paramı". PARAM_SWEEP_REQUIRE_WF=0 ile WF kapısını gevşet (fluke riski).
+        // Market = TRADE_MARKET (EDGE_SEED_IGNORE_MARKET=1 ile baypas). Boş/yok → no-op. [[project_param_optimize_tool]].
+        if let Some(path) = std::env::var("PARAM_SWEEP_REPORT").ok().filter(|s| !s.trim().is_empty()) {
+            let require_wf = !matches!(
+                std::env::var("PARAM_SWEEP_REQUIRE_WF").ok().as_deref(),
+                Some("0") | Some("false") | Some("off"));
+            let engine_market = crate::core::env::env_or("TRADE_MARKET", "spot");
+            let ignore_market = matches!(
+                std::env::var("EDGE_SEED_IGNORE_MARKET").ok().as_deref(),
+                Some("1") | Some("true") | Some("on"));
+            let loaded = load_param_sweep_champions(&path, require_wf, &engine_market, ignore_market);
+            let n = loaded.len();
+            for (sym, strat, params) in loaded {
+                store.symbol_strategy_params.insert(sym, (strat, params));
+            }
+            if n > 0 {
+                log::info!("🎛️ param_sweep seed: {} sembol şampiyon indikatör paramı yüklendi (wf_robust={}, market={}) ({})",
+                    n, require_wf, engine_market, path);
             }
         }
 
@@ -599,6 +668,19 @@ impl ParameterStore {
         self.strategy_params.get(strategy_name).copied().unwrap_or_default()
     }
 
+    /// Per-sembol param çözümleme (param_sweep entegrasyonu): önce sembolün şampiyon
+    /// paramı (yalnız şampiyon stratejisi == çözülen strateji ise — yanlış stratejiye
+    /// uygulamayı önler), yoksa global `resolve_strategy_params`. Boş map → global, sıfır
+    /// regresyon. [[project_param_optimize_tool]].
+    pub fn resolve_strategy_params_for(&self, symbol: &str, strategy_name: &str) -> crate::core::types::StrategyParams {
+        if let Some((champ_strat, params)) = self.symbol_strategy_params.get(symbol) {
+            if champ_strat.eq_ignore_ascii_case(strategy_name) {
+                return *params;
+            }
+        }
+        self.resolve_strategy_params(strategy_name)
+    }
+
     /// Backtest job kazanan strateji için optimize ettiği yapısal parametreleri buraya yazar.
     pub fn set_strategy_params(
         &mut self,
@@ -773,5 +855,65 @@ impl ParameterStore {
             RegimePatch::empty()
                 .with_edge(tightened_edge)
                 .with_trade_risk(tightened_risk));
+    }
+}
+
+#[cfg(test)]
+mod param_sweep_seed_tests {
+    use super::*;
+    use crate::core::types::StrategyParams;
+
+    #[test]
+    fn resolve_for_strateji_eslesince_per_sembol_yoksa_global() {
+        let mut ps = ParameterStore::default();
+        // Global RSI paramı.
+        ps.set_strategy_params("RSI", StrategyParams::default().with("period", 9.0));
+        // BTCUSDT şampiyonu: RSI period=21.
+        ps.symbol_strategy_params.insert(
+            "BTCUSDT".into(), ("RSI".into(), StrategyParams::default().with("period", 21.0)));
+
+        // Strateji eşleşiyor → per-sembol (21) gelir.
+        assert_eq!(ps.resolve_strategy_params_for("BTCUSDT", "RSI").usize_or("period", 0), 21);
+        // Strateji eşleşmiyor (BTCUSDT için MACD çözüldü) → per-sembol RSI paramı UYGULANMAZ → global/default.
+        assert_eq!(ps.resolve_strategy_params_for("BTCUSDT", "MACD").get("period"), None);
+        // Şampiyonu olmayan sembol → global RSI (9).
+        assert_eq!(ps.resolve_strategy_params_for("ETHUSDT", "RSI").usize_or("period", 0), 9);
+    }
+
+    #[test]
+    fn loader_wf_ve_market_kapisi() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("ps_test_{}.json", std::process::id()));
+        let json = r#"{
+            "market": "futures",
+            "champions": [
+                {"symbol":"BTCUSDT","strategy":"RSI","wf_robust":true,
+                 "params":[{"name":"period","value":17.0,"kind":"Int"},
+                           {"name":"overbought","value":74.0,"kind":"Pct"}]},
+                {"symbol":"ETHUSDT","strategy":"MACD","wf_robust":false,
+                 "params":[{"name":"fast","value":6.0,"kind":"Int"}]}
+            ]
+        }"#;
+        std::fs::write(&path, json).unwrap();
+        let p = path.to_str().unwrap();
+
+        // require_wf=true → yalnız BTCUSDT (wf_robust). Market eşleşir.
+        let loaded = load_param_sweep_champions(p, true, "futures", false);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].0, "BTCUSDT");
+        assert_eq!(loaded[0].1, "RSI");
+        assert_eq!(loaded[0].2.usize_or("period", 0), 17);
+        assert_eq!(loaded[0].2.f64_or("overbought", 0.0), 74.0);
+
+        // require_wf=false → ikisi de.
+        assert_eq!(load_param_sweep_champions(p, false, "futures", false).len(), 2);
+        // Market uyumsuz (spot) + ignore=false → hiç.
+        assert!(load_param_sweep_champions(p, false, "spot", false).is_empty());
+        // ignore_market=true → market kapısı baypas → ikisi de.
+        assert_eq!(load_param_sweep_champions(p, false, "spot", true).len(), 2);
+        // Bozuk yol → boş (no-op).
+        assert!(load_param_sweep_champions("/yok/dosya.json", true, "futures", false).is_empty());
+
+        let _ = std::fs::remove_file(&path);
     }
 }
