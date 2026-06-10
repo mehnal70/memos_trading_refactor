@@ -14,7 +14,9 @@
 //      FC_WF_WINDOW (30), FC_REBALANCE (1), FC_LONG_ONLY=1, FC_FAMILY_ALPHA (0.10),
 //      FC_CANDLE_LIMIT (5000), FC_FUNDING_LIMIT (20000).
 
-use memos_trading_core::robot::backtester::{run_funding_carry, FundingCarryConfig, XsResult};
+use memos_trading_core::robot::backtester::{
+    run_funding_carry, run_funding_carry_walkforward, FundingCarryConfig, FcWfConfig, FcWfResult, XsResult,
+};
 
 fn csv(arg: Option<&String>) -> Vec<String> {
     match arg.map(|s| s.as_str()) {
@@ -58,6 +60,13 @@ fn main() {
         candle_limit, funding_limit, top_k, fee_rate, long_short, wf_window, rebalance_every,
         bars_per_year: bars_per_year(&interval), ..Default::default()
     };
+
+    // WALK-FORWARD MODU (FC_WF=1): tam-veride seçim YOK — IS'te aday lookback'ten en iyiyi seç,
+    // kör OOS'a uygula, birleştir → Newey-West dürüst verdikt (tam-örneklem Šidák'ı TEYİT eder).
+    if std::env::var("FC_WF").map(|v| v == "1").unwrap_or(false) {
+        run_wf_mode(&base, &lookbacks, &interval);
+        return;
+    }
 
     // AİLE = lookback'ler (carry yönü tek: yüksek-funding short). Šidák test-başı eşik.
     // (Reversal'ı negatifleyerek simüle etmek turnover/fee asimetrisi yüzünden YANLIŞ olurdu → yalnız doğal yön.)
@@ -111,5 +120,49 @@ fn main() {
                 r.wf.window_significance(), r.bars);
         }
         println!("  Tek portföy-serisinde yüzlerce rebalance → fluke DEĞİL. Diğer eksenlerle korelasyonu düşükse EK edge.");
+    }
+}
+
+/// Walk-forward OOS: aday lookback'ten IS'te seç, kör OOS'a uygula, birleştirilmiş OOS'ta Newey-West.
+fn run_wf_mode(base: &FundingCarryConfig, candidates: &[usize], interval: &str) {
+    let is_bars: usize = std::env::var("FC_WF_IS").ok().and_then(|s| s.parse().ok())
+        .unwrap_or(if interval == "1d" { 730 } else { 2000 });
+    let oos_bars: usize = std::env::var("FC_WF_OOS").ok().and_then(|s| s.parse().ok())
+        .unwrap_or(if interval == "1d" { 180 } else { 500 });
+
+    let wf = FcWfConfig { is_bars, oos_bars, candidates: candidates.to_vec() };
+    let r: FcWfResult = run_funding_carry_walkforward(base, &wf);
+
+    println!("🔁 Funding-carry WALK-FORWARD OOS · IS={is_bars} / OOS={oos_bars} bar (örtüşmesiz) · aday lb={:?}",
+        candidates);
+    println!("   Her pencerede IS-Sharpe en iyi lookback seçilir → GÖRMEDİĞİ OOS'a uygulanır → birleşir.");
+    println!();
+    if r.windows == 0 {
+        println!("⚠️  Yeterli veri yok (IS+OOS toplamı seriden uzun). FC_WF_IS / FC_WF_OOS küçült.");
+        return;
+    }
+    println!("   {:>4} | {:>6} | {:>9} | {:>10}", "pen", "seç-lb", "IS-Sharpe", "OOS-ort%");
+    println!("   {}", "-".repeat(40));
+    for (i, (lb, (is_sh, oos_m))) in r.selections.iter().zip(&r.is_oos_pairs).enumerate() {
+        println!("   {:>4} | {:>6} | {:>9.2} | {:>10.3}", i + 1, lb, is_sh, 100.0 * oos_m);
+    }
+
+    println!();
+    let o = &r.oos;
+    let tp = o.t_pvalue();
+    let np = o.nw_t_pvalue();
+    let bp = o.wf.window_significance();
+    println!("══════ BİRLEŞTİRİLMİŞ OOS (look-ahead'siz) ══════");
+    println!("   pencere={} · OOS bar={} · turnover_ort={:.2}", r.windows, o.bars, o.avg_turnover);
+    println!("   annRet={:.1}% · Sharpe={:.2} · win%={:.0}", 100.0 * o.ann_return, o.ann_sharpe, 100.0 * o.win_rate);
+    println!("   naif t={:.2} (p={:.4}) · NEWEY-WEST t={:.2} (p={:.4}, lag={}) · binom {}/{} (p={:.4})",
+        o.t_stat, tp, o.nw_t_stat, np, o.nw_lag, o.wf.profitable_windows, o.wf.windows, bp);
+    println!();
+    if o.nw_t_stat > 0.0 && np <= 0.05 {
+        println!("✅ OOS ANLAMLI (Newey-West p={:.4}≤0.05): funding-carry edge'i kör veride de tutuyor → GERÇEK dik edge.", np);
+    } else if o.nw_t_stat > 0.0 {
+        println!("~ OOS POZİTİF ama NW p={:.4}>0.05: naif t (p={:.4}) otokorelasyonla şişmiş; dürüst güç sınırda.", np, tp);
+    } else {
+        println!("✗ OOS NEGATİF/sıfır: tam-örneklem anlamlılığı OOS'ta tutmadı → overfit. Canlıya BAĞLAMA.");
     }
 }

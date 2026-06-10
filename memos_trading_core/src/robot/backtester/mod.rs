@@ -25,4 +25,5 @@ pub use xs_momentum::{run_xs_momentum, run_xs_returns, evaluate_xs, align_closes
 pub use bb_pool::{run_bb_pool, evaluate_bb_pool, bb_pool_returns, BbPoolConfig,
     run_bb_pool_walkforward, evaluate_bb_pool_walkforward, BbWfConfig, BbWfResult};
 pub use funding_carry::{run_funding_carry, evaluate_funding_carry, funding_carry_returns,
-    align_closes_and_funding, FundingCarryConfig};
+    align_closes_and_funding, FundingCarryConfig,
+    run_funding_carry_walkforward, evaluate_funding_carry_walkforward, FcWfConfig, FcWfResult};

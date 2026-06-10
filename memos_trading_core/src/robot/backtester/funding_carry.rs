@@ -196,6 +196,75 @@ pub fn interval_ms(interval: &str) -> i64 {
     DataNormalizer::parse_interval(interval).max(1) as i64 * 1000
 }
 
+// ───────────────────────── Walk-forward OOS (look-ahead'siz) ─────────────────────────
+
+/// WF kalibrasyon: aday lookback ızgarasından HER IS penceresinde en iyiyi (IS Sharpe) seç → kör
+/// OOS'a uygula → birleştir. Tam-veri "en iyi lookback" optimizmini keser. bb_pool/XS WF ile aynı iskelet.
+#[derive(Debug, Clone)]
+pub struct FcWfConfig {
+    pub is_bars: usize,
+    pub oos_bars: usize,
+    pub candidates: Vec<usize>, // lookback adayları
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FcWfResult {
+    pub oos: XsResult,
+    pub windows: usize,
+    pub selections: Vec<usize>,
+    pub is_oos_pairs: Vec<(f64, f64)>, // (IS Sharpe, OOS ort. getiri)
+}
+
+/// SAF WF çekirdeği (hizalanmış closes+funding üzerinde, DB'siz testlenir).
+pub fn evaluate_funding_carry_walkforward(
+    closes: &[Vec<Option<f64>>], funding_bar: &[Vec<f64>], base: &FundingCarryConfig, wf: &FcWfConfig,
+) -> FcWfResult {
+    let n = closes.len();
+    let n_sym = if n > 0 { closes[0].len() } else { 0 };
+    let mut oos_rets: Vec<f64> = Vec::new();
+    let mut oos_turn: Vec<f64> = Vec::new();
+    let mut selections: Vec<usize> = Vec::new();
+    let mut is_oos_pairs: Vec<(f64, f64)> = Vec::new();
+
+    let mut oos_start = wf.is_bars;
+    while oos_start + wf.oos_bars <= n && !wf.candidates.is_empty() {
+        let is_lo = oos_start.saturating_sub(wf.is_bars);
+        // 1) IS'te en iyi lookback'i seç (IS Sharpe).
+        let mut best: Option<(usize, f64)> = None;
+        for &lb in &wf.candidates {
+            let cfg = FundingCarryConfig { lookback: lb, ..base.clone() };
+            let is_res = evaluate_funding_carry(&closes[is_lo..oos_start], &funding_bar[is_lo..oos_start], &cfg);
+            if is_res.bars > 0 && best.is_none_or(|(_, s)| is_res.ann_sharpe > s) {
+                best = Some((lb, is_res.ann_sharpe));
+            }
+        }
+        let Some((sel, is_sharpe)) = best else { oos_start += wf.oos_bars; continue; };
+        // 2) seçileni OOS'a UYGULA (lookback lead-in dahil dilim; getiri yalnız OOS bölgesinde).
+        let lead = sel.min(oos_start);
+        let seg_hi = (oos_start + wf.oos_bars).min(n);
+        let cfg = FundingCarryConfig { lookback: sel, ..base.clone() };
+        let (rets, turns) = funding_carry_returns(
+            &closes[oos_start - lead..seg_hi], &funding_bar[oos_start - lead..seg_hi], &cfg);
+        let oos_mean = if rets.is_empty() { 0.0 } else { rets.iter().sum::<f64>() / rets.len() as f64 };
+        oos_rets.extend(rets);
+        oos_turn.extend(turns);
+        selections.push(sel);
+        is_oos_pairs.push((is_sharpe, oos_mean));
+        oos_start += wf.oos_bars;
+    }
+
+    let mut oos = XsResult { symbols_used: n_sym, ..Default::default() };
+    finalize_metrics_params(&mut oos, &oos_rets, &oos_turn, base.leverage, base.bars_per_year,
+        base.rebalance_every, base.wf_window);
+    FcWfResult { oos, windows: selections.len(), selections, is_oos_pairs }
+}
+
+/// DB-YÜKLEYEN WF sürümü.
+pub fn run_funding_carry_walkforward(base: &FundingCarryConfig, wf: &FcWfConfig) -> FcWfResult {
+    let (closes, funding_bar) = align_closes_and_funding(base);
+    evaluate_funding_carry_walkforward(&closes, &funding_bar, base, wf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +296,20 @@ mod tests {
         let funding_bar: Vec<Vec<f64>> = (0..n).map(|_| vec![0.0005, 0.0005]).collect();
         let r = evaluate_funding_carry(&closes, &funding_bar, &cfg(5));
         assert!(r.mean_ret.abs() < 1e-9, "eşit funding → carry ~0, mean={}", r.mean_ret);
+    }
+
+    /// WF: aday lookback ızgarasından IS seç → OOS uygula → pencereler birleşir.
+    #[test]
+    fn walkforward_runs_and_pools_oos() {
+        let n = 400;
+        let closes: Vec<Vec<Option<f64>>> = (0..n).map(|_| vec![Some(100.0), Some(100.0)]).collect();
+        let funding_bar: Vec<Vec<f64>> = (0..n).map(|_| vec![0.001, -0.001]).collect();
+        let base = cfg(7);
+        let wf = FcWfConfig { is_bars: 120, oos_bars: 60, candidates: vec![3, 7, 14] };
+        let r = evaluate_funding_carry_walkforward(&closes, &funding_bar, &base, &wf);
+        assert!(r.windows >= 2, "en az birkaç OOS penceresi");
+        assert!(r.oos.bars > 0, "birleştirilmiş OOS getirisi var");
+        assert!(r.oos.mean_ret > 0.0, "sabit spread → OOS'ta da pozitif carry");
     }
 
     /// Bucketing: funding (t,rate) ilk stamps[b]≥t barına atanır (kapanışa).

@@ -75,6 +75,11 @@ fn main() {
                 total += saved;
             }
             Ok(_) => println!("  ⚠️ {:12} veri yok (borsa bu aralığı tutmuyor)", sym),
+            // Artımlı fetch boş → zaten güncel (son funding'den beri yeni ödeme yok), hata değil.
+            Err(e) if last_ms.is_some() && e.contains("aralıkta veri yok") => {
+                println!("  ⏭  {:12} güncel (yeni funding yok)", sym);
+                skipped += 1;
+            }
             Err(e) => println!("  ✗ {:12} {}", sym, e),
         }
     }
