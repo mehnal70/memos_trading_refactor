@@ -7,6 +7,7 @@ pub mod edge_scan; // DB-geneli gross-edge tarayıcı (tekrar koşulabilir araç
 pub mod multi_tf_ab; // çoklu-TF seed düzeneği A/B doğrulama harness'i (Single vs Multi)
 pub mod xs_momentum; // kesitsel relatif-güç sinyali ölçüm harness'i (majör sepeti, pooled edge)
 pub mod bb_pool; // "1d-BB havuzlanmış" hipotez harness'i (edge_scan per-sembol ipucunun pooled testi)
+pub mod funding_carry; // kesitsel funding-carry harness'i (fiyat-dışı taşıma getirisi; dik eksen)
 
 pub use backtest_engine::{Backtester, BacktestConfig, BacktestResult, DirectionMode, RegimeGate, SimulatedTrade};
 //pub use backtest_engine::{ProfileComparisonResult, ProfilePerformance};
@@ -23,3 +24,5 @@ pub use xs_momentum::{run_xs_momentum, run_xs_returns, evaluate_xs, align_closes
     XsSignal, run_xs_walkforward, evaluate_xs_walkforward, XsWfConfig, XsWfResult, xs_target_book};
 pub use bb_pool::{run_bb_pool, evaluate_bb_pool, bb_pool_returns, BbPoolConfig,
     run_bb_pool_walkforward, evaluate_bb_pool_walkforward, BbWfConfig, BbWfResult};
+pub use funding_carry::{run_funding_carry, evaluate_funding_carry, funding_carry_returns,
+    align_closes_and_funding, FundingCarryConfig};

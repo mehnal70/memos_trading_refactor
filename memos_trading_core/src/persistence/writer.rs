@@ -253,6 +253,36 @@ pub fn save_candle(
     Ok(())
 }
 
+/// 💰 `funding_rates` tablosunu defensive yaratır — kanonik key (exchange,market,symbol,funding_time),
+/// `candles` ile aynı market-saf felsefe. Funding 8 saatte bir → rate ondalık (ör. 0.0001 = %0.01).
+pub fn ensure_funding_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS funding_rates ( \
+            exchange TEXT NOT NULL, \
+            market TEXT NOT NULL, \
+            symbol TEXT NOT NULL, \
+            funding_time INTEGER NOT NULL, \
+            rate REAL NOT NULL, \
+            PRIMARY KEY (exchange, market, symbol, funding_time) \
+        );",
+    ).map_err(|e| crate::MemosTradingError::Database(format!("funding tablo yaratma: {}", e)))?;
+    Ok(())
+}
+
+/// 💰 Tek funding kaydını upsert eder (save_candle ile aynı kalıp; tekrar-güvenli).
+pub fn save_funding(
+    conn: &Connection, exchange: &str, market: &str, symbol: &str, funding_time_ms: i64, rate: f64,
+) -> Result<()> {
+    ensure_funding_table(conn)?;
+    conn.execute(
+        "INSERT INTO funding_rates (exchange, market, symbol, funding_time, rate) \
+         VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT(exchange, market, symbol, funding_time) DO UPDATE SET rate=excluded.rate",
+        params![exchange, market, symbol, funding_time_ms, rate],
+    ).map_err(|e| crate::MemosTradingError::Database(format!("funding upsert: {}", e)))?;
+    Ok(())
+}
+
 /// Tabloda belirtilen kolon var mı — şema-uyarlı yazım için (PRAGMA table_info).
 fn column_exists(conn: &Connection, table: &str, col: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))
@@ -445,6 +475,28 @@ pub fn parse_binance_kline(
         interval: interval.to_string(),
     })
 }
+#[cfg(test)]
+mod funding_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn funding_upsert_roundtrip_and_dedup() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Yeni kayıtlar.
+        save_funding(&conn, "binance", "futures", "BTCUSDT", 1_700_000_000_000, 0.0001).unwrap();
+        save_funding(&conn, "binance", "futures", "BTCUSDT", 1_700_028_800_000, -0.00005).unwrap();
+        // Aynı funding_time → upsert (kopya değil, rate güncellenir).
+        save_funding(&conn, "binance", "futures", "BTCUSDT", 1_700_000_000_000, 0.0002).unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM funding_rates WHERE symbol='BTCUSDT'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 2, "upsert kopya üretmez");
+        let r: f64 = conn.query_row(
+            "SELECT rate FROM funding_rates WHERE funding_time=1700000000000", [], |r| r.get(0)).unwrap();
+        assert!((r - 0.0002).abs() < 1e-12, "rate güncellendi");
+    }
+}
+
 #[cfg(test)]
 mod migration_tests {
     use super::*;

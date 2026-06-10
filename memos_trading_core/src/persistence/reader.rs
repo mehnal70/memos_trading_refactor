@@ -387,6 +387,38 @@ pub fn last_candle_ts(db_path: &str, symbol: &str, interval: &str, market: &str)
     ).ok().flatten()
 }
 
+/// 💰 funding geçmişini KRONOLOJİK (ASC) okur — son `limit` kayıt. Tablo yoksa boş (henüz indirilmemiş).
+/// Market-saf (funding yalnız futures'ta anlamlı). funding_carry harness bunu hizalar.
+pub fn read_funding_market(
+    db_path: &str, symbol: &str, market: &str, limit: usize,
+) -> Result<Vec<(i64, f64)>, crate::MemosTradingError> {
+    let conn = crate::persistence::open_db(db_path)
+        .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
+    let mut stmt = match conn.prepare(
+        "SELECT funding_time, rate FROM funding_rates WHERE symbol=?1 AND market=?2 \
+         ORDER BY funding_time DESC LIMIT ?3",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Ok(Vec::new()), // tablo yok → boş
+    };
+    let rows = stmt.query_map(params![symbol, market, limit as i64],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?)))
+        .map_err(|e| crate::MemosTradingError::Database(format!("funding okuma: {}", e)))?;
+    let mut v: Vec<(i64, f64)> = rows.filter_map(|r| r.ok()).collect();
+    v.reverse(); // DESC → ASC (kronolojik)
+    Ok(v)
+}
+
+/// 💰 Son funding_time (gap-farkında indirme için). Tablo/kayıt yoksa None.
+pub fn last_funding_ts(db_path: &str, symbol: &str, market: &str) -> Option<i64> {
+    let conn = crate::persistence::open_db(db_path).ok()?;
+    conn.query_row(
+        "SELECT MAX(funding_time) FROM funding_rates WHERE symbol=?1 AND market=?2",
+        params![symbol, market],
+        |row| row.get::<_, Option<i64>>(0),
+    ).ok().flatten()
+}
+
 /// 🗂️ Sembol-statü registry'sini DB'den okur (boot hydrate). Tablo henüz yoksa boş
 /// döner (ilk çalıştırmada refresh job doldurana kadar). Dönen (symbol, status) listesi
 /// `set_symbol_statuses` ile cache'e yüklenir.
