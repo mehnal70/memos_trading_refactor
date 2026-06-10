@@ -19,7 +19,7 @@ pub use edge_scan::{EdgeScanConfig, EdgeScanReport, EdgeRow, GroupSummary, SeedR
     seed_symbol_multi_plan, seed_symbol_multi_plan_from_file, SEED_MAX_TRACKS_DEFAULT, passes_seed_bar};
 pub use multi_tf_ab::{run_multi_tf_ab, run_symbol_ab, arbitrate_single_position, arm_metrics,
     AbConfig, AbReport, SymbolAb, ArmMetrics, TradeSlot};
-pub use xs_momentum::{run_xs_momentum, evaluate_xs, align_closes, XsConfig, XsResult,
-    run_xs_walkforward, evaluate_xs_walkforward, XsWfConfig, XsWfResult, xs_target_book};
+pub use xs_momentum::{run_xs_momentum, run_xs_returns, evaluate_xs, align_closes, XsConfig, XsResult,
+    XsSignal, run_xs_walkforward, evaluate_xs_walkforward, XsWfConfig, XsWfResult, xs_target_book};
 pub use bb_pool::{run_bb_pool, evaluate_bb_pool, bb_pool_returns, BbPoolConfig,
     run_bb_pool_walkforward, evaluate_bb_pool_walkforward, BbWfConfig, BbWfResult};

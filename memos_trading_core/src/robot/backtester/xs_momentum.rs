@@ -22,7 +22,24 @@ use crate::persistence::reader::read_candles_market;
 use crate::robot::sr_detector::{SrDetector, SrDetectorConfig, SrZone, ZoneType};
 use super::walk_forward::WfCrossCheck;
 
-/// Kesitsel strateji parametreleri. Sepet + momentum/reversal yönü + maliyet + anlamlılık penceresi.
+/// Kesitsel sıralama EKSENİ (sinyal kaynağı). Hepsinde "yüksek skor = long bacak" olacak şekilde
+/// normalize edilir (düşük-uç long isteyen eksenlerde işaret ters) → sıralama/select_books/ağırlık
+/// makinesi DEĞİŞMEZ, yalnız HANGİ sinyalle sıralandığı değişir. `momentum=false` her eksende yönü
+/// çevirir (A/B). Momentum dışındaki eksenler `lookback`'i geriye-dönük PENCERE olarak kullanır.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum XsSignal {
+    /// close[t]/close[t−lookback]−1 (yüksek = güçlü → long). Default (geri-uyum, sıfır regresyon).
+    #[default]
+    Momentum,
+    /// −realized_vol(lookback) → DÜŞÜK vol long / yüksek vol short (low-vol anomali).
+    LowVol,
+    /// −β (sepet-ortalamasına regresyon, lookback pencere) → DÜŞÜK beta long (betting-against-beta).
+    Beta,
+    /// −max(günlük getiri, lookback) → "piyango" (aşırı tek-bar getirili) isimleri SHORT (MAX etkisi).
+    MaxLottery,
+}
+
+/// Kesitsel strateji parametreleri. Sepet + sinyal ekseni + yön + maliyet + anlamlılık penceresi.
 #[derive(Debug, Clone)]
 pub struct XsConfig {
     pub db_path: String,
@@ -31,7 +48,10 @@ pub struct XsConfig {
     /// Sepet sembolleri (majörler). En az 2*top_k gerekir.
     pub symbols: Vec<String>,
     pub candle_limit: usize,
-    /// Momentum geriye-bakış (bar): sinyal_s = close[t]/close[t−lookback] − 1.
+    /// Kesitsel sıralama ekseni (Momentum | LowVol | Beta | MaxLottery). Default Momentum.
+    pub signal: XsSignal,
+    /// Geriye-bakış (bar): Momentum'da sinyal_s = close[t]/close[t−lookback]−1; diğer eksenlerde
+    /// istatistiğin (vol/β/max) hesaplandığı geriye-dönük pencere.
     pub lookback: usize,
     /// Sepet kenarı: kaç sembol long / kaç sembol short. ≥1.
     pub top_k: usize,
@@ -81,6 +101,7 @@ impl Default for XsConfig {
             interval: "1d".into(),
             symbols: Vec::new(),
             candle_limit: 5000,
+            signal: XsSignal::Momentum,
             lookback: 7,
             top_k: 3,
             fee_rate: 0.0005, // 5 bps / turnover birimi (round-turn ~10bps futures taker+slippage)
@@ -229,22 +250,106 @@ fn xs_returns(
     (rets, turnovers)
 }
 
+/// SAF: bir sembolün t'de biten `lb`-bar penceresindeki bar-bar getirileri (Option; eksik/≤0 → None).
+/// Uzunluk = lb. `window_returns_opt` Beta market-hizalamasında ve vol/max'ta ortak kullanılır.
+fn window_returns_opt(closes: &[Vec<Option<f64>>], t: usize, lb: usize, j: usize) -> Vec<Option<f64>> {
+    let start = (t + 1).saturating_sub(lb);
+    (start..=t).map(|b| {
+        if b == 0 { return None; }
+        match (closes[b][j], closes[b - 1][j]) {
+            (Some(c1), Some(c0)) if c0 > 0.0 && c1 > 0.0 => Some(c1 / c0 - 1.0),
+            _ => None,
+        }
+    }).collect()
+}
+
+/// SAF: popülasyon std (BB konvansiyonuyla aynı). <2 örnek → 0.
+fn stddev(v: &[f64]) -> f64 {
+    let n = v.len();
+    if n < 2 { return 0.0; }
+    let m = v.iter().sum::<f64>() / n as f64;
+    (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n as f64).sqrt()
+}
+
+/// SAF: hizalı (rj, rm) Option çiftlerinden β = cov(rj,rm)/var(rm). Ortak nokta <2 veya var(rm)=0 → None.
+fn beta_paired(rj: &[Option<f64>], rm: &[Option<f64>]) -> Option<f64> {
+    let pairs: Vec<(f64, f64)> = rj.iter().zip(rm)
+        .filter_map(|(a, b)| match (a, b) { (Some(x), Some(y)) => Some((*x, *y)), _ => None })
+        .collect();
+    let n = pairs.len();
+    if n < 2 { return None; }
+    let mx = pairs.iter().map(|p| p.0).sum::<f64>() / n as f64;
+    let my = pairs.iter().map(|p| p.1).sum::<f64>() / n as f64;
+    let cov = pairs.iter().map(|(x, y)| (x - mx) * (y - my)).sum::<f64>() / n as f64;
+    let var = pairs.iter().map(|(_, y)| (y - my).powi(2)).sum::<f64>() / n as f64;
+    if var <= 0.0 { None } else { Some(cov / var) }
+}
+
+/// SAF: t anında her sembol için kesitsel sinyal `(idx, skor)` — yüksek skor = LONG bacak. Eksene göre
+/// dallanır; Momentum dışı eksenler `lookback`'i geriye-dönük pencere alır. Skoru hesaplanamayan
+/// sembol listeye girmez (compute_weights'in eski None-atlama mantığıyla birebir). Saf → testli.
+fn build_signals(closes: &[Vec<Option<f64>>], t: usize, cfg: &XsConfig) -> Vec<(usize, f64)> {
+    let n_sym = closes[t].len();
+    let lb = cfg.lookback.max(1);
+    match cfg.signal {
+        XsSignal::Momentum => {
+            // close[t]/close[t−lb]−1 (eski yol birebir).
+            let mut sig = Vec::with_capacity(n_sym);
+            for (j, (now, past)) in closes[t].iter().zip(&closes[t - lb]).enumerate() {
+                if let (Some(c0), Some(cl)) = (now, past) {
+                    if *cl > 0.0 && *c0 > 0.0 { sig.push((j, c0 / cl - 1.0)); }
+                }
+            }
+            sig
+        }
+        XsSignal::LowVol => {
+            // −realized_vol(lb): düşük-vol uca yüksek skor → long.
+            let mut sig = Vec::with_capacity(n_sym);
+            for j in 0..n_sym {
+                let vals: Vec<f64> = window_returns_opt(closes, t, lb, j).into_iter().flatten().collect();
+                if vals.len() >= 2 { sig.push((j, -stddev(&vals))); }
+            }
+            sig
+        }
+        XsSignal::MaxLottery => {
+            // −max(günlük getiri, lb): "piyango" (yüksek aşırı-getiri) düşük skor → short.
+            let mut sig = Vec::with_capacity(n_sym);
+            for j in 0..n_sym {
+                let vals: Vec<f64> = window_returns_opt(closes, t, lb, j).into_iter().flatten().collect();
+                if !vals.is_empty() {
+                    let mx = vals.iter().cloned().fold(f64::MIN, f64::max);
+                    sig.push((j, -mx));
+                }
+            }
+            sig
+        }
+        XsSignal::Beta => {
+            // β = sepet-ortalaması (eşit-ağırlık) market getirisine regresyon → −β long (BAB).
+            let wr: Vec<Vec<Option<f64>>> = (0..n_sym)
+                .map(|j| window_returns_opt(closes, t, lb, j)).collect();
+            // Market[pos] = pencere pozisyonunda mevcut sembollerin ortalama getirisi.
+            let mkt: Vec<Option<f64>> = (0..lb).map(|pos| {
+                let xs: Vec<f64> = wr.iter().filter_map(|r| r.get(pos).copied().flatten()).collect();
+                if xs.is_empty() { None } else { Some(xs.iter().sum::<f64>() / xs.len() as f64) }
+            }).collect();
+            let mut sig = Vec::with_capacity(n_sym);
+            for (j, rj) in wr.iter().enumerate() {
+                if let Some(b) = beta_paired(rj, &mkt) { sig.push((j, -b)); }
+            }
+            sig
+        }
+    }
+}
+
 /// SAF: t anındaki kesitsel hedef ağırlık + (long_set, short_set). Yeterli sembol yoksa None.
-/// sinyal_j = close[t]/close[t−lookback]−1; reversal'da sinyal ters çevrilir → "long edilecek uç" hep baş.
+/// Sinyal `build_signals` ile eksene göre üretilir (yüksek=long); reversal'da ters çevrilir.
 /// `select_books` rank-histerezisiyle mevcut kitabı korur (no-trade band). long Σ=+1, short Σ=−1.
 fn compute_weights(
     closes: &[Vec<Option<f64>>], ohlc: Option<&[Vec<Option<Candle>>]>, t: usize, cfg: &XsConfig,
     prev_long: &HashSet<usize>, prev_short: &HashSet<usize>,
 ) -> Option<(Vec<f64>, HashSet<usize>, HashSet<usize>)> {
     let n_sym = closes[t].len();
-    let mut sig: Vec<(usize, f64)> = Vec::with_capacity(n_sym);
-    for (j, (now, past)) in closes[t].iter().zip(&closes[t - cfg.lookback]).enumerate() {
-        if let (Some(c0), Some(cl)) = (now, past) {
-            if *cl > 0.0 && *c0 > 0.0 {
-                sig.push((j, c0 / cl - 1.0));
-            }
-        }
-    }
+    let mut sig: Vec<(usize, f64)> = build_signals(closes, t, cfg);
     let need = if cfg.long_short { 2 * cfg.top_k } else { cfg.top_k };
     if sig.len() < need {
         return None;
@@ -548,6 +653,18 @@ pub fn run_xs_momentum(cfg: &XsConfig) -> XsResult {
         evaluate_xs_with_ohlc(&closes, Some(&ohlc), cfg)
     } else {
         evaluate_xs(&closes, cfg)
+    }
+}
+
+/// DB-yükleyen NET-getiri serisi (metrik değil ham seri) — eksenler-arası DİKLİK kontrolü için
+/// (iki eksenin getiri serileri düşük korelasyonluysa gerçekten ortogonal). turnover ikinci eleman.
+pub fn run_xs_returns(cfg: &XsConfig) -> (Vec<f64>, Vec<f64>) {
+    let closes = align_closes(cfg);
+    if cfg.sr_tilt > 0.0 {
+        let ohlc = align_ohlc(cfg);
+        xs_returns(&closes, Some(&ohlc), cfg)
+    } else {
+        xs_returns(&closes, None, cfg)
     }
 }
 
@@ -957,5 +1074,75 @@ mod tests {
         let tilt0 = evaluate_xs_with_ohlc(&closes, Some(&dummy), &XsConfig { sr_tilt: 0.0, ..cfg.clone() });
         assert_eq!(base.total_return.to_bits(), tilt0.total_return.to_bits(), "sr_tilt=0 → birebir");
         assert_eq!(base.t_stat.to_bits(), tilt0.t_stat.to_bits());
+    }
+
+    // ───────── XsSignal eksen genelleştirmesi ─────────
+
+    /// closes matrisi: her sembol kendi fiyat serisi (hepsi Some).
+    fn closes_of(series: &[Vec<f64>]) -> Vec<Vec<Option<f64>>> {
+        let n = series[0].len();
+        (0..n).map(|t| series.iter().map(|s| Some(s[t])).collect()).collect()
+    }
+
+    #[test]
+    fn lowvol_signal_ranks_calm_symbol_higher() {
+        // A: sakin (küçük salınım), B: çalkantılı (büyük salınım). LowVol → A daha yüksek skor (long).
+        let a: Vec<f64> = (0..40).map(|i| 100.0 + 0.2 * (i as f64).sin()).collect();
+        let b: Vec<f64> = (0..40).map(|i| 100.0 + 5.0 * (i as f64).sin()).collect();
+        let m = closes_of(&[a, b]);
+        let cfg = XsConfig { signal: XsSignal::LowVol, lookback: 20, ..Default::default() };
+        let sig = build_signals(&m, 39, &cfg);
+        let sa = sig.iter().find(|(j, _)| *j == 0).unwrap().1;
+        let sb = sig.iter().find(|(j, _)| *j == 1).unwrap().1;
+        assert!(sa > sb, "sakin sembol (A) daha yüksek skor almalı: A={sa} B={sb}");
+    }
+
+    #[test]
+    fn lottery_signal_penalizes_spike() {
+        // A: düz; B: tek büyük sıçrama (piyango). MaxLottery → B daha DÜŞÜK skor (short edilir).
+        let a: Vec<f64> = (0..30).map(|i| 100.0 + 0.1 * i as f64).collect();
+        let mut b = a.clone();
+        b[20] *= 1.30; // %30 spike
+        let m = closes_of(&[a, b]);
+        let cfg = XsConfig { signal: XsSignal::MaxLottery, lookback: 15, ..Default::default() };
+        let sig = build_signals(&m, 25, &cfg);
+        let sa = sig.iter().find(|(j, _)| *j == 0).unwrap().1;
+        let sb = sig.iter().find(|(j, _)| *j == 1).unwrap().1;
+        assert!(sa > sb, "piyango sembolü (B) daha düşük skor almalı: A={sa} B={sb}");
+    }
+
+    #[test]
+    fn beta_signal_ranks_lowbeta_higher() {
+        // Market = ortak faktör. A düşük-β (faktörün 0.3'ü), B yüksek-β (1.5'i) + ortak gürültü.
+        // −β long → A (düşük β) daha yüksek skor.
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        let (mut pa, mut pb) = (100.0_f64, 100.0_f64);
+        for i in 0..60 {
+            let f = ((i as f64) * 0.5).sin() * 0.02; // ortak faktör getirisi
+            pa *= 1.0 + 0.3 * f;
+            pb *= 1.0 + 1.5 * f;
+            a.push(pa);
+            b.push(pb);
+        }
+        let m = closes_of(&[a, b]);
+        let cfg = XsConfig { signal: XsSignal::Beta, lookback: 30, ..Default::default() };
+        let sig = build_signals(&m, 59, &cfg);
+        let sa = sig.iter().find(|(j, _)| *j == 0).unwrap().1;
+        let sb = sig.iter().find(|(j, _)| *j == 1).unwrap().1;
+        assert!(sa > sb, "düşük-β sembol (A) daha yüksek skor almalı: A={sa} B={sb}");
+    }
+
+    #[test]
+    fn momentum_axis_unchanged_by_generalization() {
+        // build_signals(Momentum) eski inline döngüyle BİREBİR olmalı (regresyon güvencesi).
+        let a: Vec<f64> = (0..30).map(|i| 100.0 * 1.01_f64.powi(i)).collect(); // güçlü yukarı
+        let b: Vec<f64> = (0..30).map(|i| 100.0 * 0.99_f64.powi(i)).collect(); // aşağı
+        let m = closes_of(&[a, b]);
+        let cfg = XsConfig { signal: XsSignal::Momentum, lookback: 10, ..Default::default() };
+        let sig = build_signals(&m, 29, &cfg);
+        let sa = sig.iter().find(|(j, _)| *j == 0).unwrap().1;
+        let sb = sig.iter().find(|(j, _)| *j == 1).unwrap().1;
+        assert!(sa > 0.0 && sb < 0.0 && sa > sb, "momentum: yukarı + / aşağı −");
     }
 }
