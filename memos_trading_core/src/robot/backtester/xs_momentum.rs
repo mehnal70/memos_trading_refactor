@@ -401,12 +401,23 @@ pub(crate) fn select_books(
 /// L× ölçekler: mean/std/annRet L× → t_stat & Sharpe DEĞİŞMEZ (anlamlılık L-invariant). total_return
 /// bileşik (1+L·r) → L'de NONLİNEER: volatilite-sürüklenmesi (L² ile) burada yakalanır. win_rate L-invariant.
 fn finalize_metrics(res: &mut XsResult, rets: &[f64], turnovers: &[f64], cfg: &XsConfig) {
+    finalize_metrics_params(res, rets, turnovers, cfg.leverage, cfg.bars_per_year,
+        cfg.rebalance_every, cfg.wf_window);
+}
+
+/// `finalize_metrics`'in config-bağımsız çekirdeği — herhangi bir NET-getiri serisini (kesitsel,
+/// BB-pool, vb.) AYNI metrik diline (Newey-West HAC + WF binom) döker. `hold_lag` = pozisyon tutuş
+/// ufku (NW bant-genişliği alt sınırı; XS'te rebalance_every). DRY: XS ve bb_pool ortak çağırır.
+pub(crate) fn finalize_metrics_params(
+    res: &mut XsResult, rets: &[f64], turnovers: &[f64],
+    leverage: f64, bars_per_year: f64, hold_lag: usize, wf_window: usize,
+) {
     let n = rets.len();
     res.bars = n;
     if n == 0 {
         return;
     }
-    let lev = cfg.leverage;
+    let lev = leverage;
     let mean = lev * rets.iter().sum::<f64>() / n as f64;
     let var = if n > 1 {
         let m0 = rets.iter().sum::<f64>() / n as f64;
@@ -420,18 +431,18 @@ fn finalize_metrics(res: &mut XsResult, rets: &[f64], turnovers: &[f64], cfg: &X
     res.win_rate = rets.iter().filter(|r| **r > 0.0).count() as f64 / n as f64;
     // Bileşik: kaldıraçlı bar-getiri L·r → vol-sürüklenmesi (L>1'de büyüme ann.Ret'ten sapar).
     res.total_return = rets.iter().fold(1.0, |acc, r| acc * (1.0 + lev * r)) - 1.0;
-    res.ann_return = mean * cfg.bars_per_year;
-    res.ann_sharpe = if std > 0.0 { mean / std * cfg.bars_per_year.sqrt() } else { 0.0 };
+    res.ann_return = mean * bars_per_year;
+    res.ann_sharpe = if std > 0.0 { mean / std * bars_per_year.sqrt() } else { 0.0 };
     res.t_stat = if std > 0.0 { mean / (std / (n as f64).sqrt()) } else { 0.0 };
     // Newey-West HAC: band/kadans pozisyonu birkaç bar tuttuğundan getiriler otokorelasyonlu →
-    // naif t şişer. Bant-genişliği NW(1994) plug-in kuralı, tutuş ufkuyla (rebalance_every) ALTTAN
+    // naif t şişer. Bant-genişliği NW(1994) plug-in kuralı, tutuş ufkuyla (hold_lag) ALTTAN
     // sınırlanır. Kaldıraç-invariant (μ,γ ortak ölçeklenir) → base rets üzerinde hesaplanır.
     let auto_lag = (4.0 * (n as f64 / 100.0).powf(2.0 / 9.0)).floor() as usize;
-    let lag = auto_lag.max(cfg.rebalance_every).max(1).min(n.saturating_sub(1));
+    let lag = auto_lag.max(hold_lag).max(1).min(n.saturating_sub(1));
     res.nw_lag = lag;
     res.nw_t_stat = newey_west_tstat(rets, lag);
     res.avg_turnover = turnovers.iter().sum::<f64>() / n as f64;
-    res.wf = windowed_consistency(rets, cfg.wf_window);
+    res.wf = windowed_consistency(rets, wf_window);
 }
 
 /// SAF: Newey-West (Bartlett kernel, HAC) tek-yanlı t-stat'ı = mean / sqrt(S/n), S = uzun-dönem varyans

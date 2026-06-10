@@ -6,6 +6,7 @@ pub mod live_path; // canlı-karar-yolunu taklit eden harness (#3 + risk-sizing 
 pub mod edge_scan; // DB-geneli gross-edge tarayıcı (tekrar koşulabilir araç çekirdeği)
 pub mod multi_tf_ab; // çoklu-TF seed düzeneği A/B doğrulama harness'i (Single vs Multi)
 pub mod xs_momentum; // kesitsel relatif-güç sinyali ölçüm harness'i (majör sepeti, pooled edge)
+pub mod bb_pool; // "1d-BB havuzlanmış" hipotez harness'i (edge_scan per-sembol ipucunun pooled testi)
 
 pub use backtest_engine::{Backtester, BacktestConfig, BacktestResult, DirectionMode, RegimeGate, SimulatedTrade};
 //pub use backtest_engine::{ProfileComparisonResult, ProfilePerformance};
@@ -20,3 +21,5 @@ pub use multi_tf_ab::{run_multi_tf_ab, run_symbol_ab, arbitrate_single_position,
     AbConfig, AbReport, SymbolAb, ArmMetrics, TradeSlot};
 pub use xs_momentum::{run_xs_momentum, evaluate_xs, align_closes, XsConfig, XsResult,
     run_xs_walkforward, evaluate_xs_walkforward, XsWfConfig, XsWfResult, xs_target_book};
+pub use bb_pool::{run_bb_pool, evaluate_bb_pool, bb_pool_returns, BbPoolConfig,
+    run_bb_pool_walkforward, evaluate_bb_pool_walkforward, BbWfConfig, BbWfResult};
