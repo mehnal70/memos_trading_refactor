@@ -175,6 +175,7 @@ impl Engine {
                     let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
                     if p.xs_live.enabled { set.extend(p.xs_live.symbols.iter().cloned()); }
                     if p.carry_live.enabled { set.extend(p.carry_live.symbols.iter().cloned()); }
+                    if p.blend_live.enabled { set.extend(p.blend_live.symbols.iter().cloned()); }
                     set
                 })
                 .unwrap_or_default();
@@ -218,6 +219,10 @@ impl Engine {
         // ÇAKIŞMA NOTU: carry + momentum sepetleri AYNI sembolü içermemeli (tek-pozisyon/sembol invariantı);
         // Faz 1'de ayrık sepet ya da yalnız biri açık koşar. [[project_funding_carry]]
         Self::process_carry_book(state).await;
+        // 🔀 İKİ-FAKTÖR HARMAN ADANMIŞ MOD (Faz 2): momentum⊕carry tek market-nötr kitap (z-score harman).
+        // Faz 1 ayrık modlara ALTERNATİF — aynı sembolü iki mod yönetmemeli (loop_core sepeti birleşik
+        // hariç tutar; operatör tek mod açar ya da ayrık sepet kullanır). [[project_funding_carry]]
+        Self::process_blend_book(state).await;
 
         // 2) Paralel sembol infazı — her sembol için ayrı tokio task. State Arc<Mutex> üzerinden
         //    paylaşılır; lock contention'ı kısa tutmak için her closure içinde minimal scope kullanılır.

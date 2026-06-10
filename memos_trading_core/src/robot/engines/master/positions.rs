@@ -817,7 +817,8 @@ impl Engine {
         // (net edge maker 2bps'te doğrulandı). Operatör USE_LIMIT_ENTRY ile maker'a opt-in ettiyse
         // paper komisyon muhasebesi de maker oranını yansıtsın → P&L doğrulanan senaryoya sadık.
         let xs_maker = (strategy_name == crate::robot::engines::master::xs_live::XS_STRATEGY_TAG
-            || strategy_name == crate::robot::engines::master::carry_live::CARRY_STRATEGY_TAG)
+            || strategy_name == crate::robot::engines::master::carry_live::CARRY_STRATEGY_TAG
+            || strategy_name == crate::robot::engines::master::blend_live::BLEND_STRATEGY_TAG)
             && st.tuning.use_limit_entry;
         let entry_commission_rate = if used_maker || xs_maker { st.tuning.maker_commission_rate }
                                      else                     { st.tuning.commission_rate };

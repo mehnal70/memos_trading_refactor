@@ -56,18 +56,30 @@ impl Engine {
 
         let interval_secs =
             crate::robot::data_pipeline::DataNormalizer::parse_interval(&cfg.interval) as i64;
-        // 📐 Momentum sinyali: KAPALI-BAR penceresinden fiyat getirisi (forming barı dışla; live=backtest).
-        // Escape: SIGNAL_CLOSED_BAR_ONLY=0 → forming bar dahil. [[project_closed_bar_signal]]
-        let signal_fn = move |_sym: &str, c: &[Candle]| {
-            let sig_c = super::loop_core::closed_bar_window(c, interval_secs, closed_only, chrono::Utc::now());
-            let closes: Vec<f64> = sig_c.iter().map(|k| k.close).collect();
-            latest_signal(&closes, lookback)
+        // 📐 Momentum kesitsel sinyal üreteci: her sembolün KAPALI-BAR penceresinden fiyat getirisi
+        // (forming barı dışla; live=backtest). Escape: SIGNAL_CLOSED_BAR_ONLY=0. [[project_closed_bar_signal]]
+        let signal_source = move |candles_map: &std::collections::HashMap<String, Vec<Candle>>| {
+            momentum_signals(candles_map, interval_secs, closed_only, lookback)
         };
 
         Self::process_book(
-            state, &cfg, super::book_core::BookKind::Momentum, &tuning, &db_path, signal_fn,
+            state, &cfg, super::book_core::BookKind::Momentum, &tuning, &db_path, signal_source,
         ).await;
     }
+}
+
+/// SAF-yardımcı: candles_map → momentum kesitsel sinyalleri (kapalı-bar fiyat getirisi). xs_live ve
+/// blend_live ORTAK kullanır (DRY) → tek-kaynak momentum sinyali. Skoru olmayan sembol vec'e girmez.
+pub(crate) fn momentum_signals(
+    candles_map: &std::collections::HashMap<String, Vec<Candle>>,
+    interval_secs: i64, closed_only: bool, lookback: usize,
+) -> Vec<(String, f64)> {
+    let now = chrono::Utc::now();
+    candles_map.iter().filter_map(|(sym, c)| {
+        let sig_c = super::loop_core::closed_bar_window(c, interval_secs, closed_only, now);
+        let closes: Vec<f64> = sig_c.iter().map(|k| k.close).collect();
+        latest_signal(&closes, lookback).map(|s| (sym.clone(), s))
+    }).collect()
 }
 
 #[cfg(test)]

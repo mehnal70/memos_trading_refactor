@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 pub(crate) enum BookKind {
     Momentum,
     Carry,
+    Blend, // iki-faktör z-score harman (Faz 2): tek market-nötr kitap, momentum⊕carry
 }
 
 impl BookKind {
@@ -25,6 +26,7 @@ impl BookKind {
         match self {
             BookKind::Momentum => super::xs_live::XS_STRATEGY_TAG,
             BookKind::Carry => super::carry_live::CARRY_STRATEGY_TAG,
+            BookKind::Blend => super::blend_live::BLEND_STRATEGY_TAG,
         }
     }
     /// Log/teşhis etiketi (operatör `grep` ile rebalance'ı izler).
@@ -32,18 +34,21 @@ impl BookKind {
         match self {
             BookKind::Momentum => "kesitsel",
             BookKind::Carry => "carry",
+            BookKind::Blend => "harman",
         }
     }
     fn cb_notify_key(&self) -> &'static str {
         match self {
             BookKind::Momentum => "xs-circuit-breaker",
             BookKind::Carry => "carry-circuit-breaker",
+            BookKind::Blend => "blend-circuit-breaker",
         }
     }
     fn tp_notify_key(&self) -> &'static str {
         match self {
             BookKind::Momentum => "xs-take-profit",
             BookKind::Carry => "carry-take-profit",
+            BookKind::Blend => "blend-take-profit",
         }
     }
     /// Portföy-düzeyi devre kesici / take-profit cooldown'u (bu kitaba özel state alanı).
@@ -53,6 +58,7 @@ impl BookKind {
         match self {
             BookKind::Momentum => &fin.xs_circuit_breaker_until,
             BookKind::Carry => &fin.carry_circuit_breaker_until,
+            BookKind::Blend => &fin.blend_circuit_breaker_until,
         }
     }
     /// Son rank-rebalance edilen bar (bu kitaba özel state alanı) — kadans kapısı bununla sayar.
@@ -62,6 +68,7 @@ impl BookKind {
         match self {
             BookKind::Momentum => &fin.xs_last_rebalance_bar,
             BookKind::Carry => &fin.carry_last_rebalance_bar,
+            BookKind::Blend => &fin.blend_last_rebalance_bar,
         }
     }
 }
@@ -134,6 +141,40 @@ pub(crate) fn bars_between(
     (cur - last).num_seconds() / interval_secs
 }
 
+/// SAF: kesitsel z-score normalizasyonu — her sembolün skoru (v−μ)/σ (popülasyon σ). σ≈0 (tüm
+/// skorlar eşit) → hepsi 0.0 (bölme koruması; harmanda o faktör nötr katkı). İki faktörü AYNI ölçeğe
+/// taşır → ağırlıklı harman anlamlı. Testli.
+pub(crate) fn zscore_map(raw: &[(String, f64)]) -> HashMap<String, f64> {
+    let n = raw.len();
+    if n == 0 {
+        return HashMap::new();
+    }
+    let mean = raw.iter().map(|(_, v)| *v).sum::<f64>() / n as f64;
+    let var = raw.iter().map(|(_, v)| (*v - mean).powi(2)).sum::<f64>() / n as f64;
+    let sd = var.sqrt();
+    raw.iter()
+        .map(|(s, v)| (s.clone(), if sd > 1e-12 { (*v - mean) / sd } else { 0.0 }))
+        .collect()
+}
+
+/// SAF: iki-faktör KESİTSEL HARMAN skoru = w_mom·z(momentum) + w_carry·z(carry). Her faktör önce
+/// kesitsel z-score'lanır (ortak ölçek), sonra ağırlıklı toplanır. Yalnız HER İKİ faktörde de skoru
+/// olan semboller döner (eksik faktör → harman tanımsız). Tek market-nötr kitap için sıralanabilir skor.
+/// Doğrulanmış optimal carry-ağırlıklı (w_carry≈0.6). [[project_funding_carry]] Testli.
+pub(crate) fn blend_zscores(
+    mom: &[(String, f64)], carry: &[(String, f64)], w_mom: f64, w_carry: f64,
+) -> Vec<(String, f64)> {
+    let zm = zscore_map(mom);
+    let zc = zscore_map(carry);
+    let mut out: Vec<(String, f64)> = Vec::new();
+    for (sym, m) in &zm {
+        if let Some(c) = zc.get(sym) {
+            out.push((sym.clone(), w_mom * m + w_carry * c));
+        }
+    }
+    out
+}
+
 /// SAF (testli): hedef long/short kitabı + mevcut pozisyon yönleri (symbol→is_long) → aksiyon listesi.
 /// Hedefle aynı yön → no-op (tut). Yön değişimi → Close (flat) ya da Close+Open (flip). Kapanışlar
 /// listede AÇILIŞLARDAN ÖNCE gelir → flip'te önce kapat sonra aç (infaz bu sırayı korur).
@@ -169,17 +210,19 @@ impl Engine {
     /// hedef kitap → aksiyonları infaz et. `execute_trade_cycle` per-sembol döngüsünden ÖNCE çağrılır;
     /// sepet sembolleri normal döngüden HARİÇ tutulur (çift-yönetim yok). Sepet yetersiz → no-op.
     ///
-    /// `signal_fn(sym, candles) -> Option<f64>`: kitaba özel sinyal (momentum=fiyat-getirisi,
-    /// carry=−trailing funding); None → o sembol kitaptan dışlanır (veri/tazelik yetersiz).
+    /// `signal_source(&candles_map) -> Vec<(sym, skor)>`: KESİTSEL sinyal üreteci. Tüm taze+eligible
+    /// sembollerin mumlarını alır, kitaba özel skoru üretir (momentum=fiyat-getirisi, carry=−trailing
+    /// funding, blend=z-score harmanı). Kesiti TÜM görür → z-score normalizasyonu (harman) mümkün.
+    /// Skoru olmayan sembol vec'e GİRMEZ (veri/tazelik yetersiz → kitaptan dışlanır).
     pub(crate) async fn process_book<F>(
         state: &Arc<Mutex<AppState>>,
         cfg: &BookConfig,
         kind: BookKind,
         tuning: &Arc<RuntimeTuning>,
         db_path: &str,
-        signal_fn: F,
+        signal_source: F,
     ) where
-        F: Fn(&str, &[Candle]) -> Option<f64>,
+        F: Fn(&HashMap<String, Vec<Candle>>) -> Vec<(String, f64)>,
     {
         let label = kind.label();
         let interval_secs =
@@ -189,8 +232,9 @@ impl Engine {
         let stale_bound =
             super::loop_core::effective_stale_feed_age(tuning.stale_feed_max_age_secs, interval_secs);
 
-        // 1) sepet sembollerinin son mumlarını yükle + kitaba özel sinyal (eligibility + tazelik geçenler).
-        let mut signals: Vec<(String, f64)> = Vec::new();
+        // 1) sepet sembollerinin son mumlarını yükle (eligibility + stale-feed kapısından geçenler) →
+        // candles_map (TAM mum: fiyat referansı + execution + cur_bar + regime proxy). Sonra kesitsel
+        // sinyal üreteci tüm kesiti skorlar (z-score harmanı için kesit-bütününü görmek ŞART).
         let mut candles_map: HashMap<String, Vec<Candle>> = HashMap::new();
         for sym in &cfg.symbols {
             if !tuning.symbol_eligible_for_live(sym) {
@@ -202,20 +246,16 @@ impl Engine {
                     if let Some(last) = c.last() {
                         if !candle_is_fresh_within(&last.timestamp, stale_bound) {
                             let age = (chrono::Utc::now() - last.timestamp).num_seconds();
-                            log::debug!("📐 {}: {} bayat mum ({}sn > {}sn) → sinyalden dışlandı (phantom giriş koruması)",
+                            log::debug!("📐 {}: {} bayat mum ({}sn > {}sn) → kitaptan dışlandı (phantom giriş koruması)",
                                 label, sym, age, stale_bound);
                             continue;
                         }
                     }
                 }
-                // Sinyal kitaba özel (momentum: kapalı-bar fiyat getirisi; carry: −trailing funding).
-                // candles_map'e TAM mum girer (open/close fiyat referansı + execution + cur_bar için).
-                if let Some(s) = signal_fn(sym, &c) {
-                    signals.push((sym.clone(), s));
-                    candles_map.insert(sym.clone(), c);
-                }
+                candles_map.insert(sym.clone(), c);
             }
         }
+        let signals: Vec<(String, f64)> = signal_source(&candles_map);
         if signals.len() < 2 * cfg.top_k {
             log::debug!("📐 {}: yetersiz sinyal ({}/{} sembol geçerli, ≥{} gerek; interval={} lookback={}) → pas",
                 label, signals.len(), cfg.symbols.len(), 2 * cfg.top_k, cfg.interval, cfg.lookback);
@@ -420,6 +460,32 @@ mod book_core_tests {
         // interval bilinmiyorsa (0): farklıysa 1, aynıysa 0.
         assert_eq!(bars_between(t14, t0, 0), 1);
         assert_eq!(bars_between(t0, t0, 0), 0);
+    }
+
+    #[test]
+    fn zscore_centers_and_scales() {
+        let z = zscore_map(&[("A".into(), 1.0), ("B".into(), 2.0), ("C".into(), 3.0)]);
+        // μ=2, σ=√(2/3)≈0.8165 → A=(1-2)/0.8165≈-1.2247, C≈+1.2247, B=0.
+        assert!((z["B"]).abs() < 1e-9, "ortadaki z=0");
+        assert!((z["A"] + z["C"]).abs() < 1e-9, "simetrik → toplam 0");
+        assert!(z["C"] > z["A"], "büyük değer büyük z");
+        // σ=0 (hepsi eşit) → tüm z=0 (bölme koruması).
+        let z0 = zscore_map(&[("A".into(), 5.0), ("B".into(), 5.0)]);
+        assert_eq!(z0["A"], 0.0);
+        assert_eq!(z0["B"], 0.0);
+    }
+
+    #[test]
+    fn blend_weights_two_factors_intersection() {
+        // momentum: A güçlü, B zayıf; carry: A zayıf, B güçlü. Eşit ağırlıkta nötrleşmeli; carry-ağırlıkta B önde.
+        let mom = vec![("A".into(), 2.0), ("B".into(), 1.0), ("C".into(), 1.5)];
+        let car = vec![("A".into(), 1.0), ("B".into(), 2.0)]; // C carry'de YOK → harmana girmez
+        let blended = blend_zscores(&mom, &car, 0.4, 0.6);
+        let map: HashMap<String, f64> = blended.into_iter().collect();
+        assert!(!map.contains_key("C"), "tek faktörlü sembol harmana girmez");
+        assert_eq!(map.len(), 2, "yalnız iki faktörde de olan A,B");
+        // carry-ağırlıklı (0.6) → carry'de güçlü B, momentum'da güçlü A'dan yüksek skorlu olmalı.
+        assert!(map["B"] > map["A"], "carry-ağırlıklı harmanda carry-güçlü B önde");
     }
 
     fn s(v: &[&str]) -> Vec<String> { v.iter().map(|x| x.to_string()).collect() }

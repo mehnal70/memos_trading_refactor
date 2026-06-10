@@ -86,6 +86,12 @@ pub struct FinanceVault {
     /// 📐💰 Funding-carry son rank-rebalance edilen bar. process_carry_book yazar+okur: KADANS kapısı
     /// (rebalance_bars≥14, düşük-turnover) bununla sayar. xs_last_rebalance_bar'ın carry ikizi. Persist edilmez.
     pub carry_last_rebalance_bar: Arc<RwLock<Option<chrono::DateTime<chrono::Utc>>>>,
+    /// 🔌🔀 İki-faktör harman (Faz 2) kitabının devre kesici / take-profit cooldown'u. process_blend_book
+    /// yazar+okur. xs/carry CB'nin harman ikizi — ayrı kitap, ayrı koruma. Persist edilmez.
+    pub blend_circuit_breaker_until: Arc<RwLock<Option<std::time::Instant>>>,
+    /// 📐🔀 İki-faktör harman son rank-rebalance edilen bar. process_blend_book yazar+okur: KADANS kapısı
+    /// (carry-baskın → rebalance_bars≥14) bununla sayar. Persist edilmez.
+    pub blend_last_rebalance_bar: Arc<RwLock<Option<chrono::DateTime<chrono::Utc>>>>,
     /// 🪜 Kademeli giriş durumu (sembol→kademe sayacı + hedef sermaye). open_paper_position açılışta
     /// yazar, try_add_graded_tranche ek-kademe için okur+günceller, close_paper_position temizler.
     /// Sembol-anahtarlı (tek-pozisyon/sembol invariantı). Ephemeral: restart'ta kaybolur → kurtarılan
@@ -335,6 +341,8 @@ impl AppState {
             xs_last_rebalance_bar: Arc::new(RwLock::new(None)),
             carry_circuit_breaker_until: Arc::new(RwLock::new(None)),
             carry_last_rebalance_bar: Arc::new(RwLock::new(None)),
+            blend_circuit_breaker_until: Arc::new(RwLock::new(None)),
+            blend_last_rebalance_bar: Arc::new(RwLock::new(None)),
             graded_tranches: Arc::new(RwLock::new(HashMap::new())),
             pending_open_long:  Arc::new(std::sync::atomic::AtomicU32::new(0)),
             pending_open_short: Arc::new(std::sync::atomic::AtomicU32::new(0)),

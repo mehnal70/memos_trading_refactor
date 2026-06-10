@@ -1,6 +1,6 @@
 # Funding-carry canlı entegrasyon — tasarım planı
 
-> Durum: **FAZ 1 UYGULANDI** (DRY ortak-motor mimarisiyle). Faz 2 (z-score harman) bekliyor.
+> Durum: **FAZ 1 + FAZ 2 UYGULANDI** (DRY ortak-motor mimarisiyle).
 > İlgili hafıza: `project_funding_carry`, `project_xs_momentum`, `project_maker_limit_entry`.
 >
 > ## ✅ Faz 1 uygulama özeti (gerçekleşen mimari — plandan SAPMA: DRY ortak-motor)
@@ -16,6 +16,16 @@
 > - jobs_download: `refresh_carry_funding` artımlı gap-farkında funding fetch (carry açıkken).
 > - 482 lib testi yeşil, workspace build RC=0. Opt-in default-OFF (CARRY_LIVE_ENABLED=1).
 > Kalan: paper smoke (operatör) → uzun P&L izleme → düşük-sermaye live.
+>
+> ## ✅ Faz 2 uygulama özeti (z-score harman tek-kitap — seçenek B)
+> Ortak motorun sinyal aşaması genelleştirildi: per-sembol `signal_fn` → **`signal_source(&candles_map)
+> → Vec<(sym,skor)>`** (kesitsel z-score TÜM kesiti görmeli). Momentum/carry sarmalayıcıları ORTAK
+> helper'lara çıktı (`momentum_signals` @ xs_live, `carry_signals` @ carry_live) → blend ikisini çağırıp
+> `blend_zscores(wm,wc)` ile birleştirir (sıfır kod tekrarı). Eklenenler:
+> - `book_core.rs`: `zscore_map` + `blend_zscores` saf yardımcıları (+testler); `BookKind::Blend`.
+> - `blend_live.rs`: `process_blend_book` (w_carry≈0.6 default; carry-baskın kadans=14; tek kitap → eşit-ağırlık 1/k korunur).
+> - `BlendLiveParams` (types) + `BLEND_LIVE_*` env (store); FinanceVault blend CB+rebalance bar; loop_core exclusion+çağrı; maker tag BLEND_FACTOR.
+> - Faz 1 ayrık modlara ALTERNATİF (aynı sembolü iki mod yönetmez). 485 lib testi yeşil, build RC=0. Opt-in default-OFF (BLEND_LIVE_ENABLED=1).
 
 ## 1. Bağlam — ne kanıtlandı
 

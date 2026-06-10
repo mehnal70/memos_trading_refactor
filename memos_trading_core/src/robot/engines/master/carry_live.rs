@@ -17,7 +17,7 @@ pub(crate) const CARRY_STRATEGY_TAG: &str = "FUNDING_CARRY";
 
 /// Funding-carry sinyali yalnız futures'ta anlamlı (perp funding). Sabit (operatör-ayarı değil; funding
 /// başka markette yok → koda gömülü doğru, env'e açılmaz [[feedback_market_agnostic]]).
-const CARRY_MARKET: &str = "futures";
+pub(crate) const CARRY_MARKET: &str = "futures";
 
 /// SAF: trailing funding penceresinin carry sinyali = −ortalama(funding). Yüksek funding → DÜŞÜK skor
 /// → SHORT bacak (book funding'i alır); negatif funding → YÜKSEK skor → LONG bacak (funding'i alır).
@@ -68,37 +68,45 @@ impl Engine {
 
         let interval_secs = crate::robot::data_pipeline::DataNormalizer::parse_interval(&cfg.interval)
             .max(1) as i64;
-        let now_ms = crate::core::time::now_epoch_millis() as i64;
-        // Trailing pencere: son `lookback` barlık zaman aralığındaki funding ödemeleri (mum bucket'ı
-        // yerine zaman-penceresi → tek sembol için hafif yol; ortalama-funding ekonomik olarak aynı,
-        // rank-değişmez). Backtest bar-bucket'lı; cross-sectional rank ikisinde de bit-aynı sıralar.
-        let cutoff = now_ms - (lookback as i64) * interval_secs * 1000;
         let db_path_sig = db_path.clone();
-
-        // 💰 Carry sinyali: trailing funding ortalaması (−). 🧊 FUNDING-TAZELİK KAPISI: son funding
-        // `funding_max_age_secs`'ten eskiyse (delisted/feed durdu, örn. MKR) → None → kitaba girmez
-        // (mum stale-feed kapısının funding ikizi; phantom carry önler). [[project_symbol_status_registry]]
-        let signal_fn = move |sym: &str, _c: &[Candle]| {
-            let funding = read_funding_market(&db_path_sig, sym, CARRY_MARKET, funding_limit)
-                .unwrap_or_default();
-            if let Some((last_t, _)) = funding.last() {
-                if funding_max_age_secs > 0 && now_ms - *last_t > funding_max_age_secs * 1000 {
-                    let age_h = (now_ms - *last_t) / 3_600_000;
-                    log::debug!("💰 carry: {} funding bayat ({}sa > {}sa) → sinyalden dışlandı (phantom carry koruması)",
-                        sym, age_h, funding_max_age_secs / 3600);
-                    return None;
-                }
-            } else {
-                return None; // funding hiç indirilmemiş → kitaba girmez
-            }
-            let rates: Vec<f64> = funding.iter().filter(|(t, _)| *t >= cutoff).map(|(_, r)| *r).collect();
-            latest_carry_signal(&rates)
+        // 💰 Carry kesitsel sinyal üreteci (xs_live ile aynı kalıp; blend_live ile ORTAK helper).
+        let signal_source = move |candles_map: &std::collections::HashMap<String, Vec<Candle>>| {
+            carry_signals(candles_map, &db_path_sig, lookback, interval_secs, funding_max_age_secs, funding_limit)
         };
 
         Self::process_book(
-            state, &cfg, super::book_core::BookKind::Carry, &tuning, &db_path, signal_fn,
+            state, &cfg, super::book_core::BookKind::Carry, &tuning, &db_path, signal_source,
         ).await;
     }
+}
+
+/// SAF-yardımcı: candles_map → carry kesitsel sinyalleri (−trailing funding ortalaması). carry_live ve
+/// blend_live ORTAK kullanır (DRY) → tek-kaynak carry sinyali. 🧊 FUNDING-TAZELİK KAPISI: son funding
+/// `funding_max_age_secs`'ten eskiyse (delisted/feed durdu, örn. MKR) → sembol dışlanır (phantom carry
+/// önler). Trailing pencere: son `lookback` barlık zaman aralığındaki funding (zaman-penceresi → hafif
+/// yol; ortalama-funding rank-değişmez, backtest bar-bucket'ıyla bit-aynı sıralar). [[project_funding_carry]]
+pub(crate) fn carry_signals(
+    candles_map: &std::collections::HashMap<String, Vec<Candle>>,
+    db_path: &str, lookback: usize, interval_secs: i64, funding_max_age_secs: i64, funding_limit: usize,
+) -> Vec<(String, f64)> {
+    let now_ms = crate::core::time::now_epoch_millis() as i64;
+    let cutoff = now_ms - (lookback as i64) * interval_secs.max(1) * 1000;
+    candles_map.keys().filter_map(|sym| {
+        let funding = read_funding_market(db_path, sym, CARRY_MARKET, funding_limit).unwrap_or_default();
+        match funding.last() {
+            Some((last_t, _)) => {
+                if funding_max_age_secs > 0 && now_ms - *last_t > funding_max_age_secs * 1000 {
+                    let age_h = (now_ms - *last_t) / 3_600_000;
+                    log::debug!("💰 carry: {} funding bayat ({}sa > {}sa) → dışlandı (phantom carry koruması)",
+                        sym, age_h, funding_max_age_secs / 3600);
+                    return None;
+                }
+            }
+            None => return None, // funding hiç indirilmemiş → kitaba girmez
+        }
+        let rates: Vec<f64> = funding.iter().filter(|(t, _)| *t >= cutoff).map(|(_, r)| *r).collect();
+        latest_carry_signal(&rates).map(|s| (sym.clone(), s))
+    }).collect()
 }
 
 #[cfg(test)]

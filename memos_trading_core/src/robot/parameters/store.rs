@@ -111,6 +111,10 @@ pub struct ParameterStore {
     /// `book_core` motorunu xs_live ile paylaşır. Default disabled → sıfır regresyon. `from_env` CARRY_LIVE_*.
     #[serde(default)]
     pub carry_live: CarryLiveParams,
+    /// İKİ-FAKTÖR HARMAN ADANMIŞ MOD (Faz 2): tek market-nötr kitap, z-score harman skoru (momentum⊕carry).
+    /// `book_core` motorunu xs/carry ile paylaşır. Default disabled → sıfır regresyon. `from_env` BLEND_LIVE_*.
+    #[serde(default)]
+    pub blend_live: BlendLiveParams,
     /// KADEMELİ GİRİŞ parametreleri (XS hariç): pozisyonu N kademede, rejime göre (trend→pyramiding /
     /// ranging→averaging) HTF-teyitli kurar. Default disabled → sıfır regresyon. `from_env` GRADED_* ile.
     #[serde(default)]
@@ -211,6 +215,7 @@ impl Default for ParameterStore {
             symbol_strategy_params: HashMap::new(),
             xs_live: XsLiveParams::default(),
             carry_live: CarryLiveParams::default(),
+            blend_live: BlendLiveParams::default(),
             graded_entry: GradedEntryParams::default(),
         }
     }
@@ -463,6 +468,38 @@ impl ParameterStore {
             log::info!("💰 funding-carry adanmış mod AÇIK: {} sembol · lookback={} · kadans={}bar · top_k={} · band={}",
                 store.carry_live.symbols.len(), store.carry_live.lookback, store.carry_live.rebalance_bars,
                 store.carry_live.top_k, store.carry_live.exit_buffer);
+        }
+
+        // İKİ-FAKTÖR HARMAN ADANMIŞ MOD (opt-in, Faz 2): BLEND_LIVE_ENABLED=1 + BLEND_LIVE_SYMBOLS ile
+        // aktive. book_core motorunu xs/carry ile paylaşır; sinyal z-score harmanı. [[project_funding_carry]]
+        let bd = BlendLiveParams::default();
+        store.blend_live = BlendLiveParams {
+            enabled: parse_env_bool("BLEND_LIVE_ENABLED").unwrap_or(bd.enabled),
+            symbols: std::env::var("BLEND_LIVE_SYMBOLS").ok()
+                .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                .unwrap_or(bd.symbols),
+            interval: std::env::var("BLEND_LIVE_INTERVAL").ok().filter(|s| !s.trim().is_empty()).unwrap_or(bd.interval),
+            mom_lookback: std::env::var("BLEND_LIVE_MOM_LOOKBACK").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.mom_lookback),
+            carry_lookback: std::env::var("BLEND_LIVE_CARRY_LOOKBACK").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.carry_lookback),
+            rebalance_bars: std::env::var("BLEND_LIVE_REBALANCE_BARS").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.rebalance_bars),
+            weight_momentum: parse_env_f64("BLEND_LIVE_WEIGHT_MOM").unwrap_or(bd.weight_momentum),
+            weight_carry: parse_env_f64("BLEND_LIVE_WEIGHT_CARRY").unwrap_or(bd.weight_carry),
+            top_k: std::env::var("BLEND_LIVE_TOP_K").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.top_k),
+            exit_buffer: std::env::var("BLEND_LIVE_BUFFER").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.exit_buffer),
+            position_pct: parse_env_f64("BLEND_LIVE_POSITION_PCT").unwrap_or(bd.position_pct),
+            leverage: parse_env_f64("BLEND_LIVE_LEVERAGE").unwrap_or(bd.leverage),
+            regime_gate: parse_env_bool("BLEND_LIVE_REGIME_GATE").unwrap_or(bd.regime_gate),
+            max_drawdown_pct: parse_env_f64("BLEND_LIVE_MAX_DD_PCT").unwrap_or(bd.max_drawdown_pct),
+            cb_cooldown_secs: std::env::var("BLEND_LIVE_CB_COOLDOWN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.cb_cooldown_secs),
+            take_profit_pct: parse_env_f64("BLEND_LIVE_TP_PCT").unwrap_or(bd.take_profit_pct),
+            tp_cooldown_secs: std::env::var("BLEND_LIVE_TP_COOLDOWN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.tp_cooldown_secs),
+            funding_max_age_secs: std::env::var("BLEND_LIVE_FUNDING_MAX_AGE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.funding_max_age_secs),
+            funding_limit: std::env::var("BLEND_LIVE_FUNDING_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.funding_limit),
+        };
+        if store.blend_live.enabled {
+            log::info!("🔀 iki-faktör harman adanmış mod AÇIK: {} sembol · w_mom={:.2} w_carry={:.2} · kadans={}bar · top_k={}",
+                store.blend_live.symbols.len(), store.blend_live.weight_momentum, store.blend_live.weight_carry,
+                store.blend_live.rebalance_bars, store.blend_live.top_k);
         }
 
         // KADEMELİ GİRİŞ (opt-in, XS hariç): GRADED_ENTRY_ENABLED=1 + ağırlıklar ile aktive.
