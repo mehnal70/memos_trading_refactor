@@ -67,6 +67,8 @@ fn main() {
     let fee_rate: f64 = std::env::var("O_FEE_RATE").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0005);
     let candle_limit: usize = std::env::var("O_CANDLE_LIMIT").ok().and_then(|s| s.parse().ok()).unwrap_or(5000);
     let funding_limit: usize = std::env::var("O_FUNDING_LIMIT").ok().and_then(|s| s.parse().ok()).unwrap_or(20_000);
+    // Carry YAVAŞ sinyal → fee-dayanıklılık için iki-haftalık rebalance (turnover kesintisi). Default 1.
+    let carry_rb: usize = std::env::var("O_CARRY_REBALANCE").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
     let bpy = bars_per_year(&interval);
 
     // Momentum getiri serisi.
@@ -81,7 +83,7 @@ fn main() {
     let carry_cfg = FundingCarryConfig {
         db_path: db_path.clone(), market: market.clone(), interval: interval.clone(),
         symbols: symbols.clone(), candle_limit, funding_limit, lookback: carry_lb,
-        top_k, fee_rate, long_short: true, bars_per_year: bpy, ..Default::default()
+        top_k, fee_rate, long_short: true, rebalance_every: carry_rb, bars_per_year: bpy, ..Default::default()
     };
     let (carry_rets, carry_turn) = run_funding_carry_returns(&carry_cfg);
 
