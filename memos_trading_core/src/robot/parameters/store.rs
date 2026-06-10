@@ -106,6 +106,11 @@ pub struct ParameterStore {
     /// Default disabled → sıfır regresyon. `from_env` XS_LIVE_* ile doldurur.
     #[serde(default)]
     pub xs_live: XsLiveParams,
+    /// FUNDING-CARRY ADANMIŞ MOD parametreleri ([[project_funding_carry]]). enabled iken sepet
+    /// sembolleri funding-carry kitabıyla (yüksek-funding short / düşük-funding long) yönetilir;
+    /// `book_core` motorunu xs_live ile paylaşır. Default disabled → sıfır regresyon. `from_env` CARRY_LIVE_*.
+    #[serde(default)]
+    pub carry_live: CarryLiveParams,
     /// KADEMELİ GİRİŞ parametreleri (XS hariç): pozisyonu N kademede, rejime göre (trend→pyramiding /
     /// ranging→averaging) HTF-teyitli kurar. Default disabled → sıfır regresyon. `from_env` GRADED_* ile.
     #[serde(default)]
@@ -205,6 +210,7 @@ impl Default for ParameterStore {
             symbol_tracks: HashMap::new(),
             symbol_strategy_params: HashMap::new(),
             xs_live: XsLiveParams::default(),
+            carry_live: CarryLiveParams::default(),
             graded_entry: GradedEntryParams::default(),
         }
     }
@@ -427,6 +433,36 @@ impl ParameterStore {
             log::info!("📐 kesitsel adanmış mod AÇIK: {} sembol · lookback={} · top_k={} · band={} · {}",
                 store.xs_live.symbols.len(), store.xs_live.lookback, store.xs_live.top_k,
                 store.xs_live.exit_buffer, if store.xs_live.momentum { "momentum" } else { "reversal" });
+        }
+
+        // FUNDING-CARRY ADANMIŞ MOD (opt-in): CARRY_LIVE_ENABLED=1 + CARRY_LIVE_SYMBOLS=BTC,ETH,... ile
+        // aktive. book_core motorunu xs_live ile paylaşır; farkı KADANS (rebalance_bars≥14, düşük-turnover
+        // ŞART) + funding-tazelik kapısı. [[project_funding_carry]] [[feedback_config_externalization]].
+        let cd = CarryLiveParams::default();
+        store.carry_live = CarryLiveParams {
+            enabled: parse_env_bool("CARRY_LIVE_ENABLED").unwrap_or(cd.enabled),
+            symbols: std::env::var("CARRY_LIVE_SYMBOLS").ok()
+                .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                .unwrap_or(cd.symbols),
+            interval: std::env::var("CARRY_LIVE_INTERVAL").ok().filter(|s| !s.trim().is_empty()).unwrap_or(cd.interval),
+            lookback: std::env::var("CARRY_LIVE_LOOKBACK").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.lookback),
+            rebalance_bars: std::env::var("CARRY_LIVE_REBALANCE_BARS").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.rebalance_bars),
+            top_k: std::env::var("CARRY_LIVE_TOP_K").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.top_k),
+            exit_buffer: std::env::var("CARRY_LIVE_BUFFER").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.exit_buffer),
+            position_pct: parse_env_f64("CARRY_LIVE_POSITION_PCT").unwrap_or(cd.position_pct),
+            leverage: parse_env_f64("CARRY_LIVE_LEVERAGE").unwrap_or(cd.leverage),
+            regime_gate: parse_env_bool("CARRY_LIVE_REGIME_GATE").unwrap_or(cd.regime_gate),
+            max_drawdown_pct: parse_env_f64("CARRY_LIVE_MAX_DD_PCT").unwrap_or(cd.max_drawdown_pct),
+            cb_cooldown_secs: std::env::var("CARRY_LIVE_CB_COOLDOWN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.cb_cooldown_secs),
+            take_profit_pct: parse_env_f64("CARRY_LIVE_TP_PCT").unwrap_or(cd.take_profit_pct),
+            tp_cooldown_secs: std::env::var("CARRY_LIVE_TP_COOLDOWN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.tp_cooldown_secs),
+            funding_max_age_secs: std::env::var("CARRY_LIVE_FUNDING_MAX_AGE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.funding_max_age_secs),
+            funding_limit: std::env::var("CARRY_LIVE_FUNDING_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.funding_limit),
+        };
+        if store.carry_live.enabled {
+            log::info!("💰 funding-carry adanmış mod AÇIK: {} sembol · lookback={} · kadans={}bar · top_k={} · band={}",
+                store.carry_live.symbols.len(), store.carry_live.lookback, store.carry_live.rebalance_bars,
+                store.carry_live.top_k, store.carry_live.exit_buffer);
         }
 
         // KADEMELİ GİRİŞ (opt-in, XS hariç): GRADED_ENTRY_ENABLED=1 + ağırlıklar ile aktive.

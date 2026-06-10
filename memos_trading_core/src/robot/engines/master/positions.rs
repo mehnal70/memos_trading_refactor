@@ -153,7 +153,7 @@ impl Engine {
         // KESİTSEL override (adanmış mod): Some → eşit-ağırlık alloc (equity·frac, Kelly bypass) + SABİT
         // kaldıraç (resolve_leverage bypass). Market-nötr kitabın 1/k dengesi + risk kontrolü. None →
         // mevcut Kelly sizing + resolve_leverage (sıfır regresyon; XS-dışı tüm çağıranlar None).
-        xs_sizing: Option<xs_live::XsSizing>,
+        xs_sizing: Option<book_core::BookSizing>,
     ) {
         use crate::robot::risk::kelly::KellyCriterion;
         let last_candle = match candles.last() { Some(c) => c, None => return };
@@ -816,7 +816,8 @@ impl Engine {
         // KESİTSEL maker icra: XS pozisyonları (strategy_name=XS tag) maker için TASARLANDI
         // (net edge maker 2bps'te doğrulandı). Operatör USE_LIMIT_ENTRY ile maker'a opt-in ettiyse
         // paper komisyon muhasebesi de maker oranını yansıtsın → P&L doğrulanan senaryoya sadık.
-        let xs_maker = strategy_name == crate::robot::engines::master::xs_live::XS_STRATEGY_TAG
+        let xs_maker = (strategy_name == crate::robot::engines::master::xs_live::XS_STRATEGY_TAG
+            || strategy_name == crate::robot::engines::master::carry_live::CARRY_STRATEGY_TAG)
             && st.tuning.use_limit_entry;
         let entry_commission_rate = if used_maker || xs_maker { st.tuning.maker_commission_rate }
                                      else                     { st.tuning.commission_rate };

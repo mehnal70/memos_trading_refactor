@@ -80,6 +80,12 @@ pub struct FinanceVault {
     /// jitter'ından doğan turnover churn'ü önlenir; edge backtest-kadansıyla (bar/1 rebalance) hizalanır.
     /// Devre-kesici/rejim-gate force-flat MUAF (responsive). None → henüz rebalance yok. Persist edilmez.
     pub xs_last_rebalance_bar: Arc<RwLock<Option<chrono::DateTime<chrono::Utc>>>>,
+    /// 🔌💰 Funding-carry kitabının portföy-düzeyi devre kesici / take-profit cooldown'u (process_carry_book
+    /// yazar+okur). xs_circuit_breaker_until'ın carry ikizi — ayrı kitap, ayrı koruma. Persist edilmez.
+    pub carry_circuit_breaker_until: Arc<RwLock<Option<std::time::Instant>>>,
+    /// 📐💰 Funding-carry son rank-rebalance edilen bar. process_carry_book yazar+okur: KADANS kapısı
+    /// (rebalance_bars≥14, düşük-turnover) bununla sayar. xs_last_rebalance_bar'ın carry ikizi. Persist edilmez.
+    pub carry_last_rebalance_bar: Arc<RwLock<Option<chrono::DateTime<chrono::Utc>>>>,
     /// 🪜 Kademeli giriş durumu (sembol→kademe sayacı + hedef sermaye). open_paper_position açılışta
     /// yazar, try_add_graded_tranche ek-kademe için okur+günceller, close_paper_position temizler.
     /// Sembol-anahtarlı (tek-pozisyon/sembol invariantı). Ephemeral: restart'ta kaybolur → kurtarılan
@@ -327,6 +333,8 @@ impl AppState {
             last_signal_bar: Arc::new(RwLock::new(HashMap::new())),
             xs_circuit_breaker_until: Arc::new(RwLock::new(None)),
             xs_last_rebalance_bar: Arc::new(RwLock::new(None)),
+            carry_circuit_breaker_until: Arc::new(RwLock::new(None)),
+            carry_last_rebalance_bar: Arc::new(RwLock::new(None)),
             graded_tranches: Arc::new(RwLock::new(HashMap::new())),
             pending_open_long:  Arc::new(std::sync::atomic::AtomicU32::new(0)),
             pending_open_short: Arc::new(std::sync::atomic::AtomicU32::new(0)),

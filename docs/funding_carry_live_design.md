@@ -1,7 +1,21 @@
-# Funding-carry canlı entegrasyon — tasarım planı (onay bekliyor)
+# Funding-carry canlı entegrasyon — tasarım planı
 
-> Durum: TASLAK / onay öncesi. Kod YAZILMADI. Ara sonrası bu doküman üzerinden onaya bakılacak.
+> Durum: **FAZ 1 UYGULANDI** (DRY ortak-motor mimarisiyle). Faz 2 (z-score harman) bekliyor.
 > İlgili hafıza: `project_funding_carry`, `project_xs_momentum`, `project_maker_limit_entry`.
+>
+> ## ✅ Faz 1 uygulama özeti (gerçekleşen mimari — plandan SAPMA: DRY ortak-motor)
+> Plan "xs_live.rs kopyala-uyarla" diyordu; bunun yerine **`book_core.rs` ORTAK MOTORU** çıkarıldı
+> (kod tekrarı yok): `process_book` jeneriği hem momentum hem carry'yi yönetir. xs_live.rs ve
+> carry_live.rs artık ince sarmalayıcı. Cadence farkı tek alana indirgendi: `rebalance_min_bars`
+> (momentum=1 → aynı-bar skip birebir; carry=14 → iki-haftalık). Eklenenler:
+> - `book_core.rs`: BookConfig/BookKind/BookAction/BookSizing + `process_book` + saf yardımcılar (plan/drawdown/regime/bars_between) + testler.
+> - `xs_live.rs`: momentum sarmalayıcı (latest_signal + XS_STRATEGY_TAG korundu).
+> - `carry_live.rs`: `latest_carry_signal` (−trailing funding), funding-tazelik kapısı, `process_carry_book`.
+> - `CarryLiveParams` (types.rs) + `CARRY_LIVE_*` env (store.rs); FinanceVault `carry_circuit_breaker_until`+`carry_last_rebalance_bar`.
+> - loop_core: carry sepeti exclusion + `process_carry_book` çağrısı; maker icra (positions+positions_close) carry tag'ini tanır.
+> - jobs_download: `refresh_carry_funding` artımlı gap-farkında funding fetch (carry açıkken).
+> - 482 lib testi yeşil, workspace build RC=0. Opt-in default-OFF (CARRY_LIVE_ENABLED=1).
+> Kalan: paper smoke (operatör) → uzun P&L izleme → düşük-sermaye live.
 
 ## 1. Bağlam — ne kanıtlandı
 

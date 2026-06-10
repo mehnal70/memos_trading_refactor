@@ -239,6 +239,74 @@ impl Default for XsLiveParams {
     }
 }
 
+/// FUNDING-CARRY adanmış mod parametreleri (`XsLiveParams`'ın carry ikizi). Funding-carry kitabı
+/// `book_core` ORTAK motorunu paylaşır; bu yapı yalnız carry'ye özgü farkları taşır: KADANS
+/// (`rebalance_bars`≥14 — düşük-turnover ŞART, günlük rebalance fee'ye yenik), trailing funding
+/// penceresi (`lookback`), funding-tazelik kapısı. Yön sabit (momentum bool YOK): yüksek-funding short.
+/// Default DISABLED (opt-in: CARRY_LIVE_ENABLED=1). [[project_funding_carry]] [[feedback_modular_dry_perf]]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CarryLiveParams {
+    /// Master kapı. False → carry mod kapalı, hiçbir sembol carry-yönetimine girmez (sıfır regresyon).
+    pub enabled: bool,
+    /// Carry sepeti (futures majörleri). En az 2*top_k gerekir. Doğrulanmış: 17-majör 1d ([[project_funding_carry]]).
+    pub symbols: Vec<String>,
+    /// Mum/funding TF'i (bar). Doğrulanmış edge 1d → default "1d".
+    pub interval: String,
+    /// Trailing funding penceresi (bar) — sinyal = −son `lookback` barlık funding ortalaması. Default 14.
+    pub lookback: usize,
+    /// ⏱️ KADANS (bar): rank-rebalance en az bu kadar bar geçmeden tetiklenmez. Carry düşük-turnover
+    /// ŞART (günlük rebalance fee'ye yenik p 0.056→0.118) → default 14 (iki-haftalık). [[project_funding_carry]]
+    pub rebalance_bars: usize,
+    /// Sepet kenarı (long k / short k). Doğrulanmış 3-5; default 3.
+    pub top_k: usize,
+    /// No-trade band (rank-histerezisi): pozisyonu top_k+exit_buffer dışına düşene dek tut. Default 1.
+    pub exit_buffer: usize,
+    /// EŞİT-AĞIRLIK sizing: her carry bacağı için equity'nin bu oranı (notional, Kelly DEĞİL). Default 0.10.
+    pub position_pct: f64,
+    /// SABİT kaldıraç (resolve_leverage bypass; anlamlılık L-invariant). Default 1.0.
+    pub leverage: f64,
+    /// REJİM-GATE: bellwether HighVolatility iken kitabı FLAT'a çek (kriz koruması). Default true.
+    pub regime_gate: bool,
+    /// PORTFÖY-DÜZEYİ DEVRE KESİCİ: açık carry bacaklarının toplam zararı equity'nin bu %'sini aşarsa
+    /// TÜM kitap flat'a çekilir. 0.0 → kapalı (default; rejim-gate birincil koruma).
+    pub max_drawdown_pct: f64,
+    /// Devre kesici cooldown'u (sn). Default 3600.
+    pub cb_cooldown_secs: u64,
+    /// PORTFÖY-DÜZEYİ TAKE-PROFIT (devre kesicinin kâr-tarafı). 0.0 → kapalı (default; opt-in).
+    pub take_profit_pct: f64,
+    /// Take-profit cooldown'u (sn). Default 3600.
+    pub tp_cooldown_secs: u64,
+    /// 🧊 FUNDING-TAZELİK KAPISI: son funding bu saniyeden eskiyse o sembol kitaba GİRMEZ (delisted/feed
+    /// durdu → phantom carry önler; mum stale-feed kapısının funding ikizi). Funding 8 saatte bir →
+    /// default 86400 (24sa; ~3 funding kaçırınca dışla). 0 → kapalı (escape).
+    pub funding_max_age_secs: i64,
+    /// Sembol başına okunacak funding kaydı tavanı (trailing pencere için). Default 500 (~5 ay @8h).
+    pub funding_limit: usize,
+}
+
+impl Default for CarryLiveParams {
+    fn default() -> Self {
+        Self {
+            enabled: false, // opt-in: CARRY_LIVE_ENABLED=1 + sepet ile aktive
+            symbols: Vec::new(),
+            interval: "1d".to_string(),
+            lookback: 14,
+            rebalance_bars: 14, // iki-haftalık (düşük-turnover ŞART)
+            top_k: 3,
+            exit_buffer: 1,
+            position_pct: 0.10,
+            leverage: 1.0,
+            regime_gate: true,
+            max_drawdown_pct: 0.0,
+            cb_cooldown_secs: 3600,
+            take_profit_pct: 0.0,
+            tp_cooldown_secs: 3600,
+            funding_max_age_secs: 86_400, // 24sa: son funding'den beri bu kadar geçtiyse dışla
+            funding_limit: 500,
+        }
+    }
+}
+
 /// KADEMELİ GİRİŞ parametreleri (XS HARİÇ — kesitsel mod kendi eşit-ağırlık/tek-fill sizing'ini
 /// kullanır; kademeli giriş XS'in turnover-düşmanı edge'ini bozar). Pozisyonu tek seferde değil N
 /// kademede kurar; ek kademeler REJİME GÖRE açılır: trend rejimde PYRAMIDING (lehte hareket → kazananı

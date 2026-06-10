@@ -305,7 +305,8 @@ impl Engine {
             let pnl_val = crate::core::math::calculate_pnl(pos.entry_price, exit_price, pos.qty, pos.is_long);
             // Çıkış komisyonu — exit notional üzerinden. KESİTSEL maker icra: XS pozisyonu (trade_type=XS tag)
             // + USE_LIMIT_ENTRY → maker oranı (açılışla simetrik; net edge maker'da doğrulandı).
-            let exit_rate = if pos.trade_type == crate::robot::engines::master::xs_live::XS_STRATEGY_TAG
+            let exit_rate = if (pos.trade_type == crate::robot::engines::master::xs_live::XS_STRATEGY_TAG
+                || pos.trade_type == crate::robot::engines::master::carry_live::CARRY_STRATEGY_TAG)
                 && st.tuning.use_limit_entry { st.tuning.maker_commission_rate }
                 else { st.tuning.commission_rate };
             let exit_commission = (exit_price * pos.qty) * exit_rate;
