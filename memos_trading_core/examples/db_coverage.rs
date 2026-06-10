@@ -13,11 +13,13 @@
 //
 // Kullanım:
 //   cargo run --release --example db_coverage -- [market] [interval] [min_rows] [--plan]
+//   • interval: tek ('4h'), virgüllü liste ('1d,4h') veya boş/'-' (tümü) — parametrik.
 // Örnekler:
 //   cargo run --release --example db_coverage                          # tablo: tüm market/interval
 //   cargo run --release --example db_coverage -- futures 4h            # tablo: futures 4h
+//   cargo run --release --example db_coverage -- futures 1d,4h --plan  # plan: yalnız 1d ve 4h
 //   cargo run --release --example db_coverage -- futures '' 300 --plan # plan: tüm interval, eşik 300
-//   cargo run --release --example db_coverage -- futures --plan > backfill.sh  # planı script'e dök
+//   PLAN_YEARS=8 ... db_coverage -- futures 1d --plan > backfill.sh    # plan: yıl penceresini 8'e ez
 //
 // Plan modu: sağlıksız serileri (market, interval, mod) bazında gruplar; her grup için
 // TEK download_candles satırı (sembol listesi alfabetik, deterministik). Mod seçimi:
@@ -130,7 +132,12 @@ fn main() {
         .filter(|a| !a.starts_with("--") && *a != "plan")
         .collect();
     let market_filter = pos.first().copied().filter(|s| !s.is_empty() && *s != "-");
-    let interval_filter = pos.get(1).copied().filter(|s| !s.is_empty() && *s != "-");
+    // Interval parametrik: tek ('4h'), liste ('1d,4h') veya boş/'-' (tümü). Virgülle ayır.
+    let intervals: Vec<String> = pos.get(1).copied()
+        .filter(|s| !s.is_empty() && *s != "-")
+        .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .unwrap_or_default();
+    let interval_label = if intervals.is_empty() { "tümü".to_string() } else { intervals.join(",") };
     let th = Thresholds {
         min_rows: pos.get(2).and_then(|s| s.parse().ok()).unwrap_or(300),
         max_gap_pct: 5.0, // %5+ iç delik → şüpheli süreklilik
@@ -147,7 +154,12 @@ fn main() {
     );
     let mut wheres: Vec<String> = Vec::new();
     if let Some(m) = market_filter { wheres.push(format!("market = '{}'", m.replace('\'', "''"))); }
-    if let Some(i) = interval_filter { wheres.push(format!("interval = '{}'", i.replace('\'', "''"))); }
+    if !intervals.is_empty() {
+        let list = intervals.iter()
+            .map(|i| format!("'{}'", i.replace('\'', "''")))
+            .collect::<Vec<_>>().join(",");
+        wheres.push(format!("interval IN ({})", list));
+    }
     if !wheres.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&wheres.join(" AND "));
@@ -171,7 +183,7 @@ fn main() {
         .collect();
 
     if series.is_empty() {
-        eprintln!("⚠️  Eşleşen seri yok (db={db_path}, market={:?}, interval={:?}).", market_filter, interval_filter);
+        eprintln!("⚠️  Eşleşen seri yok (db={db_path}, market={:?}, interval={}).", market_filter, interval_label);
         return;
     }
 
@@ -181,7 +193,7 @@ fn main() {
     if plan_mode {
         emit_plan(&verdicts, &db_path, now_ms, &th);
     } else {
-        print_table(&verdicts, &db_path, &th, market_filter, interval_filter);
+        print_table(&verdicts, &db_path, &th, market_filter, &interval_label);
     }
 }
 
@@ -191,14 +203,14 @@ fn print_table(
     db_path: &str,
     th: &Thresholds,
     market_filter: Option<&str>,
-    interval_filter: Option<&str>,
+    interval_label: &str,
 ) {
     println!(
-        "🗂️  DB KAPSAMA RAPORU · db={db_path} · {} seri · sağlık eşiği={} bar{}{}\n",
+        "🗂️  DB KAPSAMA RAPORU · db={db_path} · {} seri · sağlık eşiği={} bar{} · interval={}\n",
         verdicts.len(),
         th.min_rows,
         market_filter.map(|m| format!(" · market={m}")).unwrap_or_default(),
-        interval_filter.map(|i| format!(" · interval={i}")).unwrap_or_default(),
+        interval_label,
     );
     println!(
         "{:<14} {:<8} {:>8} {:>10} {:>7} {:>7}  {:<12} {:<12}  durum",
@@ -251,10 +263,15 @@ fn emit_plan(verdicts: &[Verdict], db_path: &str, now_ms: i64, th: &Thresholds) 
         iv_order.insert((v.market.clone(), v.interval.clone()), v.iv_secs);
     }
 
+    // Yıl penceresi: default grubun en-eski ilk-barından türetilir; PLAN_YEARS env'i ile
+    // tüm gruplara sabit ezme (ör. PLAN_YEARS=8 → derin 1d geçmişi).
+    let years_override: Option<i64> = std::env::var("PLAN_YEARS").ok().and_then(|s| s.parse().ok());
+
     let unhealthy: usize = verdicts.iter().filter(|v| !v.healthy()).count();
     println!("#!/usr/bin/env bash");
-    println!("# db_coverage backfill planı · {} sağlıksız seri · eşik: min_rows={} max_gap={}% max_age={}bar",
-        unhealthy, th.min_rows, th.max_gap_pct, th.max_age_bars);
+    println!("# db_coverage backfill planı · {} sağlıksız seri · eşik: min_rows={} max_gap={}% max_age={}bar{}",
+        unhealthy, th.min_rows, th.max_gap_pct, th.max_age_bars,
+        years_override.map(|y| format!(" · PLAN_YEARS={y}")).unwrap_or_default());
     println!("# FORCE_FULL = iç-gap/seyrek (tüm pencere yeniden) · artımlı = yalnız bayat-kuyruk");
     println!("# Komutlar SIRALI (serial) koşar; save_candle upsert → tekrar çalıştırmak güvenli.");
     println!("set -euo pipefail");
@@ -281,7 +298,7 @@ fn emit_plan(verdicts: &[Verdict], db_path: &str, now_ms: i64, th: &Thresholds) 
         let mut syms = syms.clone();
         syms.sort();          // alfabetik → deterministik
         syms.dedup();
-        let years = years_for_window(*min_first, now_ms);
+        let years = years_override.unwrap_or_else(|| years_for_window(*min_first, now_ms));
         let mode = if *force_full { "FORCE_FULL (iç-gap/seyrek)" } else { "artımlı (bayat-kuyruk)" };
         println!("echo '▶ {} {} · {} · {} sembol'", market, interval, mode, syms.len());
         let prefix = if *force_full { "FORCE_FULL=1 " } else { "" };
