@@ -191,6 +191,12 @@ pub fn run_funding_carry(cfg: &FundingCarryConfig) -> XsResult {
     evaluate_funding_carry(&closes, &funding_bar, cfg)
 }
 
+/// DB-yükleyen NET-getiri serisi (metrik değil) — momentum'la DİKLİK korelasyonu için.
+pub fn run_funding_carry_returns(cfg: &FundingCarryConfig) -> (Vec<f64>, Vec<f64>) {
+    let (closes, funding_bar) = align_closes_and_funding(cfg);
+    funding_carry_returns(&closes, &funding_bar, cfg)
+}
+
 /// Interval'i milisaniye adımına çevirir (rapor/yardımcı; çekirdek bucketing stamps kullanır).
 pub fn interval_ms(interval: &str) -> i64 {
     DataNormalizer::parse_interval(interval).max(1) as i64 * 1000

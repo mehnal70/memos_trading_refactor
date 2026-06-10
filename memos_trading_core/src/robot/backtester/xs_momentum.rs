@@ -656,6 +656,17 @@ pub fn run_xs_momentum(cfg: &XsConfig) -> XsResult {
     }
 }
 
+/// Herhangi bir NET-getiri serisinden XsResult metrikleri (Newey-West HAC + WF binom + Sharpe).
+/// Eksenler-arası BİRLEŞİK portföyü (ör. momentum+carry) ölçmek için pub sarmalayıcı —
+/// finalize_metrics_params'ın dışa açık yüzü. `hold_lag` = NW bant-genişliği alt sınırı (rebalance).
+pub fn series_metrics(
+    rets: &[f64], turnovers: &[f64], leverage: f64, bars_per_year: f64, hold_lag: usize, wf_window: usize,
+) -> XsResult {
+    let mut res = XsResult::default();
+    finalize_metrics_params(&mut res, rets, turnovers, leverage, bars_per_year, hold_lag, wf_window);
+    res
+}
+
 /// DB-yükleyen NET-getiri serisi (metrik değil ham seri) — eksenler-arası DİKLİK kontrolü için
 /// (iki eksenin getiri serileri düşük korelasyonluysa gerçekten ortogonal). turnover ikinci eleman.
 pub fn run_xs_returns(cfg: &XsConfig) -> (Vec<f64>, Vec<f64>) {
