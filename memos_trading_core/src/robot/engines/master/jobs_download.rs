@@ -288,8 +288,10 @@ impl Engine {
         }
     }
 
-    /// 💰 FUNDING-CARRY canlı funding refresh — carry mod (carry_live.enabled) açıkken sepet
-    /// sembollerinin funding-rate'ini ARTIMLI (gap-farkında) çekip DB'ye yazar; mod kapalı → no-op.
+    /// 💰 FUNDING-CARRY canlı funding refresh — carry bacağı kullanan mod (carry_live VEYA blend_live)
+    /// açıkken sepet sembollerinin funding-rate'ini ARTIMLI (gap-farkında) çekip DB'ye yazar; ikisi de
+    /// kapalı → no-op. Harman modu da carry sinyali okur → funding'i o sepet için de tazelemek ŞART
+    /// (yoksa tazelik kapısı tüm sembolleri eler → harman çöker). İki sepet BİRLEŞTİRİLİR (tekrarsız).
     /// Funding yalnız FUTURES'ta var → market sabit "futures" (download.market spot olsa da). Gap-farkında
     /// başlangıç: kayıt varsa son funding_time+1ms, yoksa ~1 yıl tohum (lookback penceresini bolca kapsar).
     /// Funding 8 saatte bir (~3/gün) → her download cycle'ında bir refresh fazlasıyla yeter; artımlıda
@@ -299,11 +301,15 @@ impl Engine {
         state: &Arc<Mutex<AppState>>,
         db_path: &str,
     ) {
-        let (enabled, symbols) = state.lock().ok()
-            .and_then(|st| st.brain.parameters.read().ok()
-                .map(|p| (p.carry_live.enabled, p.carry_live.symbols.clone())))
-            .unwrap_or((false, Vec::new()));
-        if !enabled || symbols.is_empty() {
+        let symbols: Vec<String> = state.lock().ok()
+            .and_then(|st| st.brain.parameters.read().ok().map(|p| {
+                let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+                if p.carry_live.enabled { set.extend(p.carry_live.symbols.iter().cloned()); }
+                if p.blend_live.enabled { set.extend(p.blend_live.symbols.iter().cloned()); }
+                set.into_iter().collect()
+            }))
+            .unwrap_or_default();
+        if symbols.is_empty() {
             return;
         }
         const FMARKET: &str = "futures"; // funding yalnız futures'ta [[feedback_market_agnostic]]
