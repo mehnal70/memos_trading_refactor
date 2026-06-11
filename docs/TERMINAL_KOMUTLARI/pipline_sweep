@@ -1,0 +1,150 @@
+Gerçek testi sen çalıştır
+
+  4 majör smoke testinde harness çalıştı (2387 bar, lb=14 hafif pozitif ama 4-sembol = çok zayıf kesit). Anlamlı test için tam 24-majör sepeti
+  gerekiyor. Funding indirme küçük (~9 istek/sembol); sen koştur ([[feedback_user_runs_sweeps]]):
+
+  # 1) Sepetin funding geçmişini indir (4'ü zaten var → gap-farkında atlar/artırır)
+  DB_PATH=data/trader.db cargo run --release -p memos_trading_core --example download_funding -- \
+    futures BTCUSDT,ETHUSDT,BCHUSDT,XRPUSDT,LTCUSDT,TRXUSDT,LINKUSDT,ADAUSDT,ATOMUSDT,BNBUSDT,ONTUSDT,BATUSDT,VETUSDT,THETAUSDT,ALGOUSDT,ZRXUSDT,DOGEUSD
+  T,MKRUSDT,DOTUSDT,SOLUSDT,UNIUSDT,AVAXUSDT,NEARUSDT,SUIUSDT 8
+
+  # 2) Carry harness'i koştur (top_k=3 default; 24 sembol yeter)
+  DB_PATH=data/trader.db cargo run --release -p memos_trading_core --example funding_carry -- \
+    futures 1d BTCUSDT,ETHUSDT,BCHUSDT,XRPUSDT,LTCUSDT,TRXUSDT,LINKUSDT,ADAUSDT,ATOMUSDT,BNBUSDT,ONTUSDT,BATUSDT,VETUSDT,THETAUSDT,ALGOUSDT,ZRXUSDT,DOGE
+  USDT,MKRUSDT,DOTUSDT,SOLUSDT,UNIUSDT,AVAXUSDT,NEARUSDT,SUIUSDT
+  
+  
+  ---------------------------------------------------------------------------------------------------------------------------------
+  Bıraktığımız yer
+
+  Bu oturumun bilançosu (hepsi commit'li, testli, hafızada):
+  - db_coverage (+--plan) → DB kapsama denetimi & backfill planı, skorlama evreni 1d/4h temizlendi.
+  - Edge avı zinciri: edge_scan per-sembol → bb_pool → xs_factors (low-vol/BAB/lottery) hepsi boş.
+  - funding-carry kuruldu (fetcher + storage + indirici + harness + WF-OOS) → ikinci doğrulanmış pooled edge.
+  - xs_orthogonality → momentum ⊕ carry dik (ρ=0.11) + additif (birleşik Sharpe 0.91 @10bps, +%27).
+  - Dayanıklılık: carry iki-haftalık rebalance ile fee-dayanıklı (kök sorun turnover'mış).
+
+  Tasarım planının özü (onayda tartışacağımız):
+  - Merkezi karar: tek-pozisyon/sembol invariantı yüzünden iki ayrı kitap aynı majörü yönetemez → ayrık sepet mi, harmanlanmış z-score sinyali mi
+  (öneri: Faz 2'de bu), net-ağırlık mı.
+  - Faz 1 (MVP): carry adanmış kitap — xs_live.rs'in ikizi, tek gerçek fark iki-haftalık kadans kapısı + funding sinyali + FUNDING_CARRY maker tag'i.
+  Devre-kesici/rejim-gate/icra makinesi birebir yeniden kullanılır.
+  - Faz 2: momentum+carry tek kitapta z-score harmanı.
+  - Veri: jobs_download.rs'e canlı funding refresh + funding-tazelik kapısı.
+  ----------------------------------------------------------------------------------------------------------------------------------
+
+
+! EDGE_REPORT=reports/edge_sweep_20260604_165949.json \
+    PIPELINE_SYMBOLS=ADAUSDT,AVAXUSDT,BCHUSDT,BNBUSDT,BTCUSDT,DOGEUSDT,ETHUSDT,SOLUSDT,TRXUSDT,UNIUSDT,XRPUSDT,ZECUSDT \
+    RUN_PARAM_SWEEP=e PIPELINE_TFS=15m,1h,4h,1d PIPELINE_DOWNLOAD=1 PIPELINE_MARKET=futures \
+    ./scripts/sweep_pipeline.sh
+    
+    
+     db_coverage'a --plan modu ekledim. Sağlıksız (BAYAT / SEYREK / GAP) serileri otomatik tespit edip çalıştırılabilir, deterministik, seri bir backfill
+  script'i üretiyor:
+
+  # Planı üret (örnek: futures, tüm interval'ler)
+  DB_PATH=/home/ulas/PyCharmMiscProject/memos_trading_refactor/data/trader.db \
+    cargo run --release -p memos_trading_core --example db_coverage -- futures --plan > backfill.sh
+
+  # Gözden geçir, sonra seri koştur
+  bash backfill.sh
+
+  Tasarım kararları
+
+  - Kategoriye göre doğru mod (gereksiz çekim yok):
+    - BAYAT (yalnız kuyruk bayat) → artımlı (gap-farkında, son bardan ileri)
+    - SEYREK / GAP (iç delik veya az satır) → FORCE_FULL=1 (tüm pencere yeniden → iç delik dolar; gap-farkında mod iç deliği dolduramaz)
+  - Deterministik: semboller alfabetik, interval'ler bar-süresine göre sıralı, BTreeMap ile sabit grup düzeni → aynı DB hep aynı planı verir.
+  - Seri + tekrar-güvenli: set -euo pipefail, komutlar sırayla; save_candle upsert olduğu için yeniden çalıştırmak zararsız.
+  - years her gruba göre en-eski ilk-bardan türetiliyor ([1,10] clamp).
+  - DRY: verdikt mantığı tek analyze fonksiyonunda — tablo ve plan onu paylaşıyor.
+
+  Çalıştırıp gördüğümüz somut sonuç
+
+  Önceki konuşmadaki %40 iç-gap kümesi (BNB/SOL/AVAX/DOGE) kendiliğinden iyileşmiş — şimdi 4h'de 2190 sürekli bar, gap %0. Bunlar canlı filoda oldukları
+  için runtime indirme deliği kapatmış. Yani plan artık doğru olarak yalnızca filo-dışı sembolleri hedefliyor (SEYREK genç listeler + BAYAT kuyruk).
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+    
+    
+    
+     - param_sweep.sh = yalnız tarar (mevcut DB'yi okur), indirme YAPMAZ.
+  - sweep_pipeline.sh = orkestratör; indirme onun 4. adımı (download_candles ile), sonra param_sweep'i çağırır.
+
+  Yani eksik 1h/15m'i indirmek (ve güncel raporu üretmek) için pipeline'ı koşarsın — benim ad-hoc download_candles/sqlite komutum değil. Doğrusu bu. Ben
+  de zaten ağ/uzun-koşu olduğu için çalıştırmıyorum; komutu sana veriyorum.
+
+  Önerilen tek komut (tüm TF'ler, gap-farkında)
+
+  ! EDGE_REPORT=reports/edge_sweep_20260604_165949.json \
+    PIPELINE_SYMBOLS=ADAUSDT,AVAXUSDT,BCHUSDT,BNBUSDT,BTCUSDT,DOGEUSDT,ETHUSDT,SOLUSDT,TRXUSDT,UNIUSDT,XRPUSDT,ZECUSDT \
+    RUN_PARAM_SWEEP=e PIPELINE_TFS=15m,1h,4h,1d PIPELINE_DOWNLOAD=1 PIPELINE_MARKET=futures \
+    ./scripts/sweep_pipeline.sh
+
+  Ne yapar:
+  - EDGE_REPORT=... → edge_sweep'i tekrar koşmaz (mevcut raporu kullanır).
+  - İndirme adımı 15m/1h/4h/1d için download_candles çağırır — gap-farkında: 4h/1d zaten var → atlar/increment; eksik 1h/15m'i indirir
+  (data/trader.db'ye, default).
+  - Sonra param_sweep tüm TF'leri tarar → tek kapsamlı yeni rapor + integration_<ts>.env.
+
+  Bitince .launch.conf'taki PARAM_SWEEP_REPORT'u yeni rapora güncelle (ya da virgülle 231452'ye ekle).
+
+  İstersen sadece indirme adımını ayrı görmek için PIPELINE_TFS=15m,1h ile koş (sadece eksikleri çek), sonra ayrı param_sweep. Ama tek komutla
+  yukarıdaki daha temiz. Komutu sen çalıştır; çıktıdan takılırsan bakarım.
+
+✻ Worked for 1m 5s
+
+※ recap: Hedef: param-optimizasyon sonuçlarını canlı uygulamaya otomatik entegre etmek. Şu an eksik 1h/15m verisini indirmek için sweep_pipeline.sh 
+  komutunu hazırladım. Sıradaki adım: o komutu kendi terminalinden çalıştırıp indirme + taramayı tamamlaman. (disable recaps in /config)
+  
+  
+  
+  
+  
+  CARRY BACAKLI ÇALIŞTIRMA
+  
+ Harman (Faz 2) paper smoke — komut
+
+  1) (Bir kez) carry bacağı için funding'i tohumla — auto-refresh ilk download cycle'ında zaten ~1 yıl tohumlar, ama temiz boot için önden indir:
+
+  cd /home/ulas/PyCharmMiscProject/memos_trading_refactor
+  DB_PATH=$PWD/data/trader.db cargo run --release -p memos_trading_core \
+    --example download_funding -- futures \
+    BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,BNBUSDT,ADAUSDT,DOGEUSDT,AVAXUSDT,LINKUSDT,LTCUSDT,BCHUSDT,DOTUSDT 2
+
+  2) .launch.conf'a harman env'ini ekle (./memos config ile, ya da dosyaya elle):
+
+  BLEND_LIVE_ENABLED=1
+  BLEND_LIVE_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,BNBUSDT,ADAUSDT,DOGEUSDT,AVAXUSDT,LINKUSDT,LTCUSDT,BCHUSDT,DOTUSDT
+  BLEND_LIVE_INTERVAL=1d
+  BLEND_LIVE_WEIGHT_MOM=0.4
+  BLEND_LIVE_WEIGHT_CARRY=0.6      # doğrulanmış optimal carry-ağırlıklı
+  BLEND_LIVE_TOP_K=3               # 3 long + 3 short = 6 bacak
+  BLEND_LIVE_REBALANCE_BARS=14     # carry-baskın → iki-haftalık (düşük-turnover ŞART)
+  # USE_LIMIT_ENTRY=1              # opsiyonel: BLEND_FACTOR pozisyonları maker icra
+
+  ▎ ⚠️  Çakışma: CARRY_LIVE_ENABLED / XS_LIVE_ENABLED ile harmanı aynı anda açma — aynı majörü iki mod yönetemez (tek-pozisyon/sembol invariantı). Smoke 
+  ▎ için yalnız BLEND_LIVE_* aç.
+
+  3) Başlat:
+
+  ./memos up      # ya da ./memos start
+
+  Doğrulamada bakılacaklar (TUI / log)
+
+  - Boot log: 🔀 iki-faktör harman adanmış mod AÇIK: 12 sembol · w_mom=0.40 w_carry=0.60 · kadans=14bar · top_k=3
+  - 💰 funding refresh: N sembol · M kayıt (artık harman sepeti için de çalışır — bu fix'in kanıtı)
+  - Dengeli market-nötr kitap: 3 LONG + 3 SHORT, hepsi BLEND_FACTOR etiketli, ~eşit notional
+  - grep "harman" ile rebalance/kadans izlenir
+
+  Sembol sepetini değiştirmek istersen BLEND_LIVE_SYMBOLS'u düzenle (en az 2*top_k=6 sembol gerekir; 1d funding'i olan likit majörler). Sepeti büyütmek
+  için funding indirme komutuna da aynı sembolleri ekle.
