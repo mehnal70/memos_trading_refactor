@@ -473,11 +473,16 @@ impl AppState {
         let live_executor = if matches!(config.trading_mode, crate::core::model::TradingMode::Live) {
             match (config.get_api_key(), config.get_secret_key()) {
                 (Some(k), Some(s)) if !k.is_empty() && !s.is_empty() => {
+                    // BINANCE_TESTNET=1 → gerçek API yerine TESTNET host'una git (gerçek-para
+                    // öncesi uçtan-uca dry-run rollout adımı). Default false = canlı borsa.
+                    let use_testnet = std::env::var("BINANCE_TESTNET")
+                        .map(|v| v == "true" || v == "1").unwrap_or(false);
                     log::info!(target:"STATE_INIT",
-                        "💱 Live mode aktif: BinanceFuturesExecutor kuruldu (market={})", config.market);
+                        "💱 Live mode aktif: BinanceFuturesExecutor kuruldu (market={}, {})",
+                        config.market, if use_testnet { "TESTNET" } else { "CANLI-BORSA" });
                     Some(Arc::new(
                         crate::robot::engines::binance_executor::BinanceFuturesExecutor::new_for_market(
-                            k, s, /*is_paper=*/false, &config.market,
+                            k, s, /*is_paper=*/use_testnet, &config.market,
                         )
                     ))
                 }

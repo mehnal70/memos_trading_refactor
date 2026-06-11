@@ -612,6 +612,21 @@ impl Engine {
                     ));
                 }
             } else {
+                // 🎚️ Futures kaldıracını borsada set et (sizing varsayımıyla tutarlı, B#2).
+                // notional = teminat × kaldıraç → borsa-default kaldıraç farklıysa pozisyon
+                // boyutu varsayımı bozulur. Spot'ta no-op; set edilemezse açmadan VETO.
+                if !executor.is_spot {
+                    let lev = new_pos.leverage.round().max(1.0) as u32;
+                    if let Err(e) = executor.set_leverage(symbol, lev).await {
+                        if let Ok(mut st2) = state.lock() {
+                            st2.push_log(format!(
+                                "🛑 [LIVE-LEVERAGE-VETO] {} {} kaldıraç {}x set edilemedi ({:?}) — pozisyon açılmadı",
+                                symbol, side, lev, e,
+                            ));
+                        }
+                        return;
+                    }
+                }
                 // ── Giriş emri: maker (opt-in, POST_ONLY) → taker MARKET dispatch ──
                 // use_limit_entry ise önce best_bid/ask'e katılan maker denenir; N
                 // deneme dolmazsa limit_entry_fallback_market'a göre taker'a düşülür
