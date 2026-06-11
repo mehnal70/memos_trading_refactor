@@ -244,9 +244,9 @@ impl Backtester {
 
                 // B2: Trailing Stop Güncelleme (yön-farkında ratchet)
                 if let Some(trail_pct) = p.trailing_pct {
-                    // best_price = lehte uç (long: en yüksek, short: en düşük).
-                    p.best_price = if p.is_long { p.best_price.max(candle.close) }
-                                   else { p.best_price.min(candle.close) };
+                    // best_price = lehte uç — fitil-farkında (long: en yüksek HIGH, short: en düşük LOW).
+                    p.best_price = if p.is_long { p.best_price.max(candle.high) }
+                                   else { p.best_price.min(candle.low) };
                     let new_trail = p.best_price * (1.0 - s * trail_pct / 100.0);
                     // Trail SL lehe doğru kayar (long: yükselir, short: düşer).
                     p.trailing_sl = Some(match p.trailing_sl {
@@ -277,9 +277,11 @@ impl Backtester {
                 if !p.partial_tp_triggered {
                     if let Some(ratio) = self.config.partial_tp_ratio {
                         let partial_threshold = p.entry_price + (p.tp_price - p.entry_price) * 0.5;
-                        if s * (candle.close - partial_threshold) >= 0.0 {
+                        // Lehte uç (long: high, short: low) eşiği geçince — fitil-farkında; dolum eşik seviyesinde.
+                        let favorable = if p.is_long { candle.high } else { candle.low };
+                        if s * (favorable - partial_threshold) >= 0.0 {
                             let p_qty = p.qty * ratio;
-                            let exit_fill = self.sim_fill_price(exit_is_buy, candle.close, p_qty);
+                            let exit_fill = self.sim_fill_price(exit_is_buy, partial_threshold, p_qty);
                             let fee = p_qty * (p.entry_price + exit_fill) * self.config.commission_pct;
                             let net = s * (exit_fill - p.entry_price) * p_qty - fee;
 
@@ -291,12 +293,17 @@ impl Backtester {
                     }
                 }
 
-                // Tam Çıkış Kontrolü (SL veya TP) — yön-farkında:
-                // TP isabet: s*(close-tp) >= 0 · SL isabet: s*(close-eff_sl) <= 0.
-                let tp_hit = s * (candle.close - p.tp_price) >= 0.0;
-                let sl_hit = s * (candle.close - eff_sl) <= 0.0;
+                // Tam Çıkış Kontrolü (SL/TP) — FİTİL-FARKINDA: TP lehte uç (long high / short low),
+                // SL aleyhte uç (long low / short high). Aynı barda ikisi de isabet ederse SL ÖNCE
+                // (kötümser worst-case; bar-içi sıra bilinmez). Dolum kapanışta değil SEVİYEde olur
+                // (fitil seviyeye değdi) → live_path konvansiyonuyla aynı.
+                let favorable = if p.is_long { candle.high } else { candle.low };
+                let adverse   = if p.is_long { candle.low }  else { candle.high };
+                let tp_hit = s * (favorable - p.tp_price) >= 0.0;
+                let sl_hit = s * (adverse - eff_sl) <= 0.0;
                 if tp_hit || sl_hit {
-                    let exit_fill = self.sim_fill_price(exit_is_buy, candle.close, p.qty);
+                    let exit_level = if sl_hit { eff_sl } else { p.tp_price };
+                    let exit_fill = self.sim_fill_price(exit_is_buy, exit_level, p.qty);
                     let fee = p.qty * (p.entry_price + exit_fill) * self.config.commission_pct;
                     trade_net = s * (exit_fill - p.entry_price) * p.qty - fee;
                     self.trades.push(self.create_sim_trade(p, candle, exit_fill, p.qty, trade_net));
