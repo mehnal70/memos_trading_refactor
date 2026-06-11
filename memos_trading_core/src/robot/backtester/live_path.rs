@@ -161,8 +161,11 @@ pub fn run(candles_1m: &[Candle], cfg: &LivePathConfig) -> LivePathResult {
         // --- Açık pozisyon: exit denetimi ---
         if let Some(op) = open.as_mut() {
             op.pos.current_price = price;
-            let exit = Engine::check_exit_conditions(
-                &mut op.pos, price, atr, cfg.atr_trail_mult, cfg.breakeven_rr,
+            // Fitil-farkında çıkış: SL/TP/trailing bar low/high (fitil) ile tetiklenir →
+            // canlının bar-altı maruziyetiyle hizalanır (eskiden yalnız close = iyimser).
+            let bar = &candles_1m[i];
+            let exit = Engine::check_exit_conditions_ohlc(
+                &mut op.pos, bar.high, bar.low, price, atr, cfg.atr_trail_mult, cfg.breakeven_rr,
             );
             let reason = exit.or_else(|| {
                 // Reverse-signal kapanışı (min-hold sonrası), canlı StrategySignal yolu.
