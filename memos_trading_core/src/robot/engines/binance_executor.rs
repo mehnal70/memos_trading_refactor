@@ -365,6 +365,18 @@ impl BinanceFuturesExecutor {
         Ok(resp.as_array().cloned().unwrap_or_default())
     }
 
+    /// Borsadaki TÜM açık futures pozisyonlarını döndürür (yalnız positionAmt != 0).
+    /// Restart reconciliation için — borsa otoritedir. Spot → boş (spot'ta "pozisyon" =
+    /// bakiye, ayrı bir model; futures-only reconcile).
+    pub async fn get_all_positions(&self) -> Result<Vec<Value>> {
+        if self.is_spot { return Ok(vec![]); }
+        let resp = self.signed_request(Method::GET, "/fapi/v2/positionRisk", vec![]).await?;
+        Ok(resp.as_array().cloned().unwrap_or_default().into_iter()
+            .filter(|p| p.get("positionAmt").and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok()).map(|a| a.abs() > 0.0).unwrap_or(false))
+            .collect())
+    }
+
     pub async fn close_position(&self, symbol: &str) -> Result<Value> {
         let pos = self.get_positions(symbol).await?;
         let qty = pos.first().and_then(|p| p["positionAmt"].as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);

@@ -2,6 +2,18 @@
 // Faz 1 modülerleştirme: master.rs'ten taşındı (davranış birebir korunur).
 use super::*;
 
+/// Restart reconciliation planı (borsa OTORİTE): boot'ta DB-hidre local pozisyonların
+/// borsadaki gerçek durumla farkı. [[project_persistence_restart]]
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct ReconcilePlan {
+    /// Local'de var, borsada flat → phantom, kaldırılmalı.
+    pub stale: Vec<String>,
+    /// İkisinde de var ama yön/qty uyuşmuyor → borsaya senkronla: (sym, ex_is_long, ex_qty, ex_entry).
+    pub mismatched: Vec<(String, bool, f64, f64)>,
+    /// Borsada var, local'de yok → bilinmeyen, operatöre alert (oto-adopt edilmez).
+    pub unknown: Vec<String>,
+}
+
 /// Adım 5.5 — DB persist'lerini serileştiren süreç-global kilit. `spawn_blocking` ile
 /// arka plana atılan yazımların aynı anda birden çok SQLite bağlantısı açıp
 /// "database is locked" hatasıyla SESSİZCE kaybolmasını önler (yazımlar `let _ =`).
@@ -231,6 +243,134 @@ impl Engine {
                 ));
             }
         }
+    }
+
+    /// 💱 BOOT RECONCILIATION (LIVE, dry-run DEĞİL): borsa OTORİTEDİR.
+    /// `hydrate_open_positions_from_db`'den SONRA çağrılır — DB snapshot bot kapalıyken
+    /// borsadaki gerçek durumla ayrışmış olabilir (manuel müdahale, kaçırılan kapanış).
+    ///   • Local'de var + borsada flat → PHANTOM, kaldır (bot hayalet pozisyon yönetmesin).
+    ///   • Yön/qty uyuşmuyor → borsaya SENKRONLA (qty/entry/yön borsadan).
+    ///   • Borsada var + local'de yok → ALERT (oto-adopt ETME; strateji bağlamı yok, riskli).
+    /// Spot / paper / dry-run → no-op. Borsa sorgusu HATA verirse hiçbir şey silinmez
+    /// (query hatası ≠ flat; güvenli taraf).
+    pub(crate) async fn reconcile_live_positions_with_exchange(state: &Arc<Mutex<AppState>>) {
+        let (executor, dry_run) = match state.lock() {
+            Ok(st) => (st.live_executor.clone(), st.live_dry_run),
+            Err(_) => return,
+        };
+        let executor = match executor {
+            Some(e) if !dry_run => e,
+            _ => return, // paper / dry-run / executor yok → reconcile yok
+        };
+        if executor.is_spot {
+            push_state_log(state, "♻️ [RECONCILE] spot — futures-only reconcile atlandı".to_string());
+            return;
+        }
+        let ex_positions = match executor.get_all_positions().await {
+            Ok(p) => p,
+            Err(e) => {
+                push_state_log(state, format!(
+                    "⚠️ [RECONCILE] borsa pozisyon sorgusu başarısız: {:?} — local korunuyor (silme YOK)", e));
+                return;
+            }
+        };
+        let exchange: std::collections::HashMap<String, (f64, f64)> = ex_positions.iter().filter_map(|p| {
+            let sym = p.get("symbol")?.as_str()?.to_string();
+            let amt = p.get("positionAmt")?.as_str()?.parse::<f64>().ok()?;
+            let entry = p.get("entryPrice").and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            Some((sym, (amt, entry)))
+        }).collect();
+
+        let local: Vec<(String, bool, f64)> = match state.lock() {
+            Ok(st) => st.finance.live_positions.read().ok()
+                .map(|m| m.values().map(|p| (p.symbol.clone(), p.is_long, p.qty)).collect())
+                .unwrap_or_default(),
+            Err(_) => return,
+        };
+        let plan = Self::reconcile_diff(&local, &exchange);
+        if plan.stale.is_empty() && plan.mismatched.is_empty() && plan.unknown.is_empty() {
+            push_state_log(state, format!("♻️ [RECONCILE] borsa ile uyumlu ({} pozisyon)", local.len()));
+            return;
+        }
+
+        // Uygula: phantom kaldır + uyuşmazlığı borsaya senkronla (kısa write-lock).
+        if let Ok(st) = state.lock() {
+            if let Ok(mut map) = st.finance.live_positions.write() {
+                for sym in &plan.stale { map.remove(sym); }
+                for (sym, ex_long, ex_qty, ex_entry) in &plan.mismatched {
+                    if let Some(p) = map.get_mut(sym) {
+                        p.is_long = *ex_long;
+                        p.qty = *ex_qty;
+                        if *ex_entry > 0.0 { p.entry_price = *ex_entry; }
+                    }
+                }
+            }
+        }
+
+        let summary = format!(
+            "♻️ [RECONCILE] borsa-otorite → {} phantom kaldırıldı [{}] · {} senkronlandı [{}] · {} bilinmeyen [{}]",
+            plan.stale.len(), plan.stale.join(","),
+            plan.mismatched.len(), plan.mismatched.iter().map(|m| m.0.as_str()).collect::<Vec<_>>().join(","),
+            plan.unknown.len(), plan.unknown.join(","),
+        );
+        if let Ok(mut st) = state.lock() {
+            st.push_log_mirror(summary.clone());
+            st.guardian.repair_log.push_back(format!(
+                "[{}] reconcile: phantom={} sync={} unknown={}",
+                chrono::Local::now().format("%H:%M:%S"),
+                plan.stale.len(), plan.mismatched.len(), plan.unknown.len(),
+            ));
+            while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
+            // Bilinmeyen borsa pozisyonu = bot yönetmiyor → operatör görmeli (anomaly).
+            if !plan.unknown.is_empty() {
+                if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
+                    use crate::robot::data_pipeline::{AnomalyKind, AnomalySeverity};
+                    pipe.push_anomaly(
+                        AnomalySeverity::Warning, AnomalyKind::Custom,
+                        format!("reconcile: borsada bot-dışı pozisyon ({}) — manuel kontrol", plan.unknown.join(",")),
+                    );
+                }
+            }
+            // Telegram nudge (değişiklik oldu).
+            st.push_alert(
+                "RECONCILE-DRIFT",
+                crate::robot::infra::telegram_notifier::Severity::Warning,
+                summary,
+            );
+        }
+        // Düzeltilmiş haritayı kalıcılaştır.
+        Self::persist_open_positions_snapshot(state);
+    }
+
+    /// SAF: local pozisyonlar (sym, is_long, qty) ile borsa pozisyonlarını (sym → (signed_amt,
+    /// entry)) karşılaştırır. Borsa OTORİTE. qty toleransı |Δ| > max(ex_qty·0.001, 1e-9). Testli.
+    pub(crate) fn reconcile_diff(
+        local: &[(String, bool, f64)],
+        exchange: &std::collections::HashMap<String, (f64, f64)>,
+    ) -> ReconcilePlan {
+        let mut plan = ReconcilePlan::default();
+        for (sym, is_long, qty) in local {
+            match exchange.get(sym) {
+                None => plan.stale.push(sym.clone()),
+                Some(&(amt, entry)) => {
+                    let ex_is_long = amt > 0.0;
+                    let ex_qty = amt.abs();
+                    let tol = (ex_qty * 0.001).max(1e-9);
+                    if ex_is_long != *is_long || (qty - ex_qty).abs() > tol {
+                        plan.mismatched.push((sym.clone(), ex_is_long, ex_qty, entry));
+                    }
+                }
+            }
+        }
+        let local_syms: std::collections::HashSet<&String> = local.iter().map(|(s, _, _)| s).collect();
+        for sym in exchange.keys() {
+            if !local_syms.contains(sym) { plan.unknown.push(sym.clone()); }
+        }
+        plan.stale.sort();
+        plan.mismatched.sort_by(|a, b| a.0.cmp(&b.0));
+        plan.unknown.sort();
+        plan
     }
 
     /// Heuristik BIST hisse kodu tespiti.
@@ -486,5 +626,66 @@ mod persist_offload_tests {
         // Detached spawn_blocking → tamamlanması için kısa bekleme.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(flag.load(Ordering::SeqCst), "spawn_blocking arka planda koşmalı");
+    }
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::Engine;
+    use std::collections::HashMap;
+
+    fn ex(pairs: &[(&str, f64, f64)]) -> HashMap<String, (f64, f64)> {
+        pairs.iter().map(|(s, amt, entry)| (s.to_string(), (*amt, *entry))).collect()
+    }
+
+    #[test]
+    fn stale_local_not_on_exchange_is_removed() {
+        // Local BTC tutuyor ama borsa flat → phantom (kapanmış, bot kapalıyken).
+        let local = vec![("BTCUSDT".to_string(), true, 0.5)];
+        let plan = Engine::reconcile_diff(&local, &ex(&[]));
+        assert_eq!(plan.stale, vec!["BTCUSDT"]);
+        assert!(plan.mismatched.is_empty() && plan.unknown.is_empty());
+    }
+
+    #[test]
+    fn matching_position_no_diff() {
+        let local = vec![("BTCUSDT".to_string(), true, 0.5)];
+        let plan = Engine::reconcile_diff(&local, &ex(&[("BTCUSDT", 0.5, 62000.0)]));
+        assert_eq!(plan, super::ReconcilePlan::default());
+    }
+
+    #[test]
+    fn side_mismatch_syncs_to_exchange() {
+        // Local long ama borsa SHORT (-0.5) → borsaya senkronla.
+        let local = vec![("BTCUSDT".to_string(), true, 0.5)];
+        let plan = Engine::reconcile_diff(&local, &ex(&[("BTCUSDT", -0.5, 62000.0)]));
+        assert_eq!(plan.mismatched, vec![("BTCUSDT".to_string(), false, 0.5, 62000.0)]);
+        assert!(plan.stale.is_empty());
+    }
+
+    #[test]
+    fn qty_mismatch_outside_tolerance_syncs() {
+        // 0.5 → 0.6 (%20 fark, tolerans dışı) → senkronla.
+        let local = vec![("BTCUSDT".to_string(), true, 0.5)];
+        let plan = Engine::reconcile_diff(&local, &ex(&[("BTCUSDT", 0.6, 0.0)]));
+        assert_eq!(plan.mismatched.len(), 1);
+        assert_eq!(plan.mismatched[0].2, 0.6);
+    }
+
+    #[test]
+    fn qty_within_tolerance_no_diff() {
+        // 0.5 vs 0.5004 (< %0.1) → uyuşmazlık sayılmaz (yuvarlama gürültüsü).
+        let local = vec![("BTCUSDT".to_string(), true, 0.5)];
+        let plan = Engine::reconcile_diff(&local, &ex(&[("BTCUSDT", 0.5004, 0.0)]));
+        assert!(plan.mismatched.is_empty(), "tolerans içi fark senkron tetiklememeli");
+    }
+
+    #[test]
+    fn unknown_exchange_position_flagged() {
+        // Borsada ETH var, local'de yok → bilinmeyen (oto-adopt edilmez, alert).
+        let local = vec![("BTCUSDT".to_string(), true, 0.5)];
+        let plan = Engine::reconcile_diff(&local, &ex(&[("BTCUSDT", 0.5, 0.0), ("ETHUSDT", 2.0, 3000.0)]));
+        assert_eq!(plan.unknown, vec!["ETHUSDT"]);
+        assert!(plan.stale.is_empty() && plan.mismatched.is_empty());
     }
 }

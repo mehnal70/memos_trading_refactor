@@ -28,6 +28,12 @@ impl Engine {
         //     geçer (cold-start). Recovery sayısı TUI log'a yansır.
         Self::hydrate_open_positions_from_db(&state).await;
 
+        // 0b2. LIVE RECONCILIATION: live mode (dry-run değil) ise borsa OTORİTE → DB-hidre
+        //      pozisyonları borsadaki gerçek durumla bağdaştır (phantom kaldır / yön-qty
+        //      senkronla / bilinmeyen borsa pozisyonu alert). Paper/dry-run → no-op.
+        //      [[project_persistence_restart]]
+        Self::reconcile_live_positions_with_exchange(&state).await;
+
         // 0c. ACCOUNT RECOVERY: önceki run'un equity/peak/closed_count'ını yükle.
         //     Yoksa cold-start (config.capital ile başla). Bu adım olmadan
         //     her restart equity'i 10000'e döndürüyordu → 44 saatte ~3500 USDT
