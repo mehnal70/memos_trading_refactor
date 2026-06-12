@@ -21,6 +21,11 @@ cd "$WORKSPACE_ROOT"
 . "$WORKSPACE_ROOT/scripts/lib_launchconf.sh"
 load_launch_conf "$WORKSPACE_ROOT/scripts/.launch.conf"
 
+# .env (gitignored) — gerçek secret'lar (BINANCE_API_KEY/SECRET) burada, .launch.conf'ta DEĞİL.
+# Aynı güvenli satır-satır parser'la yükle ki aşağıdaki mod-banner'ı gerçeği göstersin.
+# Asıl binary zaten dotenvy::dotenv() ile .env'i yükler → bu satır yalnız ön-kontrol banner'ı içindir.
+load_launch_conf "$WORKSPACE_ROOT/.env"
+
 # Varsayılanlar
 TARGET_BIN="rtc_tui"
 BUILD_MODE="debug"
