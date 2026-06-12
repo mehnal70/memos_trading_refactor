@@ -153,7 +153,7 @@ impl Engine {
         // KESİTSEL override (adanmış mod): Some → eşit-ağırlık alloc (equity·frac, Kelly bypass) + SABİT
         // kaldıraç (resolve_leverage bypass). Market-nötr kitabın 1/k dengesi + risk kontrolü. None →
         // mevcut Kelly sizing + resolve_leverage (sıfır regresyon; XS-dışı tüm çağıranlar None).
-        xs_sizing: Option<xs_live::XsSizing>,
+        xs_sizing: Option<book_core::BookSizing>,
     ) {
         use crate::robot::risk::kelly::KellyCriterion;
         let last_candle = match candles.last() { Some(c) => c, None => return };
@@ -612,6 +612,21 @@ impl Engine {
                     ));
                 }
             } else {
+                // 🎚️ Futures kaldıracını borsada set et (sizing varsayımıyla tutarlı, B#2).
+                // notional = teminat × kaldıraç → borsa-default kaldıraç farklıysa pozisyon
+                // boyutu varsayımı bozulur. Spot'ta no-op; set edilemezse açmadan VETO.
+                if !executor.is_spot {
+                    let lev = new_pos.leverage.round().max(1.0) as u32;
+                    if let Err(e) = executor.set_leverage(symbol, lev).await {
+                        if let Ok(mut st2) = state.lock() {
+                            st2.push_log(format!(
+                                "🛑 [LIVE-LEVERAGE-VETO] {} {} kaldıraç {}x set edilemedi ({:?}) — pozisyon açılmadı",
+                                symbol, side, lev, e,
+                            ));
+                        }
+                        return;
+                    }
+                }
                 // ── Giriş emri: maker (opt-in, POST_ONLY) → taker MARKET dispatch ──
                 // use_limit_entry ise önce best_bid/ask'e katılan maker denenir; N
                 // deneme dolmazsa limit_entry_fallback_market'a göre taker'a düşülür
@@ -816,7 +831,9 @@ impl Engine {
         // KESİTSEL maker icra: XS pozisyonları (strategy_name=XS tag) maker için TASARLANDI
         // (net edge maker 2bps'te doğrulandı). Operatör USE_LIMIT_ENTRY ile maker'a opt-in ettiyse
         // paper komisyon muhasebesi de maker oranını yansıtsın → P&L doğrulanan senaryoya sadık.
-        let xs_maker = strategy_name == crate::robot::engines::master::xs_live::XS_STRATEGY_TAG
+        let xs_maker = (strategy_name == crate::robot::engines::master::xs_live::XS_STRATEGY_TAG
+            || strategy_name == crate::robot::engines::master::carry_live::CARRY_STRATEGY_TAG
+            || strategy_name == crate::robot::engines::master::blend_live::BLEND_STRATEGY_TAG)
             && st.tuning.use_limit_entry;
         let entry_commission_rate = if used_maker || xs_maker { st.tuning.maker_commission_rate }
                                      else                     { st.tuning.commission_rate };

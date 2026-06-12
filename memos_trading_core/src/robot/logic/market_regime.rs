@@ -29,54 +29,13 @@ impl fmt::Display for AdxRegime {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MarketRegime {
-    Trending, Ranging, Volatile, LowVolatility, Unknown,
-}
+// NOT: Eski yerel `MarketRegime` enum + `SimpleRegimeDetector`/`SimpleStrategySwitcher`
+// (ve `MarketRegimeDetector`/`StrategySwitcher` trait'leri) KALDIRILDI — hiçbir yerden
+// çağrılmıyordu (ölü kod). Canlı rejim yolu `evolution::MarketRegime` + ADX/ATR tabanlı
+// `classify_market_regime*` + pluggable `regime_context::MathRegimeDetector`'dır; basit
+// stddev-tabanlı dedektör (gömülü `mean*0.05` eşiğiyle) hiç devrede değildi.
 
-// --- 2. TRAIT VE SWITCHER YAPILARI ---
-
-pub trait MarketRegimeDetector: Send + Sync {
-    fn detect_regime(&self, candles: &[Candle]) -> MarketRegime;
-}
-
-pub struct SimpleRegimeDetector;
-impl MarketRegimeDetector for SimpleRegimeDetector {
-    fn detect_regime(&self, candles: &[Candle]) -> MarketRegime {
-        let n = candles.len();
-        if n < 20 { return MarketRegime::Unknown; }
-
-        let sum: f64 = candles.iter().map(|c| c.close).sum();
-        let mean = sum / n as f64;
-        let variance = candles.iter().map(|c| (c.close - mean).powi(2)).sum::<f64>() / n as f64;
-        let stddev = variance.sqrt();
-        let last_close = candles[n - 1].close;
-
-        if stddev > mean * 0.05 { MarketRegime::Volatile }
-        else if last_close > mean { MarketRegime::Trending }
-        else { MarketRegime::Ranging }
-    }
-}
-
-pub trait StrategySwitcher: Send + Sync {
-    fn select_strategy(&self, regime: MarketRegime, available: &[String]) -> Option<String>;
-}
-
-pub struct SimpleStrategySwitcher;
-impl StrategySwitcher for SimpleStrategySwitcher {
-    fn select_strategy(&self, regime: MarketRegime, available: &[String]) -> Option<String> {
-        let keyword = match regime {
-            MarketRegime::Trending => "trend",
-            MarketRegime::Ranging => "range",
-            MarketRegime::Volatile => "vol",
-            MarketRegime::LowVolatility => "mean",
-            _ => return None,
-        };
-        available.iter().find(|s| s.to_lowercase().contains(keyword)).cloned()
-    }
-}
-
-// --- 3. GELİŞMİŞ ANALİZ MOTORU (ADX/ATR) ---
+// --- 2. GELİŞMİŞ ANALİZ MOTORU (ADX/ATR) ---
 
 /// Wilder ADX - Performans için Zero-Copy Slicing optimizasyonlu.
 pub fn compute_adx_from_candles(candles: &[Candle]) -> f64 {

@@ -2,6 +2,25 @@
 // Faz 2 modülerleştirme: loop_core.rs'ten ayrıldı (davranış birebir korunur).
 use super::*;
 
+// ── Edge-skor sabitleri (tek-kaynak, isimli, dokümanlı) ──────────────────────
+// Bunlar KARAR sabitleri (formül-tanımı değil) → optimizer'a AÇIK DEĞİL: A/B/WF
+// kanıtı olmadan tunable yapılmaz (overfit guardrail). İsimlendirme tek-kaynak +
+// keşfedilebilirlik sağlar; ileride A/B `compute_edge_score_with` parametrik
+// ikiziyle yapılır. Değerler eski gömülü literallerle BİREBİR.
+/// Ters-momentum sinyali (sinyal yönü 20-mum momentumuyla ters) için dir_match
+/// çarpanı. <1 ters girişleri bastırır; canlı yol 0.4 kullanır.
+const EDGE_REVERSE_PENALTY: f64 = 0.4;
+/// ML hazır (confidence > ε) iken momentum/ML harman ağırlığı (ml_w). mom_w = 1 − bu.
+const EDGE_ML_BLEND_WEIGHT: f64 = 0.5;
+/// `dynamic_edge_threshold` ML-confidence kademe sınırları: < COLD_MAX → "hazır değil",
+/// < WARM_MAX → "olgunlaşıyor", aksi → "hazır".
+const EDGE_ML_COLD_MAX: f64 = 0.05;
+const EDGE_ML_WARM_MAX: f64 = 0.30;
+/// Kademeye karşılık gelen edge tabanları (ML olgunlaştıkça katılaşır).
+const EDGE_FLOOR_COLD: f64 = 0.20; // ML≈0: momentum tek-taşıyıcı, gevşek taban
+const EDGE_FLOOR_WARM: f64 = 0.35; // ML olgunlaşıyor: orta taban
+const EDGE_FLOOR_HOT:  f64 = 0.55; // ML hazır: katı filtre
+
 impl Engine {
 
 
@@ -12,9 +31,9 @@ impl Engine {
     /// en az 1 katı yön yapması "tam güç" sayılır. Ham getiriyi kullanmak yerine ATR normalizasyonu
     /// 1m gibi düşük volatilite timeframe'lerinde edge'in pratik olarak ölçülebilir kalmasını sağlar.
     pub(crate) fn compute_edge_score(candles: &[Candle], signal: &Signal, ml_confidence: f64) -> f64 {
-        // Canlı yol sabit ters-momentum cezası 0.4 ile çağırır (davranış birebir).
+        // Canlı yol sabit ters-momentum cezası ile çağırır (davranış birebir).
         // Parametrik sürüm backtest A/B'si (#3) için ayrı eşik denemesine izin verir.
-        Self::compute_edge_score_with(candles, signal, ml_confidence, 0.4)
+        Self::compute_edge_score_with(candles, signal, ml_confidence, EDGE_REVERSE_PENALTY)
     }
 
     /// `compute_edge_score`'un ters-momentum cezası parametrik sürümü. `reverse_penalty`:
@@ -47,7 +66,7 @@ impl Engine {
         };
         let ml = ml_confidence.clamp(0.0, 1.0);
         // ML henüz hazır değilse (0.0) momentum tek başına baskın olsun.
-        let ml_w = if ml < f64::EPSILON { 0.0 } else { 0.5 };
+        let ml_w = if ml < f64::EPSILON { 0.0 } else { EDGE_ML_BLEND_WEIGHT };
         let mom_w = 1.0 - ml_w;
         (dir_match * (mom_strength * mom_w + ml * ml_w)).clamp(0.0, 1.0)
     }
@@ -55,9 +74,9 @@ impl Engine {
     /// Dinamik edge eşiği: ML modeli henüz hazır değilken (confidence ≈ 0) momentum tek başına
     /// taşıyıcı, bu yüzden daha gevşek eşik. ML hazırlandıkça daha katı bir filtreye geçilir.
     pub(crate) fn dynamic_edge_threshold(ml_confidence: f64) -> f64 {
-        if ml_confidence < 0.05 { 0.20 }
-        else if ml_confidence < 0.30 { 0.35 }
-        else { 0.55 }
+        if ml_confidence < EDGE_ML_COLD_MAX { EDGE_FLOOR_COLD }
+        else if ml_confidence < EDGE_ML_WARM_MAX { EDGE_FLOOR_WARM }
+        else { EDGE_FLOOR_HOT }
     }
 
     /// Faz 3 c3: rejim drift gözlemi. Önceki cycle'dan farklı bir rejime
@@ -281,5 +300,24 @@ impl Engine {
             sum += h_l.max(h_pc).max(l_pc);
         }
         sum / period as f64
+    }
+}
+
+#[cfg(test)]
+mod edge_threshold_tests {
+    use super::*;
+
+    /// `dynamic_edge_threshold` kademe sınırlarını kilitler (isimli const'lara bağlandıktan
+    /// sonra regresyon koruması). Sınırlar yarı-açık: `< COLD_MAX` cold, `< WARM_MAX` warm.
+    #[test]
+    fn dynamic_edge_threshold_cascade() {
+        assert_eq!(Engine::dynamic_edge_threshold(0.0),  EDGE_FLOOR_COLD);
+        assert_eq!(Engine::dynamic_edge_threshold(0.049), EDGE_FLOOR_COLD);
+        // tam COLD_MAX (0.05) sınırı: `< 0.05` false → warm.
+        assert_eq!(Engine::dynamic_edge_threshold(EDGE_ML_COLD_MAX), EDGE_FLOOR_WARM);
+        assert_eq!(Engine::dynamic_edge_threshold(0.29), EDGE_FLOOR_WARM);
+        // tam WARM_MAX (0.30) sınırı: `< 0.30` false → hot.
+        assert_eq!(Engine::dynamic_edge_threshold(EDGE_ML_WARM_MAX), EDGE_FLOOR_HOT);
+        assert_eq!(Engine::dynamic_edge_threshold(1.0),  EDGE_FLOOR_HOT);
     }
 }

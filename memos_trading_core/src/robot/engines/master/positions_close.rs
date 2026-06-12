@@ -19,10 +19,11 @@ pub(crate) fn extract_fill_price(resp: &serde_json::Value) -> Option<f64> {
 
 impl Engine {
 
-    /// 🛡️ POZİSYON ÇIKIŞ KONTROLÜ: Açık her pozisyon için SL/TP/Trailing/Breakeven
-    /// koşullarını sırasıyla denetler. Tetiklenmişse Some(ExitReason) döner ve
-    /// pozisyonun max_favorable_price / breakeven_activated / trailing_stop alanlarını
-    /// günceller.
+    /// 🛡️ POZİSYON ÇIKIŞ KONTROLÜ (nokta-gözlem): tek fiyat skaleriyle SL/TP/Trailing/
+    /// Breakeven denetler. Canlı yol (`fleet.live_price` tick'i) ve birim testler bunu
+    /// çağırır → `high = low = close = last_price` ile fitil-farkında çekirdeğe delege:
+    /// nokta-gözlemde davranış eski sürümle BİREBİR (parite). Bar-OHLC'li backtest yolu
+    /// `check_exit_conditions_ohlc`'u doğrudan çağırır (fitil-tetikleme).
     pub fn check_exit_conditions(
         position: &mut PositionModel,
         last_price: f64,
@@ -30,46 +31,64 @@ impl Engine {
         atr_trail_mult: f64,
         breakeven_rr: f64,
     ) -> Option<ExitReason> {
-        if last_price <= 0.0 { return None; }
+        Self::check_exit_conditions_ohlc(
+            position, last_price, last_price, last_price, atr, atr_trail_mult, breakeven_rr,
+        )
+    }
 
-        // 1) Favorable price güncellemesi (long en yüksek, short en düşük)
+    /// 🛡️ FİTİL-FARKINDA ÇIKIŞ ÇEKİRDEĞİ: SL/TP/Trailing bar-içi EKSTREMLERLE tetiklenir
+    /// → backtest, canlının bar-altı (tick) fitil maruziyetiyle hizalanır (eskiden backtest
+    /// yalnız kapanışı görüyordu = iyimser; SL fitili asla modellenmiyordu).
+    ///   • adverse (aleyhte) ekstrem: long→`low`, short→`high` → SL + trailing tetikler.
+    ///   • favorable (lehte) ekstrem: long→`high`, short→`low` → TP tetikler + max_favorable.
+    ///   • `close`: breakeven arming (temkinli: yalnız kapanış RR eşiğini geçince) + guard.
+    /// Aynı barda hem SL hem TP menzili kapanırsa SL önce kontrol edilir → KÖTÜMSER (gerçekçi
+    /// worst-case; bar-içi sıra bilinmez). Nokta-gözlemde (high=low=close) eski davranış birebir.
+    pub fn check_exit_conditions_ohlc(
+        position: &mut PositionModel,
+        high: f64,
+        low: f64,
+        close: f64,
+        atr: f64,
+        atr_trail_mult: f64,
+        breakeven_rr: f64,
+    ) -> Option<ExitReason> {
+        if close <= 0.0 { return None; }
+
+        // Yöne göre lehte/aleyhte ekstrem (long: yukarı lehte, aşağı aleyhte; short: tersi).
+        let (favorable, adverse) = if position.is_long { (high, low) } else { (low, high) };
+
+        // 1) Favorable price güncellemesi (long en yüksek, short en düşük) — lehte ekstremle.
         if position.is_long {
-            if last_price > position.max_favorable_price { position.max_favorable_price = last_price; }
-        } else {
-            if position.max_favorable_price == 0.0 || last_price < position.max_favorable_price {
-                position.max_favorable_price = last_price;
-            }
+            if favorable > position.max_favorable_price { position.max_favorable_price = favorable; }
+        } else if position.max_favorable_price == 0.0 || favorable < position.max_favorable_price {
+            position.max_favorable_price = favorable;
         }
 
-        // 2) SL — statik (breakeven aktifse SL = entry'e taşınmış olur).
+        // 2) SL — aleyhte ekstremle (fitil). Breakeven aktifse SL = entry'e taşınmış olur.
         if position.stop_loss > 0.0 {
-            if position.is_long && last_price <= position.stop_loss {
-                return Some(if position.breakeven_activated { ExitReason::Breakeven }
-                            else { ExitReason::StopLoss });
-            }
-            if !position.is_long && last_price >= position.stop_loss {
+            let hit = if position.is_long { adverse <= position.stop_loss }
+                      else                 { adverse >= position.stop_loss };
+            if hit {
                 return Some(if position.breakeven_activated { ExitReason::Breakeven }
                             else { ExitReason::StopLoss });
             }
         }
 
-        // 3) TP — statik.
+        // 3) TP — lehte ekstremle (fitil).
         if position.take_profit > 0.0 {
-            if position.is_long && last_price >= position.take_profit {
-                return Some(ExitReason::TakeProfit);
-            }
-            if !position.is_long && last_price <= position.take_profit {
-                return Some(ExitReason::TakeProfit);
-            }
+            let hit = if position.is_long { favorable >= position.take_profit }
+                      else                 { favorable <= position.take_profit };
+            if hit { return Some(ExitReason::TakeProfit); }
         }
 
-        // 4) Breakeven aktivasyonu — TP'nin yarısına ulaştığında SL'i entry'e taşı.
-        //    breakeven_rr: ROE eşiği (örn. 1.0 = RR 1:1, yani SL kadar kazanç).
+        // 4) Breakeven aktivasyonu — KAPANIŞ bazlı (temkinli: fitil arming yapmaz). TP'nin
+        //    yarısına (breakeven_rr · risk) ulaşıldığında SL'i entry'e taşı.
         if !position.breakeven_activated && position.entry_price > 0.0 && position.stop_loss > 0.0 {
             let risk = (position.entry_price - position.stop_loss).abs();
             if risk > 0.0 {
-                let gain = if position.is_long { last_price - position.entry_price }
-                           else                 { position.entry_price - last_price };
+                let gain = if position.is_long { close - position.entry_price }
+                           else                 { position.entry_price - close };
                 if gain >= risk * breakeven_rr {
                     position.breakeven_activated = true;
                     position.stop_loss = position.entry_price; // SL'i entry'e taşı
@@ -77,13 +96,13 @@ impl Engine {
             }
         }
 
-        // 5) Trailing stop — ATR × mult uzaklıkta, sadece elverişli yönde kayar.
+        // 5) Trailing stop — ATR × mult uzaklıkta, lehte ekstremle kayar, aleyhte ekstremle tetiklenir.
         if atr > 0.0 && atr_trail_mult > 0.0 {
             let delta = atr * atr_trail_mult;
             if position.is_long {
                 let new_trail = position.max_favorable_price - delta;
                 if new_trail > position.trailing_stop { position.trailing_stop = new_trail; }
-                if position.trailing_stop > 0.0 && last_price <= position.trailing_stop {
+                if position.trailing_stop > 0.0 && adverse <= position.trailing_stop {
                     return Some(ExitReason::TrailingStop);
                 }
             } else {
@@ -91,7 +110,7 @@ impl Engine {
                 if position.trailing_stop == 0.0 || new_trail < position.trailing_stop {
                     position.trailing_stop = new_trail;
                 }
-                if position.trailing_stop > 0.0 && last_price >= position.trailing_stop {
+                if position.trailing_stop > 0.0 && adverse >= position.trailing_stop {
                     return Some(ExitReason::TrailingStop);
                 }
             }
@@ -305,7 +324,9 @@ impl Engine {
             let pnl_val = crate::core::math::calculate_pnl(pos.entry_price, exit_price, pos.qty, pos.is_long);
             // Çıkış komisyonu — exit notional üzerinden. KESİTSEL maker icra: XS pozisyonu (trade_type=XS tag)
             // + USE_LIMIT_ENTRY → maker oranı (açılışla simetrik; net edge maker'da doğrulandı).
-            let exit_rate = if pos.trade_type == crate::robot::engines::master::xs_live::XS_STRATEGY_TAG
+            let exit_rate = if (pos.trade_type == crate::robot::engines::master::xs_live::XS_STRATEGY_TAG
+                || pos.trade_type == crate::robot::engines::master::carry_live::CARRY_STRATEGY_TAG
+                || pos.trade_type == crate::robot::engines::master::blend_live::BLEND_STRATEGY_TAG)
                 && st.tuning.use_limit_entry { st.tuning.maker_commission_rate }
                 else { st.tuning.commission_rate };
             let exit_commission = (exit_price * pos.qty) * exit_rate;

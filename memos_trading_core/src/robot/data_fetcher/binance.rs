@@ -20,6 +20,35 @@ pub fn fetch_error_is_delisting(err: &str) -> bool {
     err.starts_with(DELISTING_ERR_PREFIX)
 }
 
+/// SAF: Binance funding-rate yanıtını `(funding_time_ms, rate)` listesine çevirir (testlenebilir,
+/// ağsız). Yanıt dizi değilse hata objesini sınıflandırır (-1121 → delisting prefix, diğer → geçici).
+/// fundingRate string gelir (klines gibi) → f64 parse. fundingTime ms.
+pub fn parse_funding_page(body: &str, symbol: &str) -> Result<Vec<(i64, f64)>, String> {
+    let resp: Vec<serde_json::Value> = match serde_json::from_str(body) {
+        Ok(arr) => arr,
+        Err(_) => {
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(body) {
+                let code = obj.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
+                let msg = obj.get("msg").and_then(|m| m.as_str()).unwrap_or("");
+                if code == -1121 {
+                    return Err(format!("{DELISTING_ERR_PREFIX}: {symbol} (code {code} {msg})"));
+                }
+                return Err(format!("Binance Geçici API Hatası: {symbol} (code {code} {msg})"));
+            }
+            return Err(format!("Binance funding format hatası ({symbol})"));
+        }
+    };
+    let mut out = Vec::with_capacity(resp.len());
+    for o in resp {
+        let t = o.get("fundingTime").and_then(|v| v.as_i64());
+        let r = o.get("fundingRate").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+        if let (Some(t), Some(r)) = (t, r) {
+            if t > 0 { out.push((t, r)); }
+        }
+    }
+    Ok(out)
+}
+
 pub struct BinanceFetcher {
     client: reqwest::Client,
 }
@@ -114,6 +143,55 @@ impl BinanceFetcher {
 
         if out.is_empty() {
             return Err(last_err.unwrap_or_else(|| format!("{} backfill: aralıkta veri yok", symbol)));
+        }
+        Ok(out)
+    }
+
+    /// 💰 Funding-rate geçmişi (YALNIZ futures): `fapi/v1/fundingRate`, `start_ms`'ten ileri pagine
+    /// eder (her istek ≤1000 kayıt; funding 8 saatte bir → ~3/gün). Dönen `(funding_time_ms, rate)`
+    /// kronolojik. Boş yanıt (aralık-sonu) normal terminasyon. fetch_history_market ile aynı
+    /// pagination iskeleti (no-progress guard + max_requests tavanı).
+    pub async fn fetch_funding_history(
+        &self, symbol: &str, market: &str, start_ms: i64, max_requests: usize,
+    ) -> Result<Vec<(i64, f64)>, String> {
+        if !market.eq_ignore_ascii_case("futures") {
+            return Err(format!("funding yalnız futures'ta var (market={market})"));
+        }
+        let now_ms = crate::core::time::now_epoch_millis() as i64;
+        let mut cursor = start_ms.max(0);
+        let mut out: Vec<(i64, f64)> = Vec::new();
+        let mut last_err: Option<String> = None;
+
+        for _ in 0..max_requests.max(1) {
+            if cursor >= now_ms { break; }
+            let url = format!(
+                "https://fapi.binance.com/fapi/v1/fundingRate?symbol={}&startTime={}&limit=1000",
+                symbol, cursor,
+            );
+            let body = match self.client.get(&url).send().await {
+                Ok(resp) => match resp.text().await {
+                    Ok(b) => b,
+                    Err(e) => { last_err = Some(format!("Binance funding gövde: {}", e)); break; }
+                },
+                Err(e) => { last_err = Some(format!("Binance funding bağlantı: {}", e)); break; }
+            };
+            match parse_funding_page(&body, symbol) {
+                Ok(batch) => {
+                    if batch.is_empty() { break; }
+                    let last_t = batch.iter().map(|(t, _)| *t).max().unwrap_or(cursor);
+                    let n = batch.len();
+                    out.extend(batch);
+                    let next = last_t + 1; // funding_time tekil → +1ms üst-üste binmeyi önler
+                    if next <= cursor { break; }
+                    cursor = next;
+                    if n < 1000 { break; } // tam-dolmayan sayfa → şimdiye yetişildi
+                }
+                Err(e) => { last_err = Some(e); break; }
+            }
+        }
+
+        if out.is_empty() {
+            return Err(last_err.unwrap_or_else(|| format!("{} funding: aralıkta veri yok", symbol)));
         }
         Ok(out)
     }
@@ -237,6 +315,26 @@ mod error_class_tests {
         assert!(!fetch_error_is_delisting("Binance Geçici API Hatası: MYXUSDT (code -1003 Too many requests.)"));
         assert!(!fetch_error_is_delisting("Binance Bağlantı Hatası: timeout"));
         assert!(!fetch_error_is_delisting("Binance Veri Format Hatası: yanıt klines değil (MYXUSDT)"));
+    }
+
+    #[test]
+    fn funding_page_parses_and_classifies_errors() {
+        // Geçerli yanıt: fundingRate string, fundingTime ms.
+        let body = r#"[
+            {"symbol":"BTCUSDT","fundingTime":1700000000000,"fundingRate":"0.00010000","markPrice":"50000"},
+            {"symbol":"BTCUSDT","fundingTime":1700028800000,"fundingRate":"-0.00005000","markPrice":"50100"}
+        ]"#;
+        let v = parse_funding_page(body, "BTCUSDT").expect("geçerli yanıt");
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].0, 1700000000000);
+        assert!((v[0].1 - 0.0001).abs() < 1e-12);
+        assert!((v[1].1 + 0.00005).abs() < 1e-12, "negatif funding parse");
+        // -1121 → delisting prefix.
+        let err = parse_funding_page(r#"{"code":-1121,"msg":"Invalid symbol."}"#, "FOOUSDT").unwrap_err();
+        assert!(fetch_error_is_delisting(&err), "code -1121 → delisting");
+        // -1003 → geçici (purge etme).
+        let err2 = parse_funding_page(r#"{"code":-1003,"msg":"Too many requests."}"#, "BTCUSDT").unwrap_err();
+        assert!(!fetch_error_is_delisting(&err2), "rate-limit → geçici");
     }
 }
 

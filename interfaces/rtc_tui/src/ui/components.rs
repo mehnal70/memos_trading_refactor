@@ -72,11 +72,23 @@ pub fn phase_badge(phase: &str) -> (&'static str, Color) {
 }
 
 /// Tüm sekmelerde ortak kullanılan Pozisyon Tablo Satırı
-pub fn render_position_row(p: &PositionModel) -> Row<'static> {
+pub fn render_position_row(p: &PositionModel, equity: f64) -> Row<'static> {
     let pnl = p.calculate_pnl();
     // roe() artık core/math.rs üzerinden hassas hesaplanıyor
-    let pnl_pct = p.roe(); 
+    let pnl_pct = p.roe();
     let color = if pnl >= 0.0 { Color::LightGreen } else { Color::LightRed };
+
+    // 💰 BOYUT: işleme giren bakiye = ayrılan TEMİNAT (margin) = notional/leverage. Notional =
+    // entry_price×qty (pozisyon büyüklüğü); kaldıraçta gerçekte bağlanan sermaye notional/lev'dir.
+    // Tutar ($) girişte SABİT (fiyat oynasa da kaymaz); oran (%) ANLIK equity'ye göre (referans
+    // canlı sermaye). equity≤0 (boot/snapshot eksik) → yalnız tutar, oran "—".
+    let notional = p.entry_price * p.qty;
+    let margin = if p.leverage > 0.0 { notional / p.leverage } else { notional };
+    let size_label = if equity > 0.0 {
+        format!("${:.0} ({:.1}%)", margin, margin / equity * 100.0)
+    } else {
+        format!("${:.0}", margin)
+    };
 
     // Pazar türü: "futures"/"coinm"/"perp" → Vadeli (sarı, kaldıraç riski),
     // diğer → Spot (gri). Boş/eski snapshot → "spot" (serde default).
@@ -108,6 +120,7 @@ pub fn render_position_row(p: &PositionModel) -> Row<'static> {
         Cell::from(if p.is_long { "▲ LONG" } else { "▼ SHORT" }).style(Style::default().fg(color)),
         Cell::from(market_label).style(Style::default().fg(market_color)),
         Cell::from(format!("{:.1}x", p.leverage)).style(Style::default().fg(lev_color)),
+        Cell::from(size_label).style(Style::default().fg(Color::LightYellow)),
         Cell::from(format!("{:.4}", p.entry_price)),
         Cell::from(format!("{:.4}", p.current_price)),
         Cell::from(fmt_lvl(p.stop_loss)).style(Style::default().fg(sl_color)),

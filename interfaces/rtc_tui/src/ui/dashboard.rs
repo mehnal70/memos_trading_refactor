@@ -31,27 +31,29 @@ pub fn draw(f: &mut ratatui::Frame, area: Rect, snap: &MissionControl) {
             .style(Style::default().fg(Color::DarkGray));
         f.render_widget(empty_msg, chunks[2]);
     } else {
+        let equity = snap.finance.total_equity;
         let rows: Vec<Row> = snap.positions.iter()
-            .map(components::render_position_row)
+            .map(|p| components::render_position_row(p, equity))
             .collect();
 
         let table = Table::new(rows, [
-            Constraint::Percentage(10), // Sembol
-            Constraint::Percentage(9),  // Strateji
+            Constraint::Percentage(9),  // Sembol
+            Constraint::Percentage(8),  // Strateji
             Constraint::Percentage(5),  // TF (zaman dilimi)
-            Constraint::Percentage(7),  // Yön
-            Constraint::Percentage(6),  // Tür (spot/vadeli)
-            Constraint::Percentage(6),  // Kald.
-            Constraint::Percentage(9),  // Giriş
-            Constraint::Percentage(9),  // Fiyat
-            Constraint::Percentage(8),  // SL (stop-loss; XS'te "—")
-            Constraint::Percentage(8),  // TP (take-profit; XS'te "—")
-            Constraint::Percentage(8),  // TSL (trailing-stop; XS'te "—")
-            Constraint::Percentage(8),  // PnL
-            Constraint::Percentage(7),  // ROE%
+            Constraint::Percentage(6),  // Yön
+            Constraint::Percentage(5),  // Tür (spot/vadeli)
+            Constraint::Percentage(5),  // Kald.
+            Constraint::Percentage(10), // Boyut (ayrılan teminat $ + equity %)
+            Constraint::Percentage(8),  // Giriş
+            Constraint::Percentage(8),  // Fiyat
+            Constraint::Percentage(7),  // SL (stop-loss; XS'te "—")
+            Constraint::Percentage(7),  // TP (take-profit; XS'te "—")
+            Constraint::Percentage(7),  // TSL (trailing-stop; XS'te "—")
+            Constraint::Percentage(7),  // PnL
+            Constraint::Percentage(6),  // ROE%
         ])
         .header(
-            Row::new(vec!["Sembol", "Strateji", "TF", "Yön", "Tür", "Kald.", "Giriş", "Fiyat", "SL", "TP", "TSL", "PnL", "ROE%"])
+            Row::new(vec!["Sembol", "Strateji", "TF", "Yön", "Tür", "Kald.", "Boyut", "Giriş", "Fiyat", "SL", "TP", "TSL", "PnL", "ROE%"])
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         )
         .block(
@@ -184,6 +186,28 @@ mod tests {
         assert!(r.contains("TSL"), "TSL başlığı yok\n{}", r);
         assert!(r.contains("95.0"), "SL seviyesi gösterilmeli\n{}", r);
         assert!(r.contains("112.0"), "TP seviyesi gösterilmeli\n{}", r);
+    }
+
+    /// Boyut kolonu: işleme giren bakiye = ayrılan teminat (margin = notional/lev) tutar + equity %.
+    /// entry=100·qty=1·lev=1 → notional=$100, margin=$100; equity=10000 → %1.0. Kaldıraçta margin
+    /// notional/lev'e düşer (lev=2 → $50, %0.5) → operatör bağlanan gerçek sermayeyi görür.
+    #[test]
+    fn position_table_shows_size_column() {
+        let mut snap = make_snap("Executing");
+        let p = pos("BTCUSDT", "1d"); // entry=100, qty=1, lev=1
+        snap.positions = vec![p];
+        let r = render_string(&snap);
+        assert!(r.contains("Boyut"), "Boyut başlığı tabloda yok\n{}", r);
+        assert!(r.contains("$100"), "ayrılan teminat tutarı ($100) gösterilmeli\n{}", r);
+        assert!(r.contains("1.0%"), "equity oranı (%1.0) gösterilmeli\n{}", r);
+
+        // Kaldıraçlı: lev=2 → margin = notional/2 = $50 (%0.5). Bağlanan sermaye yarıya iner.
+        let mut p2 = pos("ETHUSDT", "1d");
+        p2.leverage = 2.0;
+        snap.positions = vec![p2];
+        let r2 = render_string(&snap);
+        assert!(r2.contains("$50"), "lev=2 → margin $50 gösterilmeli\n{}", r2);
+        assert!(r2.contains("0.5%"), "lev=2 → %0.5 gösterilmeli\n{}", r2);
     }
 
     /// XS (kesitsel) pozisyonu STOPSUZ (SL/TP/TSL=0) → üç hücre de "—" basar (rank-rebalance

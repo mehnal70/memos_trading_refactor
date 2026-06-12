@@ -28,6 +28,12 @@ impl Engine {
         //     geçer (cold-start). Recovery sayısı TUI log'a yansır.
         Self::hydrate_open_positions_from_db(&state).await;
 
+        // 0b2. LIVE RECONCILIATION: live mode (dry-run değil) ise borsa OTORİTE → DB-hidre
+        //      pozisyonları borsadaki gerçek durumla bağdaştır (phantom kaldır / yön-qty
+        //      senkronla / bilinmeyen borsa pozisyonu alert). Paper/dry-run → no-op.
+        //      [[project_persistence_restart]]
+        Self::reconcile_live_positions_with_exchange(&state).await;
+
         // 0c. ACCOUNT RECOVERY: önceki run'un equity/peak/closed_count'ını yükle.
         //     Yoksa cold-start (config.capital ile başla). Bu adım olmadan
         //     her restart equity'i 10000'e döndürüyordu → 44 saatte ~3500 USDT
@@ -168,9 +174,16 @@ impl Engine {
             // 📐 Kesitsel ADANMIŞ MOD sepeti: bu semboller SADECE process_xs_book (market-nötr kitap)
             // tarafından yönetilir → normal per-sembol döngüden + yetim-pozisyon yolundan HARİÇ tutulur
             // (çift-yönetim/çakışma yok, tek-pozisyon invariantı temiz). Mod kapalı → boş set, sıfır regresyon.
+            // Kesitsel ADANMIŞ sepetler: momentum (xs_live) + funding-carry (carry_live). İkisi de
+            // normal per-sembol döngüden HARİÇ → ilgili book_core motoru yönetir (çakışma/çift-yönetim yok).
             let xs_basket: std::collections::HashSet<String> = st.brain.parameters.read().ok()
-                .filter(|p| p.xs_live.enabled)
-                .map(|p| p.xs_live.symbols.iter().cloned().collect())
+                .map(|p| {
+                    let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    if p.xs_live.enabled { set.extend(p.xs_live.symbols.iter().cloned()); }
+                    if p.carry_live.enabled { set.extend(p.carry_live.symbols.iter().cloned()); }
+                    if p.blend_live.enabled { set.extend(p.blend_live.symbols.iter().cloned()); }
+                    set
+                })
                 .unwrap_or_default();
             // Canlı feed'i olmayan borsa sembolleri (örn. BIST) cycle'a alınmaz →
             // fiyatsız satırlar DataIngest/PriceFetch Failed → anomaly birikimi yapardı.
@@ -207,6 +220,15 @@ impl Engine {
         // 📐 KESİTSEL ADANMIŞ MOD: sepeti tek market-nötr kitap olarak yönet (per-sembol döngüden ÖNCE,
         // sepet sembolleri candidates'tan zaten hariç). Mod kapalı/sepet yetersiz → anında no-op.
         Self::process_xs_book(state).await;
+        // 💰 FUNDING-CARRY ADANMIŞ MOD: carry sepetini tek market-nötr kitap olarak yönet (aynı book_core
+        // motoru, farkı funding sinyali + iki-haftalık kadans). Mod kapalı/sepet yetersiz → anında no-op.
+        // ÇAKIŞMA NOTU: carry + momentum sepetleri AYNI sembolü içermemeli (tek-pozisyon/sembol invariantı);
+        // Faz 1'de ayrık sepet ya da yalnız biri açık koşar. [[project_funding_carry]]
+        Self::process_carry_book(state).await;
+        // 🔀 İKİ-FAKTÖR HARMAN ADANMIŞ MOD (Faz 2): momentum⊕carry tek market-nötr kitap (z-score harman).
+        // Faz 1 ayrık modlara ALTERNATİF — aynı sembolü iki mod yönetmemeli (loop_core sepeti birleşik
+        // hariç tutar; operatör tek mod açar ya da ayrık sepet kullanır). [[project_funding_carry]]
+        Self::process_blend_book(state).await;
 
         // 2) Paralel sembol infazı — her sembol için ayrı tokio task. State Arc<Mutex> üzerinden
         //    paylaşılır; lock contention'ı kısa tutmak için her closure içinde minimal scope kullanılır.

@@ -258,6 +258,10 @@ impl Engine {
             }
         }
 
+        // 3c) 💰 FUNDING-CARRY canlı refresh: carry mod açıksa sepet sembollerinin funding'ini artımlı
+        // çek (gap-farkında). Funding kitabının taze yakıtı. Mod kapalı → no-op. [[project_funding_carry]]
+        Self::refresh_carry_funding(&fetcher, state, &db_path).await;
+
         // 4) Özet
         log::info!(
             "🌐 Download ✓ tamamlandı: {} mum (başarılı={}, başarısız={}) · {}",
@@ -281,6 +285,69 @@ impl Engine {
             Err(format!("tüm {} sembolde indirme başarısız", symbols.len()))
         } else {
             Ok(())
+        }
+    }
+
+    /// 💰 FUNDING-CARRY canlı funding refresh — carry bacağı kullanan mod (carry_live VEYA blend_live)
+    /// açıkken sepet sembollerinin funding-rate'ini ARTIMLI (gap-farkında) çekip DB'ye yazar; ikisi de
+    /// kapalı → no-op. Harman modu da carry sinyali okur → funding'i o sepet için de tazelemek ŞART
+    /// (yoksa tazelik kapısı tüm sembolleri eler → harman çöker). İki sepet BİRLEŞTİRİLİR (tekrarsız).
+    /// Funding yalnız FUTURES'ta var → market sabit "futures" (download.market spot olsa da). Gap-farkında
+    /// başlangıç: kayıt varsa son funding_time+1ms, yoksa ~1 yıl tohum (lookback penceresini bolca kapsar).
+    /// Funding 8 saatte bir (~3/gün) → her download cycle'ında bir refresh fazlasıyla yeter; artımlıda
+    /// tek sayfa yeterli (modest istek tavanı). Per-sembol hata izole. download_funding aracıyla DRY desen.
+    async fn refresh_carry_funding(
+        fetcher: &crate::robot::data_fetcher::binance::BinanceFetcher,
+        state: &Arc<Mutex<AppState>>,
+        db_path: &str,
+    ) {
+        let symbols: Vec<String> = state.lock().ok()
+            .and_then(|st| st.brain.parameters.read().ok().map(|p| {
+                let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+                if p.carry_live.enabled { set.extend(p.carry_live.symbols.iter().cloned()); }
+                if p.blend_live.enabled { set.extend(p.blend_live.symbols.iter().cloned()); }
+                set.into_iter().collect()
+            }))
+            .unwrap_or_default();
+        if symbols.is_empty() {
+            return;
+        }
+        const FMARKET: &str = "futures"; // funding yalnız futures'ta [[feedback_market_agnostic]]
+        let now_ms = crate::core::time::now_epoch_millis() as i64;
+        let seed_start = now_ms - 365 * 86_400 * 1000; // tohum: ~1 yıl funding geçmişi
+        let (mut ok, mut total) = (0usize, 0usize);
+        for sym in &symbols {
+            let last = crate::persistence::reader::last_funding_ts(db_path, sym, FMARKET);
+            let eff_start = match last { Some(l) => l + 1, None => seed_start };
+            if eff_start >= now_ms {
+                continue; // güncel → atla
+            }
+            // Artımlıda tek sayfa (≤1000 funding) yeter; tohumda ~1100 kayıt için birkaç sayfa.
+            let max_req = if last.is_some() { 2 } else { 5 };
+            match fetcher.fetch_funding_history(sym, FMARKET, eff_start, max_req).await {
+                Ok(points) if !points.is_empty() => {
+                    let db2 = db_path.to_string();
+                    let sym_c = sym.clone();
+                    let pts = points.clone();
+                    let written = tokio::task::spawn_blocking(move || -> usize {
+                        let conn = match crate::persistence::open_db(&db2) { Ok(c) => c, Err(_) => return 0 };
+                        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+                        let mut w = 0usize;
+                        for (t, r) in &pts {
+                            if crate::persistence::writer::save_funding(&conn, "binance", FMARKET, &sym_c, *t, *r).is_ok() {
+                                w += 1;
+                            }
+                        }
+                        w
+                    }).await.unwrap_or(0);
+                    if written > 0 { ok += 1; total += written; }
+                }
+                _ => {} // artımlı boş / delisted / geçici hata → sessiz geç (tazelik kapısı kitapta eler)
+            }
+        }
+        if total > 0 {
+            log::info!("💰 funding refresh: {} sembol güncel · {} funding kaydı yazıldı", ok, total);
+            push_state_log(state, format!("💰 funding refresh: {} sembol · {} kayıt", ok, total));
         }
     }
 }

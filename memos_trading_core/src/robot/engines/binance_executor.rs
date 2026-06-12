@@ -29,10 +29,13 @@ pub struct BinanceFuturesExecutor {
 impl BinanceFuturesExecutor {
     pub fn new_for_market(api_key: String, api_secret: String, is_paper: bool, market: &str) -> Self {
         let is_spot = market == "spot";
+        // Doğru Binance API host'ları (eski sürüm hatalı `binance.com`/`binancefuture.com`
+        // kullanıyordu → gerçek emir yanlış adrese giderdi). is_paper=true → TESTNET.
         let base_url = match (is_spot, is_paper) {
-            (true, _) => "https://binance.com",
-            (false, true) => "https://binancefuture.com",
-            (false, false) => "https://binance.com",
+            (true,  false) => "https://api.binance.com",        // spot canlı
+            (true,  true)  => "https://testnet.binance.vision", // spot testnet
+            (false, false) => "https://fapi.binance.com",       // futures canlı
+            (false, true)  => "https://testnet.binancefuture.com", // futures testnet
         }.to_owned();
 
         Self {
@@ -77,6 +80,18 @@ impl BinanceFuturesExecutor {
         let path = if self.is_spot { "/api/v3/order" } else { "/fapi/v1/order" };
         let params = vec![format!("symbol={}", symbol), format!("side={}", side), "type=MARKET".to_owned(), format!("quantity={}", self.format_f64(qty))];
         self.signed_request(Method::POST, path, params).await
+    }
+
+    /// 🎚️ Futures sembol kaldıracını borsada ayarlar (POST /fapi/v1/leverage). Pozisyon
+    /// AÇMADAN ÖNCE çağrılmalı — yoksa borsa hesap-default kaldıracını kullanır ve sizing
+    /// varsayımıyla (notional = teminat × kaldıraç) uyuşmaz. İdempotent: aynı değeri tekrar
+    /// set etmek zararsız (Binance mevcut kaldıracı döndürür). `leverage` 1-125 arası tamsayı.
+    /// SPOT'ta kaldıraç kavramı yok → no-op (`Value::Null`). is_paper=true ise testnet'e gider.
+    pub async fn set_leverage(&self, symbol: &str, leverage: u32) -> Result<Value> {
+        if self.is_spot { return Ok(Value::Null); }
+        let lev = leverage.clamp(1, 125);
+        let params = vec![format!("symbol={}", symbol), format!("leverage={}", lev)];
+        self.signed_request(Method::POST, "/fapi/v1/leverage", params).await
     }
 
     pub async fn place_post_only_limit_order(&self, symbol: &str, side: &str, qty: f64, price: f64) -> Result<Value> {
@@ -350,6 +365,18 @@ impl BinanceFuturesExecutor {
         Ok(resp.as_array().cloned().unwrap_or_default())
     }
 
+    /// Borsadaki TÜM açık futures pozisyonlarını döndürür (yalnız positionAmt != 0).
+    /// Restart reconciliation için — borsa otoritedir. Spot → boş (spot'ta "pozisyon" =
+    /// bakiye, ayrı bir model; futures-only reconcile).
+    pub async fn get_all_positions(&self) -> Result<Vec<Value>> {
+        if self.is_spot { return Ok(vec![]); }
+        let resp = self.signed_request(Method::GET, "/fapi/v2/positionRisk", vec![]).await?;
+        Ok(resp.as_array().cloned().unwrap_or_default().into_iter()
+            .filter(|p| p.get("positionAmt").and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok()).map(|a| a.abs() > 0.0).unwrap_or(false))
+            .collect())
+    }
+
     pub async fn close_position(&self, symbol: &str) -> Result<Value> {
         let pos = self.get_positions(symbol).await?;
         let qty = pos.first().and_then(|p| p["positionAmt"].as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
@@ -470,5 +497,17 @@ mod tests {
         assert_eq!(BinanceFuturesExecutor::spread_bps(0.0, 0.0), 0.0);  // kota yok
         assert_eq!(BinanceFuturesExecutor::spread_bps(100.0, 100.0), 0.0); // ask==bid
         assert_eq!(BinanceFuturesExecutor::spread_bps(100.0, 99.0), 0.0);  // ask<bid (bozuk)
+    }
+
+    /// B#3a regresyon kilidi: base_url DOĞRU Binance API host'larına çözülmeli
+    /// (eski hatalı `binance.com`/`binancefuture.com` gerçek emri yanlış adrese gönderirdi).
+    #[test]
+    fn base_url_resolves_to_correct_binance_hosts() {
+        let mk = |paper: bool, market: &str|
+            BinanceFuturesExecutor::new_for_market("k".into(), "s".into(), paper, market).base_url;
+        assert_eq!(mk(false, "futures"), "https://fapi.binance.com");        // futures canlı
+        assert_eq!(mk(true,  "futures"), "https://testnet.binancefuture.com"); // futures testnet
+        assert_eq!(mk(false, "spot"),    "https://api.binance.com");          // spot canlı
+        assert_eq!(mk(true,  "spot"),    "https://testnet.binance.vision");   // spot testnet
     }
 }

@@ -642,7 +642,10 @@ mod tuning_tests {
 
 // ── Faz 1: impl Engine sorumluluk modüllerine bölündü (davranış birebir) ──
 mod loop_core;
-pub(crate) mod xs_live; // kesitsel relatif-güç adanmış mod (market-nötr long/short kitabı)
+pub(crate) mod book_core; // kesitsel kitap ORTAK motoru (momentum⊕carry DRY çekirdek)
+pub(crate) mod xs_live; // kesitsel relatif-güç (momentum) adanmış mod — book_core ince sarmalayıcı
+pub(crate) mod carry_live; // funding-carry adanmış mod — book_core ince sarmalayıcı
+pub(crate) mod blend_live; // iki-faktör z-score harman adanmış mod (Faz 2) — book_core ince sarmalayıcı
 pub(crate) mod graded_entry; // kademeli giriş (XS hariç): rejime-göre pyramiding/averaging, HTF-teyitli
 mod edge_regime;
 mod infra_fleet;
