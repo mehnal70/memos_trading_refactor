@@ -775,26 +775,35 @@ impl Engine {
                         ));
                     }
 
-                    // Kritik uyarı: SL emri BEKLENİYORDU (pos_sl>0) ama başarısız → pozisyon korumasız → emergency.
+                    // Borsa-tarafı SL emri BEKLENİYORDU (pos_sl>0) ama başarısız.
+                    // Tipik kök: Binance -4120 ("Order type not supported for this endpoint")
+                    // — bazı hesaplar/bölgeler STOP_MARKET/TAKE_PROFIT_MARKET'i /fapi/v1/order'dan
+                    // kabul etmez. ESKİ davranış: emergency-close + return → pozisyon İÇSEL KAYDEDİLMEDEN
+                    // (804+ atlanırdı) kapanıyordu = her girişte aç→kapa CHURN (komisyon sızıntısı) +
+                    // muhasebe kopukluğu (equity/closed_count/TRADE log güncellenmiyordu, TUI gerçeği
+                    // göstermiyordu). YENİ: pozisyonu KORU, çıkışı bot-tarafı yönet — check_exit_conditions
+                    // her cycle SL/TP/trailing'i fiyattan tetikler → close_paper_position gerçek MARKET
+                    // ile kapatır (positions_close.rs). Tradeoff: borsa-tarafı koruma yoksa bot kesintisinde
+                    // pozisyon korumasız kalır; sürekli watchdog + bot-tarafı izleme ile kabul edilebilir
+                    // ve her durumda churn'den iyidir. [[project_one_position_per_symbol]]
                     if pos_sl > 0.0 && sl_res.is_err() {
                         if let Ok(mut st2) = state.lock() {
                             st2.push_alert(
-                                "LIVE-EMERGENCY",
-                                crate::robot::infra::telegram_notifier::Severity::Critical,
+                                "LIVE-PROTECT-FALLBACK",
+                                crate::robot::infra::telegram_notifier::Severity::Warning,
                                 format!(
-                                    "[LIVE-EMERGENCY] {} SL emri verilemedi → pozisyon acil kapatılıyor",
-                                    symbol,
+                                    "[LIVE-PROTECT-FALLBACK] {} borsa SL emri verilemedi ({:?}) → SL/TP bot-tarafı yönetilecek (pozisyon korunuyor)",
+                                    symbol, sl_res.as_ref().err(),
                                 ),
                             );
                             st2.guardian.repair_log.push_back(format!(
-                                "[{}] live SL hatası: {} emergency close",
+                                "[{}] borsa SL hatası: {} → bot-tarafı yönetim (churn fix)",
                                 chrono::Local::now().format("%H:%M:%S"), symbol,
                             ));
                             while st2.guardian.repair_log.len() > 100 { st2.guardian.repair_log.pop_front(); }
                         }
-                        // Hemen pozisyonu kapat — koruma sağlanamadı.
-                        let _ = executor.close_position(symbol).await;
-                        return;
+                        // NOT: emergency-close + return KALDIRILDI → pozisyon normal kaydedilir (804+)
+                        // ve bot-tarafı exit devreye girer (churn + izleme kopukluğu çözümü).
                     }
                 }
             }
