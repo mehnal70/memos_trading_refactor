@@ -29,6 +29,12 @@ pub enum MemosTradingError {
     #[error("API Bağlantı Hatası: {0}")]
     Api(String),
 
+    /// Borsa bizi SİSTEMİK reddetti: bölge/legal bloğu (HTTP 451), WAF/Cloudflare (403),
+    /// geçersiz key-IP-izin (-2015), IP auto-ban/rate-limit (-1003/429/418). Normal emir
+    /// reddinden (bakiye, lot/notional, -4120 endpoint) AYRI — devre-kesici tetikleyicisi.
+    #[error("Borsa Bloğu (bölge/IP/izin): {0}")]
+    ApiBlocked(String),
+
     #[error("Veri Çözümleme (Serde) Hatası: {0}")]
     Serde(#[from] serde_json::Error),
 
@@ -49,6 +55,13 @@ pub enum MemosTradingError {
 
     #[error("Bilinmeyen Adli Hata: {0}")]
     Unknown(String),
+}
+
+impl MemosTradingError {
+    /// Borsa bizi SİSTEMİK reddetti mi (bölge/IP/izin/IP-ban)? `true` → canlı emir
+    /// denemesi cooldown boyunca durdurulmalı (API'yi dövme = IP-ban tırmanışı).
+    /// Normal emir reddi (`Api`) `false` döner.
+    pub fn is_exchange_block(&self) -> bool { matches!(self, Self::ApiBlocked(_)) }
 }
 
 pub type Result<T> = std::result::Result<T, MemosTradingError>;

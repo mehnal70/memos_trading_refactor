@@ -69,9 +69,27 @@ impl BinanceFuturesExecutor {
 
         let resp = self.client.request(method, &url).header("X-MBX-APIKEY", &self.api_key).send().await?;
         if !resp.status().is_success() {
-            return Err(MemosTradingError::Api(format!("Binance Error: {}", resp.text().await?)));
+            let status = resp.status().as_u16();
+            let body = resp.text().await?;
+            // 🌍 Sistemik blok (bölge/IP/izin) mi normal emir reddi mi? Devre-kesici
+            // yalnız sistemik blokta tripler — ApiBlocked olarak ayrı sınıfla.
+            if Self::is_exchange_block(status, &body) {
+                return Err(MemosTradingError::ApiBlocked(format!("HTTP {} · {}", status, body)));
+            }
+            return Err(MemosTradingError::Api(format!("Binance Error: HTTP {} · {}", status, body)));
         }
         Ok(resp.json().await?)
+    }
+
+    /// Borsa-tarafı SİSTEMİK red (bölge/IP/izin/IP-ban) imzası mı? Normal emir reddinden
+    /// (yetersiz bakiye, lot/notional/-4120 endpoint) ayırır → devre-kesici yalnız bunda
+    /// tripler. HTTP 451 (bölge/legal), 403 (WAF/Cloudflare), 401 (kimlik), 418/429
+    /// (IP auto-ban/rate-limit); body kodu -2015 (geçersiz key-IP-izin), -1003 (WAF/IP-ban).
+    /// Saf; I/O yok → birim test edilebilir.
+    pub fn is_exchange_block(status: u16, body: &str) -> bool {
+        matches!(status, 401 | 403 | 418 | 429 | 451)
+            || body.contains("-2015")
+            || body.contains("-1003")
     }
 
     // --- TÜM FONKSİYONLARIN GÜNCEL HALİ ---
@@ -509,5 +527,22 @@ mod tests {
         assert_eq!(mk(true,  "futures"), "https://testnet.binancefuture.com"); // futures testnet
         assert_eq!(mk(false, "spot"),    "https://api.binance.com");          // spot canlı
         assert_eq!(mk(true,  "spot"),    "https://testnet.binance.vision");   // spot testnet
+    }
+
+    /// Bölge/IP/izin bloğu (sistemik) → true; normal emir reddi (-4120/-2010/yetersiz
+    /// bakiye, HTTP 400) → false. Devre-kesici yanlış tripleyip canlıyı durdurmasın.
+    #[test]
+    fn exchange_block_classifies_systemic_vs_order_reject() {
+        // Sistemik bloklar → true
+        assert!(BinanceFuturesExecutor::is_exchange_block(451, "")); // bölge/legal
+        assert!(BinanceFuturesExecutor::is_exchange_block(403, "blocked")); // WAF
+        assert!(BinanceFuturesExecutor::is_exchange_block(418, "")); // IP auto-ban
+        assert!(BinanceFuturesExecutor::is_exchange_block(429, "")); // rate-limit
+        assert!(BinanceFuturesExecutor::is_exchange_block(401, r#"{"code":-2015,"msg":"Invalid API-key, IP, or permissions"}"#));
+        assert!(BinanceFuturesExecutor::is_exchange_block(200, r#"{"code":-1003,"msg":"Too many requests; IP banned"}"#));
+        // Normal emir reddi (HTTP 400, -41xx/-20xx) → false (pozisyon yolu etkilenmez)
+        assert!(!BinanceFuturesExecutor::is_exchange_block(400, r#"{"code":-4120,"msg":"Order type not supported"}"#));
+        assert!(!BinanceFuturesExecutor::is_exchange_block(400, r#"{"code":-2010,"msg":"Account has insufficient balance"}"#));
+        assert!(!BinanceFuturesExecutor::is_exchange_block(400, "Filter failure: LOT_SIZE"));
     }
 }

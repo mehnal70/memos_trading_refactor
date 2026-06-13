@@ -552,6 +552,20 @@ impl Engine {
         let mut new_pos = new_pos;
         if let Some(executor) = live_executor.as_ref() {
             let side = if is_long { "BUY" } else { "SELL" };
+            // 🌍 Bölge/IP bloğu devre-kesici: borsa SİSTEMİK reddediyorsa (HTTP 451/403/-2015/
+            // -1003) cooldown boyunca canlı emir DENEME — API'yi dövmeyi kes (IP-ban tırmanışını
+            // önle). dry_run değil gerçek-canlıda anlamlı (LIVE_DRY_RUN'da emir gitmez zaten,
+            // gate'i atla → paper akışı tam koşsun). Süre dolunca buradan geçen ilk emir
+            // auto-probe olur. [[project_one_position_per_symbol]]
+            if !live_dry_run && Self::live_block_active(state) {
+                if let Ok(mut st2) = state.lock() {
+                    st2.push_log(format!(
+                        "🌍 [LIVE-BLOCK] {} {} → borsa bloğu aktif, canlı emir atlandı (cooldown)",
+                        symbol, side,
+                    ));
+                }
+                return;
+            }
             if alloc_capital > live_max_notional {
                 if let Ok(mut st2) = state.lock() {
                     st2.push_log(format!(
@@ -624,6 +638,8 @@ impl Engine {
                                 symbol, side, lev, e,
                             ));
                         }
+                        // 🌍 Sistemik blok (bölge/IP/izin) ilk bu çağrıda görünebilir → devre-kesici.
+                        if e.is_exchange_block() { Self::trip_live_block(state, symbol, "set_leverage"); }
                         return;
                     }
                 }
@@ -653,6 +669,7 @@ impl Engine {
                                             symbol, side, me,
                                         ));
                                     }
+                                    if me.is_exchange_block() { Self::trip_live_block(state, symbol, "market_order(fallback)"); }
                                 })
                             } else {
                                 if let Ok(mut st2) = state.lock() {
@@ -673,12 +690,16 @@ impl Engine {
                                 symbol, side, e,
                             ));
                         }
+                        if e.is_exchange_block() { Self::trip_live_block(state, symbol, "market_order"); }
                     })
                 };
 
                 // Giriş emri başarısız (ve fallback yok / fallback de patladı) → paper'ı da çalıştırma.
                 let resp = match entry_resp { Ok(r) => r, Err(()) => return };
                 live_order_id = resp.get("orderId").map(|v| v.to_string());
+                // 🌍 Auto-probe başarısı: blok cooldown'u sonrası buradan geçen ilk emir GEÇTİ →
+                // devre-kesiciyi kapat (bayrak set değilse no-op).
+                Self::clear_live_block(state, symbol);
 
                 // 🧮 Maker dolum reconciliation: gerçek fill fiyatı entry'den saparsa
                 // pozisyonu, SL/TP'yi ve trailing'i fill fiyatından yeniden hesapla
@@ -804,6 +825,11 @@ impl Engine {
                         }
                         // NOT: emergency-close + return KALDIRILDI → pozisyon normal kaydedilir (804+)
                         // ve bot-tarafı exit devreye girer (churn + izleme kopukluğu çözümü).
+                        // 🌍 SL reddi sistemik blok (-2015/451) ise (yalnız -4120 endpoint değil) →
+                        // devre-kesici: pozisyon korunur ama YENİ canlı girişler cooldown'da durur.
+                        if sl_res.as_ref().err().map(|e| e.is_exchange_block()).unwrap_or(false) {
+                            Self::trip_live_block(state, symbol, "place_protection_orders");
+                        }
                     }
                 }
             }
@@ -927,6 +953,63 @@ impl Engine {
         state.lock().ok().map(|st| {
             st.config.blocked_symbols.iter().any(|b| b.eq_ignore_ascii_case(symbol))
         }).unwrap_or(false)
+    }
+
+    /// 🌍 Bölge/IP bloğu devre-kesici AKTİF mi? `Some(until)` ve `now < until` → canlı emir
+    /// denemesi atlanmalı. Süre dolduysa (`now >= until`) → `false` döner = auto-probe penceresi
+    /// (tek deneme yapılır; başarı `clear_live_block`, blok `trip_live_block` ile yenilenir).
+    /// Lock alınamazsa false (savunmacı: kapı açık).
+    fn live_block_active(state: &Arc<Mutex<AppState>>) -> bool {
+        state.lock().ok()
+            .and_then(|st| st.guardian.live_block_until)
+            .map(|until| chrono::Utc::now() < until)
+            .unwrap_or(false)
+    }
+
+    /// 🌍 Devre-kesiciyi tetikle: `live_block_until`'i cooldown kadar ileri mühürle. İlk
+    /// triplemede (ya da süresi dolmuş blok yenilenirken) TEK Critical alarm + repair_log —
+    /// zaten aktif bloktaysa sessiz (per-symbol/cycle spam yok). `cooldown==0` → devre-kesici
+    /// kapalı (no-op). Paper akışı etkilenmez; yalnız canlı emir denemesi durur.
+    fn trip_live_block(state: &Arc<Mutex<AppState>>, symbol: &str, reason: &str) {
+        if let Ok(mut st) = state.lock() {
+            let cooldown = st.tuning.live_block_cooldown_secs;
+            if cooldown == 0 { return; }
+            let was_active = st.guardian.live_block_until
+                .map(|u| chrono::Utc::now() < u).unwrap_or(false);
+            st.guardian.live_block_until =
+                Some(chrono::Utc::now() + chrono::Duration::seconds(cooldown as i64));
+            if !was_active {
+                st.push_alert(
+                    "LIVE-BLOCK",
+                    crate::robot::infra::telegram_notifier::Severity::Critical,
+                    format!(
+                        "[LIVE-BLOCK] Borsa sistemik reddetti ({} · {}) → canlı emir {}sn DURDURULDU (paper akışı sürüyor). Süre sonunda auto-probe.",
+                        symbol, reason, cooldown,
+                    ),
+                );
+                st.guardian.repair_log.push_back(format!(
+                    "[{}] LIVE-BLOCK: {} ({}) → canlı emir {}sn durdu (bölge/IP/izin)",
+                    chrono::Local::now().format("%H:%M:%S"), symbol, reason, cooldown,
+                ));
+                while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
+            }
+        }
+    }
+
+    /// 🌍 Auto-probe başarısı: blok süresi dolmuşken bir emir GEÇERSE devre-kesiciyi kapat
+    /// (`live_block_until=None`) + recovery log. Yalnız bayrak set ise iş yapar (no-op aksi halde).
+    fn clear_live_block(state: &Arc<Mutex<AppState>>, symbol: &str) {
+        if let Ok(mut st) = state.lock() {
+            if st.guardian.live_block_until.is_some() {
+                st.guardian.live_block_until = None;
+                st.guardian.repair_log.push_back(format!(
+                    "[{}] LIVE-BLOCK temizlendi: {} auto-probe geçti → canlı emir yeniden açık",
+                    chrono::Local::now().format("%H:%M:%S"), symbol,
+                ));
+                while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
+                st.push_log(format!("✅ [LIVE-BLOCK→CLEAR] {} borsa yeniden kabul ediyor", symbol));
+            }
+        }
     }
 }
 

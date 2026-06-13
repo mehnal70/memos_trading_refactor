@@ -256,6 +256,11 @@ pub struct GuardianShield {
     pub live_pipeline: Arc<RwLock<PipelineStatus>>,
     /// Otonom onarım (auto-fix) günlüğü — son N kayıt UI'a yansır.
     pub repair_log: VecDeque<String>,
+    /// 🌍 Bölge/IP bloğu devre-kesici: borsa SİSTEMİK reddederse (HTTP 451/403/-2015/-1003)
+    /// `Some(until)` mühürlenir → bu ana kadar canlı emir denemesi yapılmaz (API'yi dövme).
+    /// Süre dolunca tek auto-probe denenir; geçerse `None`'a döner, yine bloklanırsa yenilenir.
+    /// `None` (default) → blok yok. Yalnız live yolu okur/yazar; paper akışı etkilenmez.
+    pub live_block_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl GuardianShield {
@@ -461,6 +466,7 @@ impl AppState {
             db_conn: crate::persistence::open_db(&config.db_path).ok(),
             live_pipeline: Arc::new(RwLock::new(PipelineStatus::new())),
             repair_log: VecDeque::with_capacity(100),
+            live_block_until: None,
         };
 
         // Adli Tamirat Günlüğü

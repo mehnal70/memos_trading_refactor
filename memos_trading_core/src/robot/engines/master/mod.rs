@@ -346,6 +346,12 @@ pub struct RuntimeTuning {
     /// `SEED_STRATEGY_PRIORITY` (0/false/off → eski davranış: ScalpSwing her sembolde önce).
     /// [[project_edge_scan]] [[feedback_autonomy_first]].
     pub seed_strategy_priority: bool,
+    /// 🌍 Bölge/IP bloğu devre-kesici cooldown (sn): borsa SİSTEMİK reddederse (HTTP 451/403/
+    /// 401/418/429, -2015/-1003) canlı emir denemesi bu süre boyunca durdurulur — API'yi
+    /// dövmeyi kes (IP-ban tırmanışı önle), tek Critical alarm. Süre dolunca tek deneme
+    /// (auto-probe): geçerse devre kapanır, yine bloklanırsa cooldown yenilenir. Paper akışı
+    /// ETKİLENMEZ. Default 300. Env `LIVE_BLOCK_COOLDOWN_SECS` (0 → devre-kesici kapalı).
+    pub live_block_cooldown_secs: u64,
 }
 
 impl Default for RuntimeTuning {
@@ -389,6 +395,7 @@ impl Default for RuntimeTuning {
             backfill_enabled: true,     // veri-doğruluğu (gap'i doldur); bounded → güvenli
             backfill_max_requests: 50,  // 50×1000 = ~50k bar/cycle; büyük gap cycle'larda yakınsar
             seed_strategy_priority: true, // keşfedilmiş edge'i olan sembol o stratejiyle işlem görür (ScalpSwing baypas etmez)
+            live_block_cooldown_secs: 300, // bölge/IP bloğunda 5dk canlı emir durdur (auto-probe ile aç)
         }
     }
 }
@@ -465,6 +472,7 @@ impl RuntimeTuning {
             backfill_max_requests: env_parse("BACKFILL_MAX_REQUESTS", d.backfill_max_requests).max(1),
             // Default açık (0/false/off → kapat) — keşfedilmiş edge sembolde ScalpSwing'i baypas etmesin.
             seed_strategy_priority: !matches!(std::env::var("SEED_STRATEGY_PRIORITY").ok().as_deref(), Some("0") | Some("false") | Some("off")),
+            live_block_cooldown_secs: env_parse("LIVE_BLOCK_COOLDOWN_SECS", d.live_block_cooldown_secs),
         }
     }
 
