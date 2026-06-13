@@ -71,6 +71,14 @@ pub struct BacktestConfig {
     /// [[project_autonomy_backlog]].
     #[serde(default)]
     pub direction: DirectionMode,
+    /// 🧭 Rejim-STİL uyum kapısı (A/B kaldıracı, opt-in D): strateji stili (trend vs
+    /// mean-reversion) mevcut rejimle uyumlu değilse giriş elenir → canlı regular-yol
+    /// `regime_strategy_fit` kapısını AYNALAR (tek-kaynak `strategy_fits_regime`). Trend-
+    /// stratejisi yatayda / MR trendde / her ikisi HighVol'de açmaz. `false` (default) →
+    /// kapı yok (backward-compat: screener/optimizer/WF/eski testler). A/B = bu sembolde
+    /// gate-OFF vs gate-ON PnL/PF. [[project_regular_path_regime_fit]].
+    #[serde(default)]
+    pub regime_style_fit: bool,
     /// 📐 ATR-relatif SL çarpanı: `Some(m)` ise SL mesafesi = `m × ATR%` (14-periyot),
     /// sabit `stop_loss_pct` yerine. Volatiliteye uyarlı: yüksek-vol'de geniş stop
     /// (gürültü stop-out'unu eler), düşük-vol'de sıkı. `atr_tp_mult` ile birlikte aktif.
@@ -519,11 +527,18 @@ impl Backtester {
             _ => return None, // Hold/err ya da LongOnly'de Sell → giriş yok
         };
 
-        // 2) RegimeDirectional: rejim yönü niyeti teyit etmeli (ters-trend ele).
-        //    Tek-kaynak helper → canlı `regime_directional` kapısıyla aynı kural.
-        if self.config.direction == DirectionMode::RegimeDirectional {
+        // 2) Rejim kapıları (yön + stil) — gerekiyorsa rejim TEK KEZ hesaplanır.
+        //    Tek-kaynak helper'lar → canlı kapılarla (regime_directional / regime_strategy_fit) aynı kural.
+        if self.config.direction == DirectionMode::RegimeDirectional || self.config.regime_style_fit {
             let regime = crate::robot::logic::market_regime::classify_market_regime(window);
-            if !crate::robot::logic::market_regime::regime_confirms_direction(regime, want_long) {
+            // 2a) RegimeDirectional: rejim yönü niyeti teyit etmeli (ters-trend ele).
+            if self.config.direction == DirectionMode::RegimeDirectional
+                && !crate::robot::logic::market_regime::regime_confirms_direction(regime, want_long) {
+                return None;
+            }
+            // 2b) Stil-fit: strateji stili rejimle uyumlu olmalı (trend-strateji yatayda açmaz vb.).
+            if self.config.regime_style_fit
+                && !crate::robot::logic::market_regime::strategy_fits_regime(strat.name(), regime) {
                 return None;
             }
         }
@@ -591,6 +606,7 @@ mod edge_filter_tests {
             orderbook_sim: None,
             regime_gate: RegimeGate::Off,
             direction: DirectionMode::LongOnly,
+            regime_style_fit: false,
             atr_sl_mult: None,
             atr_tp_mult: None,
             vol_target_pct: None,

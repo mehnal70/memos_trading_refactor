@@ -123,6 +123,7 @@ fn track_config(symbol: &str, row: &EdgeRow, ab: &AbConfig) -> BacktestConfig {
         orderbook_sim: None,
         regime_gate: RegimeGate::Off,
         direction: ab.direction,
+        regime_style_fit: false,
         atr_sl_mult: None,
         atr_tp_mult: None,
         vol_target_pct: None,

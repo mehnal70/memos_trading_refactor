@@ -44,6 +44,7 @@ fn cfg(symbol: &str, interval: &str, ob: Option<&str>) -> BacktestConfig {
         orderbook_sim: ob.map(|s| s.to_string()), // ← TEK değişken
         regime_gate: Default::default(),
         direction: Default::default(),
+        regime_style_fit: false,
         atr_sl_mult: None, atr_tp_mult: None, vol_target_pct: None,
     }
 }

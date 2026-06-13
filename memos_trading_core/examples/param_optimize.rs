@@ -81,6 +81,7 @@ fn base_cfg(symbol: &str, interval: &str, strategy: &str) -> BacktestConfig {
         orderbook_sim: None,
         regime_gate: Default::default(),
         direction: Default::default(),
+        regime_style_fit: false,
         atr_sl_mult: None,
         atr_tp_mult: None,
         vol_target_pct: None,

@@ -219,6 +219,56 @@ pub fn regime_confirms_direction(regime: crate::evolution::MarketRegime, is_long
     }
 }
 
+/// Strateji STİL sınıfı — rejim-uyum kapısının (opt-in D) girdisi. ScalpSwing'in
+/// scalp/swing-rejim uyumunun (positions.rs) regular-strateji yolundaki karşılığı:
+/// orada kanal (scalp/swing) rejimle eşlenir, burada adlandırılmış stratejinin stili.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategyStyle {
+    /// Trend-takip: yönlü trend rejiminde açmalı (Ranging/LowVol'de gürültüye düşer).
+    Trend,
+    /// Range/osilatör (mean-reversion): yatay rejimde açmalı (trendde ters-taraf yakalar).
+    MeanReversion,
+    /// Yapısal/karışık (PriceAction/ICT/SMC/funding/ensemble) → tek rejime bağlanmaz, gate uygulanmaz.
+    Neutral,
+}
+
+/// Adlandırılmış stratejinin stilini döndürür (case-insensitive, alias-toleranslı).
+/// İsimler `Strategy::name()` çıktıları + registry alias'ları (BB↔BOLLINGER_BANDS,
+/// STOCH_RSI↔STOCHASTIC_RSI, EMA↔EMA_CROSSOVER). Bilinmeyen → Neutral (gate'lenmez =
+/// güvenli default, sıfır regresyon). Saf → testli.
+pub fn strategy_style(name: &str) -> StrategyStyle {
+    use StrategyStyle::*;
+    let n = name.trim().to_ascii_uppercase();
+    match n.as_str() {
+        "SUPERTREND" | "DONCHIAN" | "MA_CROSSOVER" | "EMA_CROSSOVER" | "EMA"
+        | "MACD" | "ADX" => Trend,
+        "RSI" | "STOCH_RSI" | "STOCHASTIC_RSI" | "CCI" | "BB" | "BOLLINGER_BANDS"
+        | "WILLIAMS" | "STOCHASTIC" => MeanReversion,
+        // PRICE_ACTION, ICT_*, SMC, FUNDING_CONTRARIAN, ENSEMBLE, default → yapısal/nötr
+        _ => Neutral,
+    }
+}
+
+/// Strateji stili mevcut rejimle uyumlu mu (opt-in kapı). Trend-stratejisi yönlü trend
+/// rejiminde, mean-reversion yatay/düşük-vol rejimde aday. `HighVolatility` → trend+MR
+/// İKİSİ DE RED (kaos savunması, ScalpSwing ile tutarlı). `Unknown` → her ikisi de OK
+/// (belirsizken stratejinin kararına güven — RegimeDirectional'ın nötr-rejim mantığıyla
+/// aynı disiplin). `Neutral` stil → her zaman OK. Saf → testli. [[project_regular_path_regime_fit]].
+pub fn strategy_fits_regime(name: &str, regime: crate::evolution::MarketRegime) -> bool {
+    use crate::evolution::MarketRegime as R;
+    match strategy_style(name) {
+        StrategyStyle::Neutral => true,
+        StrategyStyle::Trend => matches!(
+            regime,
+            R::StrongUptrend | R::WeakUptrend | R::StrongDowntrend | R::WeakDowntrend | R::Unknown,
+        ),
+        StrategyStyle::MeanReversion => matches!(
+            regime,
+            R::Ranging | R::LowVolatility | R::Unknown,
+        ),
+    }
+}
+
 /// Rejim başına etkin strateji setlerini döndürür.
 pub fn strategies_for_adx_regime(regime: AdxRegime) -> &'static [&'static str] {
     match regime {
@@ -330,6 +380,50 @@ mod regime_classify_tests {
         assert!(!regime_confirms_direction(R::WeakUptrend, false));
         assert!(regime_confirms_direction(R::StrongDowntrend, false));
         assert!(regime_confirms_direction(R::HighVolatility, false), "nötr rejim short'u teyit eder");
+    }
+
+    #[test]
+    fn strategy_style_classification() {
+        use StrategyStyle::*;
+        // Trend-takip (alias dahil)
+        for s in ["SUPERTREND", "supertrend", "DONCHIAN", "MA_CROSSOVER", "EMA_CROSSOVER", "EMA", "MACD"] {
+            assert_eq!(strategy_style(s), Trend, "{s} trend olmalı");
+        }
+        // Mean-reversion (Strategy::name() çıktıları + registry alias'ları)
+        for s in ["RSI", "STOCHASTIC_RSI", "STOCH_RSI", "CCI", "BOLLINGER_BANDS", "BB"] {
+            assert_eq!(strategy_style(s), MeanReversion, "{s} MR olmalı");
+        }
+        // Yapısal/nötr (gate'lenmez)
+        for s in ["PRICE_ACTION", "ICT_FVG", "ICT_OB", "ICT_COMPOSITE", "SMC", "FUNDING_CONTRARIAN", "ENSEMBLE", "BİLİNMEYEN"] {
+            assert_eq!(strategy_style(s), Neutral, "{s} nötr olmalı");
+        }
+        // MACD, MA_CROSSOVER'a karışmamalı (substring tuzağı)
+        assert_eq!(strategy_style("MACD"), Trend);
+        assert_eq!(strategy_style("MA_CROSSOVER"), Trend);
+    }
+
+    #[test]
+    fn strategy_fits_regime_gate() {
+        use crate::evolution::MarketRegime as R;
+        // Trend-stratejisi: trend rejiminde OK, Ranging/LowVol/HighVol'de RED.
+        assert!(strategy_fits_regime("SUPERTREND", R::StrongUptrend));
+        assert!(strategy_fits_regime("SUPERTREND", R::WeakDowntrend));
+        assert!(!strategy_fits_regime("SUPERTREND", R::Ranging), "trend-strateji yatayda açmamalı");
+        assert!(!strategy_fits_regime("SUPERTREND", R::LowVolatility));
+        assert!(!strategy_fits_regime("SUPERTREND", R::HighVolatility), "HighVol kaos → trend RED");
+        // Mean-reversion: yatay/düşük-vol'de OK, trend/HighVol'de RED.
+        assert!(strategy_fits_regime("RSI", R::Ranging));
+        assert!(strategy_fits_regime("BOLLINGER_BANDS", R::LowVolatility));
+        assert!(!strategy_fits_regime("RSI", R::StrongUptrend), "MR güçlü trendde açmamalı");
+        assert!(!strategy_fits_regime("RSI", R::HighVolatility), "HighVol kaos → MR RED");
+        // Unknown → ikisi de OK (belirsizken stratejiye güven).
+        assert!(strategy_fits_regime("SUPERTREND", R::Unknown));
+        assert!(strategy_fits_regime("RSI", R::Unknown));
+        // Nötr stil → her rejimde OK (gate'lenmez).
+        for reg in [R::StrongUptrend, R::Ranging, R::HighVolatility, R::Unknown] {
+            assert!(strategy_fits_regime("ICT_COMPOSITE", reg), "nötr stil her rejimde OK");
+            assert!(strategy_fits_regime("FUNDING_CONTRARIAN", reg));
+        }
     }
 
     #[test]

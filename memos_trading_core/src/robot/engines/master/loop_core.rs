@@ -592,6 +592,21 @@ impl Engine {
                         }
                         return;
                     }
+                    // 🧭 Rejim-STİL uyum kapısı (opt-in D): strateji stili rejimle uyumsuzsa
+                    // açma — trend-strateji (SUPERTREND) yatay rejimde, MR trendde, ikisi de
+                    // HighVol'de RED. ScalpSwing'in scalp/swing-rejim uyumunun regular-yol
+                    // ikizi (tek-kaynak `strategy_fits_regime`). Backtest A/B'siyle aynı kural.
+                    if tuning.regime_strategy_fit
+                        && !crate::robot::logic::market_regime::strategy_fits_regime(&strategy_name, regime)
+                    {
+                        if log_throttle_should_emit(symbol, "regime_style_block", 60) {
+                            push_state_log(state, format!(
+                                "🧭 {} {} ⇒ REDDEDİLDİ (strateji-stili rejimle uyumsuz, strat={} rejim={})",
+                                symbol, signal_label, strategy_name, regime.as_str(),
+                            ));
+                        }
+                        return;
+                    }
                     if edge < edge_threshold {
                         // Spam'i kısmak için: yalnız eşiğe yakın aday (edge≥floor) VE per-sembol
                         // 60sn throttle. Aksi halde choppy rejimde aynı sembol (örn. seed TRX

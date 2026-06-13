@@ -216,6 +216,7 @@ impl Engine {
                     orderbook_sim: orderbook_sim.clone(),
                     regime_gate: Default::default(),
                     direction: Default::default(),
+                    regime_style_fit: false, // otonom backtest yolu nötr; A/B ayrı testte ölçülür
                     atr_sl_mult: None,
                     atr_tp_mult: None,
                     vol_target_pct: None,

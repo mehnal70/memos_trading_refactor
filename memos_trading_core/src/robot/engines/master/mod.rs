@@ -316,6 +316,13 @@ pub struct RuntimeTuning {
     /// teyit shorting'i kâra çeviren bileşen. Default false (opt-in; WF+slippage doğrulaması
     /// önce). Env `REGIME_DIRECTIONAL`. [[project_autonomy_backlog]] [[project_adaptive_regime]].
     pub regime_directional: bool,
+    /// 🧭 Rejim-STİL uyum kapısı (opt-in D): regular-strateji yolunda strateji stili (trend
+    /// vs mean-reversion) mevcut rejimle uyumlu değilse açılış elenir — trend-stratejisi
+    /// (SUPERTREND) yatay rejimde, MR trend rejiminde açmaz; her ikisi HighVol'de RED.
+    /// ScalpSwing'in scalp/swing-rejim uyumunun regular-yol karşılığı (tek-kaynak
+    /// `strategy_fits_regime`). Default false (opt-in; backtest A/B doğrulaması önce —
+    /// `BACKTEST_REGIME_STYLE_FIT`). Env `REGIME_STRATEGY_FIT`. [[project_regular_path_regime_fit]].
+    pub regime_strategy_fit: bool,
     /// 🩺 Veri-sağlık kapısı (Faz 3): otonom işler (screener pool, backtest) bu eşikleri
     /// geçmeyen sembol×interval'i atlar → bayat/sparse veride yanıltıcı verdikt yok.
     /// `data_gate_enabled=false` (default) → kapı kapalı (sıfır regresyon). Açıkken
@@ -388,6 +395,7 @@ impl Default for RuntimeTuning {
             reentry_cooldown_secs: 0,
             regime_adaptive_pctl: None,
             regime_directional: false,
+            regime_strategy_fit: false,
             data_gate_enabled: false,   // opt-in (sıfır regresyon); açınca bayat/sparse elenir
             data_min_rows: 100,
             data_max_gap_pct: 90.0,     // gevşek (mevcut veri ~%22-49 gappy); Faz 2 sonrası sık
@@ -463,6 +471,7 @@ impl RuntimeTuning {
                 .and_then(|s| s.parse::<f64>().ok())
                 .filter(|p| p.is_finite() && *p > 0.0 && *p < 1.0),
             regime_directional: env_truthy("REGIME_DIRECTIONAL"),
+            regime_strategy_fit: env_truthy("REGIME_STRATEGY_FIT"),
             data_gate_enabled: env_truthy("DATA_GATE_ENABLED"),
             data_min_rows: env_parse("DATA_GATE_MIN_ROWS", d.data_min_rows),
             data_max_gap_pct: env_parse("DATA_GATE_MAX_GAP_PCT", d.data_max_gap_pct),
