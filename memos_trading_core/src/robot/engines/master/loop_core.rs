@@ -752,6 +752,20 @@ impl Engine {
         interval: &str,
         candles: &[Candle],
     ) -> bool {
+        // 🛡️ KİTAP-BACAĞI MUAFİYETİ (defense-in-depth): market-nötr kitap pozisyonları (XS momentum /
+        // funding-carry / harman) STOPSUZ kurulur ve YALNIZ kitabın rebalance/devre-kesici mantığıyla
+        // kapanır → genel SL/TP/trailing exit yolu onlara DOKUNMAMALI. Aksi halde check_exit_conditions
+        // bayat-ATR'den bir trailing HESAPLAYIP (trailing_stop=0 olsa bile) bacağı anında stop-out eder →
+        // kitap dengesi bozulur + churn + gerçek zarar (2026-06-14 BLEND canlı: −%11). candidates'tan
+        // xs_basket dışlamasının KESİN yedeği: pozisyon tag'inden tanı, yola hiç girmeden çık.
+        // [[project_blend_live_failure]]
+        let is_book_leg = state.lock().ok()
+            .and_then(|st| st.finance.live_positions.read().ok()
+                .and_then(|m| m.get(symbol).map(|p| book_core::is_book_managed_tag(&p.trade_type))))
+            .unwrap_or(false);
+        if is_book_leg {
+            return true; // tur bitti: kitap kendi exit'ini yönetir (genel trailing/SL devre dışı)
+        }
         // En taze fiyat önceliği: 1) fleet.live_price (5sn REST), 2) candle close.
         let candle_close = candles.last().map(|c| c.close).unwrap_or(0.0);
         let atr_value = Self::calc_atr(candles, 14);

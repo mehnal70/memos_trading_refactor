@@ -121,6 +121,18 @@ pub(crate) fn regime_blocks_book(regime: crate::evolution::MarketRegime) -> bool
     matches!(regime, crate::evolution::MarketRegime::HighVolatility)
 }
 
+/// SAF: pozisyonun strateji/trade_type etiketi market-nötr KİTAP bacağına mı ait (XS momentum /
+/// funding-carry / harman)? Bu pozisyonlar STOPSUZ kurulur (positions.rs SL=TP=trailing=0) ve YALNIZ
+/// kitabın rank-rebalance / portföy-devre-kesici mantığıyla kapanır → genel per-sembol exit yolu
+/// (cycle_try_close_open_position'ın SL/TP/trailing denetimi) onlara DOKUNMAMALI. Aksi halde bacak,
+/// genel trailing-stop'a (ATR'den hesaplanan) anında yakalanıp kitap dengesini bozar + churn yapar.
+/// Tek-kaynak: hem exit-yolu kapısı hem komisyon (maker) muhasebesi bunu kullanır. [[project_blend_live_failure]]
+pub(crate) fn is_book_managed_tag(tag: &str) -> bool {
+    tag == super::xs_live::XS_STRATEGY_TAG
+        || tag == super::carry_live::CARRY_STRATEGY_TAG
+        || tag == super::blend_live::BLEND_STRATEGY_TAG
+}
+
 /// SAF: açık bacakların toplam realize-olmamış PnL'i (USD) → equity yüzdesi. Portföy-düzeyi devre
 /// kesici bunu `−max_drawdown_pct` ile karşılaştırır. equity<=0 → 0 (bölme koruması). Testli.
 pub(crate) fn book_drawdown_pct(open_pnl_sum: f64, equity: f64) -> f64 {
@@ -426,6 +438,21 @@ mod book_core_tests {
         assert!(regime_blocks_book(HighVolatility), "kriz/yüksek-vol → kitap flat");
         for r in [StrongUptrend, WeakUptrend, Ranging, WeakDowntrend, StrongDowntrend, LowVolatility, Unknown] {
             assert!(!regime_blocks_book(r), "{:?} → kitap normal işler", r);
+        }
+    }
+
+    #[test]
+    fn book_managed_tag_recognizes_all_books_and_rejects_general() {
+        // Üç kitap tag'i de book-yönetimli → genel exit yolu DOKUNMAZ.
+        assert!(is_book_managed_tag(super::super::xs_live::XS_STRATEGY_TAG));      // XS_MOMENTUM
+        assert!(is_book_managed_tag(super::super::carry_live::CARRY_STRATEGY_TAG)); // FUNDING_CARRY
+        assert!(is_book_managed_tag(super::super::blend_live::BLEND_STRATEGY_TAG)); // BLEND_FACTOR
+        assert!(is_book_managed_tag("XS_MOMENTUM"));
+        assert!(is_book_managed_tag("FUNDING_CARRY"));
+        assert!(is_book_managed_tag("BLEND_FACTOR"));
+        // Genel strateji etiketleri book DEĞİL → normal SL/TP/trailing exit uygulanır.
+        for s in ["SUPERTREND", "RSI", "MACD", "SCALP_BUY", "SWING_SELL", "default", ""] {
+            assert!(!is_book_managed_tag(s), "{s} genel strateji, book-yönetimli olmamalı");
         }
     }
 
