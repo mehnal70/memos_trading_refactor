@@ -77,7 +77,12 @@ cmd_use() {
   local name; name="$(resolve_profile "${1:-}")" || { echo "❌ geçersiz profil: '${1:-}'"; echo; cmd_profiles; exit 1; }
   [ -f "$PROFILES_DIR/$name.conf" ] || { echo "❌ profil dosyası yok: $PROFILES_DIR/$name.conf"; exit 1; }
   mkdir -p data/profiles "logs/$name"
-  cat "$PROFILES_DIR/_base.conf" "$PROFILES_DIR/$name.conf" > scripts/.launch.conf
+  # _base + profil + profil-bazlı log yolları (ad'dan türetilir → her profilin trade logu ayrı).
+  {
+    cat "$PROFILES_DIR/_base.conf" "$PROFILES_DIR/$name.conf"
+    echo "TRADING_LOG_PATH=logs/$name/robotic_trading.log"
+    echo "TRADES_LOG_PATH=logs/$name/trades.jsonl"
+  } > scripts/.launch.conf
   echo "$name" > "$ACTIVE_FILE"
   local mode; mode="$(grep -m1 '^TRADING_MODE=' "$PROFILES_DIR/$name.conf" | cut -d= -f2)"
   echo "✅ aktif profil: $name [$mode]  → scripts/.launch.conf yazıldı"

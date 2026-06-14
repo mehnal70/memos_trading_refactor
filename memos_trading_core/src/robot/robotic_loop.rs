@@ -528,13 +528,20 @@ impl AppState {
             log::info!(target:"STATE_INIT", "📝 TradingLogger devre dışı (TRADING_LOGGER_DISABLE)");
             None
         } else {
+            // Profil-bazlı log yolu (TRADING_LOG_PATH / TRADES_LOG_PATH); set değilse paylaşılan default.
+            // Profiller logs/<profil>/... verir → her profilin trade logu ayrı. [[project_profiles]]
+            let log_path = std::env::var("TRADING_LOG_PATH").ok()
+                .filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "logs/robotic_trading.log".into());
+            let trades_path = std::env::var("TRADES_LOG_PATH").ok()
+                .filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "logs/trades.jsonl".into());
+            if let Some(parent) = std::path::Path::new(&log_path).parent() { let _ = std::fs::create_dir_all(parent); }
             match crate::robot::infra::logger::TradingLogger::new(
-                "logs/robotic_trading.log",
-                "logs/trades.jsonl",
+                &log_path,
+                &trades_path,
             ) {
                 Ok(lg) => {
                     log::info!(target:"STATE_INIT",
-                        "📝 TradingLogger aktif: logs/robotic_trading.log + logs/trades.jsonl");
+                        "📝 TradingLogger aktif: {} + {}", log_path, trades_path);
                     Some(Arc::new(lg))
                 }
                 Err(e) => {
