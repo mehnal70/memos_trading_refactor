@@ -5,8 +5,10 @@
 # reset_state.sh) tek ezberlenir komutun altında toplar — hepsine DELEGE eder (mantık kopyalanmaz).
 # Tüm yollar scripts/.launch.conf'u TEK KAYNAK env olarak kullanır (lib_launchconf.sh).
 #
-#   ./memos config            # başlatma parametrelerini düzenle (interaktif menü → .launch.conf)
-#   ./memos start             # ÖN PLANDA TUI (bu terminalde; .launch.conf env'iyle)
+#   ./memos profiles          # 8 profili listele (paper/live × general/xs/carry/blend), aktifi ⭐
+#   ./memos use <numara|ad>   # profili aktif et (örn: ./memos use live-blend  ya da  ./memos use 8)
+#   ./memos config            # (eski) interaktif menü → .launch.conf (profiller bunun yerini alır)
+#   ./memos start             # ÖN PLANDA TUI (bu terminalde; aktif profille)
 #   ./memos up                # 7/24 ARKA PLAN: tmux TUI + watchdog (ölü/hung'da auto-restart)
 #   ./memos down              # watchdog + motoru durdur
 #   ./memos restart           # down + up
@@ -35,7 +37,54 @@ BOT_SERVICE="memos-bot"
 BOT_UNIT_DST="$HOME/.config/systemd/user/${BOT_SERVICE}.service"
 BOT_PIDFILE="logs/.bot.pid"
 HEARTBEAT="logs/heartbeat.jsonl"
+PROFILES_DIR="profiles"
+ACTIVE_FILE="scripts/.active"
 mkdir -p logs
+
+# ── PROFİL (preset) sistemi ───────────────────────────────────────────────────
+# 8 profil (paper/live × general/xs/carry/blend). `use` _base.conf + profil dosyasını
+# birleştirip scripts/.launch.conf'a yazar (aktif config). Sırlar .env'de, davranış profilde.
+# Tercih edilen sıra: önce paper (güvenli), sonra live; her grup general→xs→carry→blend.
+# Listede olmayan (sonradan eklenen) profiller en sona alfabetik eklenir.
+profile_list() {
+  local pref="paper-general paper-xs paper-carry paper-blend live-general live-xs live-carry live-blend"
+  local p
+  for p in $pref; do [ -f "$PROFILES_DIR/$p.conf" ] && echo "$p"; done
+  ls "$PROFILES_DIR"/*.conf 2>/dev/null | sed -E 's#.*/##; s#\.conf$##' | grep -v '^_base$' \
+    | grep -vxF "$(printf '%s\n' $pref)" | sort
+}
+active_profile() { [ -f "$ACTIVE_FILE" ] && cat "$ACTIVE_FILE" || echo "(yok)"; }
+# Numara → ad çözümle (1-N) ya da adı doğrula.
+resolve_profile() {
+  local sel="$1"; local -a P; mapfile -t P < <(profile_list)
+  case "$sel" in
+    ''|*[!0-9]*) printf '%s\n' "${P[@]}" | grep -qx "$sel" && { echo "$sel"; return 0; } || return 1 ;;
+    *) [ "$sel" -ge 1 ] && [ "$sel" -le "${#P[@]}" ] && { echo "${P[$((sel-1))]}"; return 0; } || return 1 ;;
+  esac
+}
+cmd_profiles() {
+  local act; act="$(active_profile)"; local i=1
+  echo "── Profiller (./memos use <numara|ad>) ────────────────"
+  while IFS= read -r p; do
+    local mode; mode="$(grep -m1 '^TRADING_MODE=' "$PROFILES_DIR/$p.conf" | cut -d= -f2)"
+    local mark="  "; [ "$p" = "$act" ] && mark="⭐"
+    printf "  %s %d) %-16s [%s]\n" "$mark" "$i" "$p" "${mode:-?}"
+    i=$((i+1))
+  done < <(profile_list)
+  echo "  Aktif: $act"
+}
+cmd_use() {
+  local name; name="$(resolve_profile "${1:-}")" || { echo "❌ geçersiz profil: '${1:-}'"; echo; cmd_profiles; exit 1; }
+  [ -f "$PROFILES_DIR/$name.conf" ] || { echo "❌ profil dosyası yok: $PROFILES_DIR/$name.conf"; exit 1; }
+  mkdir -p data/profiles "logs/$name"
+  cat "$PROFILES_DIR/_base.conf" "$PROFILES_DIR/$name.conf" > scripts/.launch.conf
+  echo "$name" > "$ACTIVE_FILE"
+  local mode; mode="$(grep -m1 '^TRADING_MODE=' "$PROFILES_DIR/$name.conf" | cut -d= -f2)"
+  echo "✅ aktif profil: $name [$mode]  → scripts/.launch.conf yazıldı"
+  echo "   state DB: data/profiles/$name.db (boşsa cold-start) · loglar: logs/$name/"
+  [ "$mode" = "Live" ] && echo "   🔴 GERÇEK PARA — ./memos up/start ile başlatınca canlı emir gider."
+  echo "   başlat: ./memos up   (ya da ön planda: ./memos start)"
+}
 
 have_systemd_unit() { [ -f "$UNIT_DST" ]; }
 systemd_active()   { systemctl --user is-active --quiet "$SERVICE" 2>/dev/null; }
@@ -95,6 +144,10 @@ cmd_down() {
 }
 
 cmd_status() {
+  echo "── Profil ─────────────────────────────"
+  local act mode; act="$(active_profile)"
+  mode="$([ -f "$PROFILES_DIR/$act.conf" ] && grep -m1 '^TRADING_MODE=' "$PROFILES_DIR/$act.conf" | cut -d= -f2)"
+  echo "  aktif: $act ${mode:+[$mode]}   (değiştir: ./memos use <numara|ad>)"
   echo "── Motor ──────────────────────────────"
   ./scripts/tui_daemon.sh status
   echo "── Watchdog ───────────────────────────"
@@ -264,9 +317,11 @@ cmd_boot_uninstall() {
   fi
 }
 
-usage() { sed -n '2,21p' "$0"; }
+usage() { sed -n '2,23p' "$0"; }
 
 case "${1:-status}" in
+  profiles)       cmd_profiles ;;
+  use)            shift; cmd_use "${1:-}" ;;
   config)         exec ./scripts/launch.sh ;;
   start)          exec ./run_rtc.sh --tui --release ;;
   build)          build_release ;;

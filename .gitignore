@@ -73,6 +73,9 @@ secrets.json
 
 # launcher yerel tercih dosyası
 scripts/.launch.conf
+scripts/.active
+scripts/.launch.conf.bak.*
+# profiles/*.conf TRACK'te kalır (preset, sırsız); aktif config + yedekler gitignored.
 
 # Python bytecode cache (her import'ta yeniden üretilir)
 __pycache__/
