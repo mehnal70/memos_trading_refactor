@@ -15,7 +15,8 @@
 #   ./memos status            # motor + watchdog + son heartbeat
 #   ./memos attach            # tmux panellerini canlı izle (bırak: Ctrl-b d)
 #   ./memos logs              # canlı log akışı (trades + heartbeat)
-#   ./memos reset [args...]   # state/log/history reset (reset_state.sh'e geçer; örn: --all -y)
+#   ./memos reset [profil] [-y] # AKTİF (ya da verilen) profili cold-start'a çek: state-DB +
+#                               # loglar sıfırlanır (yedekli), PAYLAŞILAN mum DB'sine dokunulmaz
 #   ./memos dashboard         # mobil izleme paneli (telefon tarayıcı; salt-okuma) · stop ile durdur
 #   ./memos bot               # Telegram salt-okuma sorgu botu (/status /pos /pnl /trades) · stop ile durdur
 #   ./memos boot-install      # boot'ta otomatik başlat (systemd --user, TUI/tmux + linger)
@@ -90,6 +91,33 @@ cmd_use() {
   echo "   state DB: data/profiles/$name.db (boşsa cold-start) · loglar: logs/$name/"
   [ "$mode" = "Live" ] && echo "   🔴 GERÇEK PARA — ./memos up/start ile başlatınca canlı emir gider."
   echo "   başlat: ./memos up   (ya da ön planda: ./memos start)"
+}
+
+# PROFİL-FARKINDA RESET: bir profilin state'ini (equity+pozisyon+loglar) sıfırla → cold-start.
+# PAYLAŞILAN mum/funding DB'sine (data/trader.db) DOKUNMAZ. Yedek alır. Kullanım:
+#   ./memos reset [profil|numara] [-y]   (profil verilmezse AKTİF profil)
+cmd_reset() {
+  local prof="" yes=false a
+  for a in "$@"; do case "$a" in
+    -y|--yes|-Y) yes=true ;;
+    --all|--logs|--state|--history) ;;  # legacy bayraklar yok sayılır (profil-modeli zaten state+log)
+    -*) ;;
+    *) [ -z "$prof" ] && prof="$a" ;;
+  esac; done
+  [ -z "$prof" ] && prof="$(active_profile)"
+  local name; name="$(resolve_profile "$prof")" || { echo "❌ geçersiz/aktif-olmayan profil: '$prof'"; echo "   ipucu: ./memos reset <profil|numara>"; exit 1; }
+  local sdb="data/profiles/$name.db" snap="data/profiles/$name-snapshot.json" logdir="logs/$name"
+  echo "🧹 RESET hedefi: profil '$name' (state-DB + loglar). PAYLAŞILAN mum DB'si (data/trader.db) korunur."
+  if ! $yes; then
+    printf "   onayla [e/H]: "; read -r ans; case "$ans" in e|E|y|Y|evet|yes) ;; *) echo "İptal."; exit 0 ;; esac
+  fi
+  local ts dest; ts="$(date +%Y%m%d_%H%M%S)"; dest="logs/archive/${name}_${ts}"; mkdir -p "$dest"
+  [ -f "$sdb" ]  && cp "$sdb"  "$dest/state.db"      2>/dev/null
+  [ -f "$snap" ] && cp "$snap" "$dest/snapshot.json" 2>/dev/null
+  [ -d "$logdir" ] && cp -r "$logdir" "$dest/logs"   2>/dev/null
+  rm -f "$sdb" "$snap"
+  [ -d "$logdir" ] && rm -f "$logdir"/*.jsonl "$logdir"/*.log 2>/dev/null
+  echo "✅ '$name' sıfırlandı → ./memos up ile profilin sermayesinden cold-start. Yedek: $dest"
 }
 
 have_systemd_unit() { [ -f "$UNIT_DST" ]; }
@@ -323,7 +351,7 @@ cmd_boot_uninstall() {
   fi
 }
 
-usage() { sed -n '2,23p' "$0"; }
+usage() { sed -n '2,24p' "$0"; }
 
 case "${1:-status}" in
   profiles)       cmd_profiles ;;
@@ -337,7 +365,7 @@ case "${1:-status}" in
   status)         cmd_status ;;
   attach)         exec ./scripts/tui_daemon.sh attach ;;
   logs)           cmd_logs ;;
-  reset)          shift; exec ./scripts/reset_state.sh "$@" ;;
+  reset)          shift; cmd_reset "$@" ;;
   dashboard)      shift; cmd_dashboard "$@" ;;
   bot)            shift; cmd_bot "$@" ;;
   boot-install)   cmd_boot_install ;;
