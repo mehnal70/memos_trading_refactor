@@ -239,6 +239,14 @@ impl Engine {
                 .map(|m| m.contains_key(symbol)).unwrap_or(false);
             if already_open {
                 OpenGate::AlreadyOpen(log_cd)
+            } else if xs_sizing.is_some() {
+                // 🔒 KESİTSEL MUAF: market-nötr kitap (XS/carry/blend) k-long+k-short dengesini KENDİ
+                // rank-rebalance'ıyla yönetir → genel YÖNLÜ cap (max_concurrent_longs/shorts, genel
+                // motorun risk limiti) kitaba uygulanırsa dengesiz bırakır: örn. .env MAX_CONCURRENT_LONGS=1
+                // → 1 long + k short = NET-SHORT, market-nötrlük bozulur (2026-06-14 paper bulgusu).
+                // reentry cooldown muafiyetiyle (yukarı, satır ~177) simetrik. AlreadyOpen yine geçerli
+                // (sembol başına tek-pozisyon korunur). [[project_blend_live_failure]] [[project_xs_momentum]]
+                OpenGate::Ready(None)
             } else {
                 let cap = if is_long { st.tuning.max_concurrent_longs } else { st.tuning.max_concurrent_shorts };
                 if cap == 0 {
