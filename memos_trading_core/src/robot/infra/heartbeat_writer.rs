@@ -28,6 +28,11 @@ pub struct HeartbeatRecord {
     pub peak_equity: f64,
     pub drawdown_pct: f64,
     pub open_positions: usize,
+    /// 📈 Açık (realize-olmamış) PnL toplamı (USD) — açık pozisyonların mark-to-market'i.
+    /// Market-nötr kitap (XS/carry/blend) 14-bar tutar → realize equity sabit; FORWARD P&L
+    /// burada görünür. live_price (price-poll) ile cycle başında güncellenen current_price'tan.
+    #[serde(default)]
+    pub open_pnl: f64,
     pub closed_trades: usize,
     pub anomalies: usize,
     pub strategy: String,
@@ -53,8 +58,9 @@ impl HeartbeatRecord {
         } else {
             0.0
         };
-        let open_positions = state.finance.live_positions.read()
-            .map(|p| p.len()).unwrap_or(0);
+        let (open_positions, open_pnl) = state.finance.live_positions.read()
+            .map(|p| (p.len(), p.values().map(|m| m.calculate_pnl()).sum::<f64>()))
+            .unwrap_or((0, 0.0));
         // Tüm-zaman sayaç (DB hidrate + live increment). live_closed_trades
         // Vec'i sadece in-memory oturum geçmişi; restart sonrası boş başlar.
         let closed_trades = state.finance.closed_trades_total
@@ -105,6 +111,7 @@ impl HeartbeatRecord {
             peak_equity: peak,
             drawdown_pct,
             open_positions,
+            open_pnl,
             closed_trades,
             anomalies,
             strategy,
@@ -385,6 +392,7 @@ mod tests {
             peak_equity: 10_000.0,
             drawdown_pct: 0.0,
             open_positions: 0,
+            open_pnl: 0.0,
             closed_trades: 0,
             anomalies: 0,
             strategy: "MA_CROSSOVER".to_string(),
