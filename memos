@@ -78,11 +78,12 @@ cmd_use() {
   [ -f "$PROFILES_DIR/$name.conf" ] || { echo "❌ profil dosyası yok: $PROFILES_DIR/$name.conf"; exit 1; }
   mkdir -p data/profiles "logs/$name"
   # _base + profil + profil-bazlı log yolları (ad'dan türetilir → her profilin trade logu ayrı).
+  # Dedup: aynı KEY birden çok kez geçerse SON değeri tutulur (profil _base'i ezer) → temiz dosya.
   {
     cat "$PROFILES_DIR/_base.conf" "$PROFILES_DIR/$name.conf"
     echo "TRADING_LOG_PATH=logs/$name/robotic_trading.log"
     echo "TRADES_LOG_PATH=logs/$name/trades.jsonl"
-  } > scripts/.launch.conf
+  } | tac | awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/{ if (seen[$1]++) next } {print}' | tac > scripts/.launch.conf
   echo "$name" > "$ACTIVE_FILE"
   local mode; mode="$(grep -m1 '^TRADING_MODE=' "$PROFILES_DIR/$name.conf" | cut -d= -f2)"
   echo "✅ aktif profil: $name [$mode]  → scripts/.launch.conf yazıldı"
