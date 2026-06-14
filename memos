@@ -128,7 +128,7 @@ dash_systemd_active() { systemctl --user is-active --quiet "$DASH_SERVICE" 2>/de
 dash_alive() { dash_systemd_active || { [ -f "$DASH_PIDFILE" ] && kill -0 "$(cat "$DASH_PIDFILE" 2>/dev/null)" 2>/dev/null; }; }
 have_bot_unit()    { [ -f "$BOT_UNIT_DST" ]; }
 bot_systemd_active() { systemctl --user is-active --quiet "$BOT_SERVICE" 2>/dev/null; }
-bot_configured() { . scripts/lib_launchconf.sh 2>/dev/null; load_launch_conf 2>/dev/null; [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; }
+bot_configured() { . scripts/lib_launchconf.sh 2>/dev/null; load_launch_conf 2>/dev/null; load_launch_conf .env 2>/dev/null; [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; }
 bot_alive() { bot_systemd_active || { [ -f "$BOT_PIDFILE" ] && kill -0 "$(cat "$BOT_PIDFILE" 2>/dev/null)" 2>/dev/null; }; }
 
 build_release() {

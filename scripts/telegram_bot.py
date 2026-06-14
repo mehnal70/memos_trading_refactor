@@ -10,25 +10,32 @@
 import json, os, sys, time, urllib.request, urllib.parse
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CONF = os.path.join(REPO, "scripts", ".launch.conf")
-SNAP = os.path.join(REPO, "data", "snapshot.json")
+# Profil sistemi: sırlar (token/chat) .env'de, aktif profil ayarları (SNAPSHOT_PATH) .launch.conf'ta.
+# İkisini de oku; .env sonra → token/chat .env'den (override). [[project_profiles]]
+CONF_FILES = [os.path.join(REPO, "scripts", ".launch.conf"), os.path.join(REPO, ".env")]
 
 def load_conf():
     d = {}
-    try:
-        for line in open(CONF, encoding="utf-8"):
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            d[k.strip()] = v.strip()
-    except FileNotFoundError:
-        pass
+    for path in CONF_FILES:
+        try:
+            for line in open(path, encoding="utf-8"):
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                v = v.strip()
+                if v:  # boş değer öncekini EZMESİN (.env'de boş key varsa launch.conf'taki kalsın)
+                    d[k.strip()] = v
+        except FileNotFoundError:
+            pass
     return d
 
 CONFV   = load_conf()
 TOKEN   = CONFV.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = CONFV.get("TELEGRAM_CHAT_ID", "")
+# Aktif profilin snapshot'ı (SNAPSHOT_PATH, .launch.conf'ta use ile yazılır); yoksa eski default.
+_snap = CONFV.get("SNAPSHOT_PATH", "data/snapshot.json")
+SNAP = _snap if os.path.isabs(_snap) else os.path.join(REPO, _snap)
 API     = f"https://api.telegram.org/bot{TOKEN}"
 
 def api(method, params=None, timeout=35):
