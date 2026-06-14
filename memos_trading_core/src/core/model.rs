@@ -93,7 +93,13 @@ pub struct RoboticLoopConfig {
     pub interval: String,
     pub interval_secs: u64,
     pub capital: f64,
+    /// 📊 PAYLAŞILAN piyasa-veri DB'si (candles + funding_rates). Tüm profiller AYNI
+    /// db_path'i kullanır → mum bir kez indirilir, hepsi paylaşır.
     pub db_path: String,
+    /// 🗂️ PROFİL-BAZLI state DB'si (account_state + open_positions_snapshot). Profil
+    /// başına ayrı → paper/live equity+pozisyon BİRBİRİNE KARIŞMAZ. Env STATE_DB_PATH;
+    /// set değilse db_path'e düşer (geriye-uyum: tek-DB eski davranış). [[project_profiles]]
+    pub state_db_path: String,
     pub trade_amount: f64,
     pub download_enabled: bool,
     pub download_every_mins: u64,
@@ -137,6 +143,7 @@ impl Default for RoboticLoopConfig {
             interval_secs: 60,
             capital: 10000.0,
             db_path: "data/trader.db".into(),
+            state_db_path: "data/trader.db".into(),
             trade_amount: 0.01,
             download_enabled: true,
             download_every_mins: 15,
@@ -200,6 +207,10 @@ impl RoboticLoopConfig {
             market:   crate::core::env::env_or("TRADE_MARKET", "spot"),
             interval: crate::core::env::env_or("TRADE_INTERVAL", "1m"),
             db_path:  crate::core::env::env_or("DB_PATH", "data/trader.db"),
+            // STATE_DB_PATH set değilse db_path'e düşer (tek-DB geriye-uyum).
+            state_db_path: std::env::var("STATE_DB_PATH").ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| crate::core::env::env_or("DB_PATH", "data/trader.db")),
             trading_mode,
             capital,
             api_key:    crate::core::env::env_opt("BINANCE_API_KEY"),

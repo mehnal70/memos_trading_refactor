@@ -153,11 +153,12 @@ impl Engine {
     /// - Halihazırda live_positions'ta aynı sembol varsa: DB tarafı ezilir
     ///   (recovery sırasında live state boş olmalı; defensive).
     pub(crate) async fn hydrate_open_positions_from_db(state: &Arc<Mutex<AppState>>) {
-        let (db_path, interval, tuning) = match state.lock() {
-            Ok(st) => (st.config.db_path.clone(), st.config.interval.clone(), Arc::clone(&st.tuning)),
+        let (db_path, state_db_path, interval, tuning) = match state.lock() {
+            Ok(st) => (st.config.db_path.clone(), st.config.state_db_path.clone(), st.config.interval.clone(), Arc::clone(&st.tuning)),
             Err(_) => return,
         };
-        match crate::persistence::reader::recover_open_positions(&db_path) {
+        // Pozisyon snapshot'ı PROFİL-BAZLI state DB'sinden; mum existence kontrolü paylaşılan market DB'sinden.
+        match crate::persistence::reader::recover_open_positions(&state_db_path) {
             Ok(positions) if !positions.is_empty() => {
                 // İki kademeli filtre:
                 //   1) Borsa eligibility (canlı feed yok → cycle dışı; market-agnostik).
@@ -394,20 +395,21 @@ impl Engine {
     /// bu snapshot'ı okuyup haritayı yeniden kurar.
     /// Senkron — Connection::open + INSERT/UPDATE; UI lock dışında çağrılmalı.
     pub fn persist_open_positions_snapshot(state: &Arc<Mutex<AppState>>) {
-        let (db_path, positions) = match state.lock() {
+        let (state_db_path, positions) = match state.lock() {
             Ok(st) => {
-                let db_path = st.config.db_path.clone();
+                let state_db_path = st.config.state_db_path.clone();
                 let positions: Vec<_> = st.finance.live_positions.read()
                     .map(|m| m.values().cloned().collect())
                     .unwrap_or_default();
-                (db_path, positions)
+                (state_db_path, positions)
             }
             Err(_) => return,
         };
         // Adım 5.5: yazım arka planda (detached) + serileştirilmiş → cycle bloklanmaz.
+        // Snapshot PROFİL-BAZLI state DB'sine yazılır (paper/live pozisyonları karışmaz).
         spawn_db_write(move || {
             let _guard = DB_PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            if let Ok(conn) = crate::persistence::open_db(&db_path) {
+            if let Ok(conn) = crate::persistence::open_db(&state_db_path) {
                 let _ = crate::persistence::writer::save_open_positions_snapshot(&conn, &positions);
             }
         });
@@ -418,11 +420,12 @@ impl Engine {
     /// ile uyuşmuyorsa (operatör cüzdanı resetledi) recovery atlanır.
     /// Tablo yoksa veya kayıt yoksa → cold-start (varsayılan değerler korunur).
     pub(crate) fn hydrate_account_state_from_db(state: &Arc<Mutex<AppState>>) {
-        let (db_path, config_capital) = match state.lock() {
-            Ok(st) => (st.config.db_path.clone(), st.config.capital),
+        let (state_db_path, config_capital) = match state.lock() {
+            Ok(st) => (st.config.state_db_path.clone(), st.config.capital),
             Err(_) => return,
         };
-        match crate::persistence::reader::load_account_state(&db_path) {
+        // Hesap durumu (equity/peak/closed) PROFİL-BAZLI state DB'sinden.
+        match crate::persistence::reader::load_account_state(&state_db_path) {
             Ok(Some(rec)) => {
                 // Operatör starting_capital'ı değiştirdiyse (config yeniden yazıldı)
                 // eski equity'i hidrate etmek tutarsız olur → cold-start.
@@ -580,9 +583,9 @@ impl Engine {
     /// mühürler. Pozisyon açılış/kapanış noktalarında çağrılır.
     /// Senkron — UI lock dışında çağrılmalı.
     pub fn persist_account_state(state: &Arc<Mutex<AppState>>) {
-        let (db_path, equity, peak, starting, closed_count) = match state.lock() {
+        let (state_db_path, equity, peak, starting, closed_count) = match state.lock() {
             Ok(st) => (
-                st.config.db_path.clone(),
+                st.config.state_db_path.clone(),
                 st.finance.equity,
                 st.finance.peak_equity,
                 st.finance.starting_capital,
@@ -591,9 +594,10 @@ impl Engine {
             Err(_) => return,
         };
         // Adım 5.5: yazım arka planda (detached) + serileştirilmiş → cycle bloklanmaz.
+        // Hesap durumu PROFİL-BAZLI state DB'sine yazılır (paper/live equity karışmaz).
         spawn_db_write(move || {
             let _guard = DB_PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            if let Ok(conn) = crate::persistence::open_db(&db_path) {
+            if let Ok(conn) = crate::persistence::open_db(&state_db_path) {
                 let _ = crate::persistence::writer::save_account_state(
                     &conn, equity, peak, starting, closed_count,
                 );
