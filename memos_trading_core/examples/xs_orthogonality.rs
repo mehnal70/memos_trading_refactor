@@ -224,5 +224,76 @@ fn main() {
         println!("   Okuma: 'kapalı' = saf 14-bar tut (yalnız DD freni) = TP müdahalesiz taban. Erken TP satırının");
         println!("   Sharpe'ı hem 'kapalı'dan hem +%10'dan BELİRGİN yüksekse → erken kâr-al haklı, %5'e çek.");
         println!("   Değilse (ince-edge'de kazananı budamak tipik olarak Sharpe'ı düşürür) → +%10 doğru, dokunma.");
+
+        // ── WALK-FORWARD / OOS: in-sample TP-optimumu overfit mi? ───────────────────────────────
+        // Look-ahead'siz: her IS penceresinde Sharpe-maks TP seç → SONRAKİ OOS penceresine uygula →
+        // OOS getirilerini birleştir. Adaptif-TP OOS'u sabit-%10 ve TP-yok OOS'unu BELİRGİN geçmezse
+        // in-sample ~%7 tatlı-noktası fluke'tur → canlıya alma. overlay[i] nedensel (cycle-içi, gelecek yok).
+        if std::env::var("O_TP_WF").map(|v| v == "1").unwrap_or(false) {
+            let is_bars: usize = std::env::var("O_TP_WF_IS").ok().and_then(|s| s.parse().ok()).unwrap_or(365);
+            let oos_bars: usize = std::env::var("O_TP_WF_OOS").ok().and_then(|s| s.parse().ok()).unwrap_or(90);
+            // Aday TP'ler için overlay serilerini bir kez hesapla (grid + garanti 0 ve 10).
+            let mut cands: Vec<f64> = tp_grid.clone();
+            for must in [0.0_f64, 10.0] { if !cands.iter().any(|&t| (t - must).abs() < 1e-9) { cands.push(must); } }
+            let overlays: Vec<(f64, Vec<f64>)> = cands.iter()
+                .map(|&tp| (tp, tp_dd_overlay(&series, &turns_series, tp, dd_pct, flatten_turn, fee_rate).0))
+                .collect();
+            let ov_of = |tp: f64| -> &Vec<f64> { &overlays.iter().find(|(t, _)| (*t - tp).abs() < 1e-9).unwrap().1 };
+            let n = series.len();
+            let (mut adaptive, mut adaptive_turn) = (Vec::<f64>::new(), Vec::<f64>::new());
+            let (mut fixed10, mut off) = (Vec::<f64>::new(), Vec::<f64>::new());
+            let mut sel_counts = vec![0usize; cands.len()];
+            let (mut start, mut n_win) = (0usize, 0usize);
+            while start + is_bars + oos_bars <= n {
+                let (is_a, is_b, oos_b) = (start, start + is_bars, start + is_bars + oos_bars);
+                // IS'te Sharpe-maks TP seç (yalnız geçmiş veri).
+                let (mut best_i, mut best_sh) = (0usize, f64::NEG_INFINITY);
+                for (k, (_, ov)) in overlays.iter().enumerate() {
+                    let r = series_metrics(&ov[is_a..is_b], &turns_series[is_a..is_b], 1.0, bpy, 1, 30);
+                    if r.ann_sharpe > best_sh { best_sh = r.ann_sharpe; best_i = k; }
+                }
+                sel_counts[best_i] += 1;
+                // Seçilen TP'yi OOS'a uygula → birleştir.
+                adaptive.extend_from_slice(&overlays[best_i].1[is_b..oos_b]);
+                adaptive_turn.extend_from_slice(&turns_series[is_b..oos_b]);
+                fixed10.extend_from_slice(&ov_of(10.0)[is_b..oos_b]);
+                off.extend_from_slice(&ov_of(0.0)[is_b..oos_b]);
+                start += oos_bars; n_win += 1;
+            }
+            println!();
+            if n_win < 3 {
+                println!("⚠️  WF: yetersiz pencere ({n_win}); n={n} bar, IS={is_bars}+OOS={oos_bars}. O_TP_WF_IS/OOS küçült.");
+            } else {
+                let ada = series_metrics(&adaptive, &adaptive_turn, 1.0, bpy, 1, 30);
+                let f10 = series_metrics(&fixed10, &adaptive_turn, 1.0, bpy, 1, 30);
+                let of0 = series_metrics(&off, &adaptive_turn, 1.0, bpy, 1, 30);
+                println!("🔬 WALK-FORWARD / OOS · IS={is_bars} OOS={oos_bars} bar · {n_win} pencere · birleşik OOS {} bar", adaptive.len());
+                println!("   {:<22} {:>8} {:>7} {:>7} {:>7}", "OOS portföy", "annRet%", "Sharpe", "NW-t", "NW-p");
+                println!("   {}", "-".repeat(56));
+                let wfrow = |name: &str, r: &memos_trading_core::robot::backtester::XsResult| {
+                    println!("   {:<22} {:>8.1} {:>7.2} {:>7.2} {:>7.3}",
+                        name, 100.0 * r.ann_return, r.ann_sharpe, r.nw_t_stat, r.nw_t_pvalue());
+                };
+                wfrow("adaptif-TP (WF-seçim)", &ada);
+                wfrow("sabit +%10 (canlı)", &f10);
+                wfrow("TP-yok (saf tut)", &of0);
+                println!();
+                print!("   IS-seçim dağılımı: ");
+                for (k, &c) in sel_counts.iter().enumerate() {
+                    if c > 0 { print!("{}{}={}× ", if cands[k] <= 0.0 { "TP".to_string() } else { String::new() }, if cands[k] <= 0.0 { "yok".to_string() } else { format!("+%{:.0}", cands[k]) }, c); }
+                }
+                println!();
+                println!();
+                if ada.ann_sharpe > f10.ann_sharpe + 0.10 && ada.nw_t_pvalue() < 0.10 {
+                    println!("   ✅ ROBUST: adaptif-TP OOS Sharpe {:.2} > sabit-%10 {:.2} (anlamlı) → TP-zamanlaması OOS'ta para kazandırıyor.", ada.ann_sharpe, f10.ann_sharpe);
+                } else if f10.ann_sharpe > of0.ann_sharpe + 0.05 {
+                    println!("   ~ TP'NİN KENDİSİ OOS'ta yardımcı (sabit-%10 {:.2} > TP-yok {:.2}) ama adaptif seçim ({:.2}) sabit-%10'u geçmiyor →", f10.ann_sharpe, of0.ann_sharpe, ada.ann_sharpe);
+                    println!("      'en iyi TP'yi kovalamak overfit; sabit +%10 yeterli. Eşiği değiştirme.");
+                } else {
+                    println!("   ✗ OVERFIT/ZAYIF: adaptif ({:.2}) sabit-%10'u ({:.2}) geçmiyor, hatta TP-yok ({:.2}) ile yarışıyor →", ada.ann_sharpe, f10.ann_sharpe, of0.ann_sharpe);
+                    println!("      in-sample ~%7 tatlı-noktası dönem-özgü fluke. Mevcut +%10'da kal, müdahale etme.");
+                }
+            }
+        }
     }
 }
