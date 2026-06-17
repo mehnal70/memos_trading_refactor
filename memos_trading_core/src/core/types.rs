@@ -314,6 +314,42 @@ impl AssetClass {
     }
 }
 
+/// Bir venue kimliği (borsa + market). Operatör config'i (`VENUES` env → RoboticLoopConfig.venues)
+/// aktif venue'ları bunlarla listeler; `VenueRegistry` bunlardan adaptörleri kurar. [[venue]]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct VenueSpec {
+    pub exchange: Exchange,
+    pub market: Market,
+}
+
+impl VenueSpec {
+    pub fn new(exchange: Exchange, market: Market) -> Self {
+        Self { exchange, market }
+    }
+
+    /// "binance:futures" / "bybit:spot" token'ından parse. Borsa bilinmiyorsa `None`;
+    /// market kısmı yoksa Spot (tek-kaynak `Exchange::from_token` + `Market::from_label`).
+    pub fn parse_token(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+        let (ex_str, mk_str) = match s.split_once(':') {
+            Some((e, m)) => (e, m),
+            None => (s, "spot"),
+        };
+        Some(Self {
+            exchange: Exchange::from_token(ex_str)?,
+            market: Market::from_label(mk_str),
+        })
+    }
+
+    /// "exchange:market" token'ı (parse_token ile round-trip).
+    pub fn token(&self) -> String {
+        format!("{}:{}", self.exchange.as_str(), self.market.as_str())
+    }
+}
+
 /// BIST equity sembol biçimi heuristic'i: 3-6 büyük-harf/rakam, kripto quote'suz.
 /// (THYAO, GARAN, A1CAP ✓ · BTCUSDT ✗). Exchange::classify ve master katmanındaki
 /// looks_like_bist_symbol tek bu fonksiyondan beslenir.

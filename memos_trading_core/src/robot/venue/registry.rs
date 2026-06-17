@@ -7,8 +7,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::core::types::Exchange;
+use crate::core::types::{Exchange, VenueSpec};
+use crate::robot::engines::binance_executor::BinanceFuturesExecutor;
 use crate::robot::venue::adapter::VenueAdapter;
+use crate::robot::venue::binance::BinanceVenue;
 
 pub struct VenueRegistry {
     venues: HashMap<Exchange, Arc<dyn VenueAdapter>>,
@@ -19,6 +21,38 @@ impl VenueRegistry {
     /// Sembolü hiçbir kayıtlı venue karşılamazsa düşülecek varsayılan borsa ile kur.
     pub fn new(default_exchange: Exchange) -> Self {
         Self { venues: HashMap::new(), default_exchange }
+    }
+
+    /// Config venue-spec'lerinden registry kur (operatör seçimi → çalışan registry).
+    /// Bilinen borsa (şu an yalnız Binance) için adaptör kurulur; henüz desteklenmeyen borsa
+    /// loglanıp atlanır (Faz 1+ eklendikçe açılır). `binance_executor` verilirse Binance venue
+    /// auth'lu (veri+yürütme), yoksa data-only (yalnız public veri). default_exchange = ilk spec.
+    ///
+    /// NOT: registry borsa-anahtarlı → aynı borsanın birden çok market'i (binance:spot +
+    /// binance:futures) verilirse SON spec'in market'i kazanır (tek venue/borsa). Çoklu-market/
+    /// borsa anahtarı Faz 1+ işi.
+    pub fn from_specs(specs: &[VenueSpec], binance_executor: Option<Arc<BinanceFuturesExecutor>>) -> Self {
+        let default_ex = specs.first().map(|s| s.exchange).unwrap_or(Exchange::Binance);
+        let mut reg = Self::new(default_ex);
+        for spec in specs {
+            match spec.exchange {
+                Exchange::Binance => {
+                    let venue = match binance_executor.clone() {
+                        Some(exec) => BinanceVenue::with_executor(spec.market, exec),
+                        None => BinanceVenue::data_only(spec.market),
+                    };
+                    reg.register(Arc::new(venue));
+                }
+                _ => {
+                    log::warn!(
+                        target: "VENUE",
+                        "venue '{}' henüz desteklenmiyor — atlandı (Faz 1+ adaptörü eklenecek)",
+                        spec.token(),
+                    );
+                }
+            }
+        }
+        reg
     }
 
     /// Bir venue'yu kaydet (borsa-anahtarlı; aynı borsa tekrar kaydedilirse üzerine yazar).
@@ -93,5 +127,31 @@ mod tests {
         let reg = VenueRegistry::new(Exchange::Binance);
         assert!(reg.is_empty());
         assert!(reg.for_symbol("BTCUSDT").is_none());
+    }
+
+    #[test]
+    fn venue_spec_token_roundtrip() {
+        let s = VenueSpec::parse_token("binance:futures").unwrap();
+        assert_eq!(s.exchange, Exchange::Binance);
+        assert_eq!(s.market, Market::Futures);
+        assert_eq!(s.token(), "binance:futures");
+        // Market'siz token → Spot; bilinmeyen borsa → None.
+        assert_eq!(VenueSpec::parse_token("binance").unwrap().market, Market::Spot);
+        assert!(VenueSpec::parse_token("nasdaq:spot").is_none());
+        assert!(VenueSpec::parse_token("  ").is_none());
+    }
+
+    #[test]
+    fn from_specs_builds_known_skips_unsupported() {
+        // binance kurulur; coinbase (henüz adaptörsüz) atlanır. default = ilk spec (binance).
+        let specs = vec![
+            VenueSpec::new(Exchange::Binance, Market::Futures),
+            VenueSpec::new(Exchange::Coinbase, Market::Spot),
+        ];
+        let reg = VenueRegistry::from_specs(&specs, None);
+        assert_eq!(reg.len(), 1, "yalnız Binance kurulmalı");
+        let v = reg.for_symbol("BTCUSDT").expect("Binance venue var");
+        assert_eq!(v.exchange(), Exchange::Binance);
+        assert_eq!(v.market(), Market::Futures);
     }
 }

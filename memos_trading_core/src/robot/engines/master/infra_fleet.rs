@@ -85,10 +85,11 @@ impl Engine {
         tokio::spawn(async move {
             use crate::robot::data_pipeline::{StepStatus, AnomalySeverity, AnomalyKind};
             use crate::robot::venue::MarketData; // fetch_candles trait metodu için
-            // Faz 0-D: canlı fiyat-poll mum çekimi venue::VenueAdapter üzerinden (data-only —
-            // auth gerekmez). Behavior-identik: BinanceVenue::fetch_candles → fetcher.
-            // fetch_latest_market(market.as_str(),1). config.market sabit → venue bir kez kurulur. [[venue]]
-            let mut venue_cell: Option<crate::robot::venue::BinanceVenue> = None;
+            // Faz 0-D + Faz 1: canlı fiyat-poll mumu venue katmanı üzerinden çeker. Registry
+            // config.venues'tan (operatör seçimi) bir kez kurulur; sembol → for_symbol ile
+            // doğru venue'ya yönlenir (data-only, auth gerekmez). Binance için behavior-identik:
+            // BinanceVenue::fetch_candles → fetcher.fetch_latest_market(market.as_str(),1). [[venue]]
+            let mut registry_cell: Option<crate::robot::venue::VenueRegistry> = None;
             let started_at = std::time::Instant::now();
             let poll_secs = 5_u64;
             // İlk başarılı çekimde özet log'u TUI'ye düşür (sonrasında sessiz, sadece anomalide konuşur).
@@ -100,10 +101,10 @@ impl Engine {
             let mut last_error_summary_msg: String = String::new();
 
             loop {
-                let (symbols, interval, market, stop) = {
+                let (symbols, interval, venues, stop) = {
                     let st = match st_px.lock() { Ok(s) => s, Err(_) => break };
                     if st.app_stop_signal.load(Ordering::Relaxed) {
-                        (vec![], String::new(), String::new(), true)
+                        (vec![], String::new(), Vec::new(), true)
                     } else {
                         // Canlı feed'i olmayan borsa sembolleri (örn. BIST) Binance API'ye
                         // gönderilmez ("Veri Format Hatası" → ApiError anomaly). Market-agnostik
@@ -128,15 +129,15 @@ impl Engine {
                                 if !syms.contains(sym) { syms.push(sym.clone()); }
                             }
                         }
-                        (syms, st.config.interval.clone(), st.config.market.clone(), false)
+                        (syms, st.config.interval.clone(), st.config.venues.clone(), false)
                     }
                 };
                 if stop { break; }
 
-                // Venue'yu market belli olunca bir kez kur (config.market değişmez). data-only:
-                // price-poll yalnız public mum çeker (auth yok). [[venue]]
-                let venue = venue_cell.get_or_insert_with(||
-                    crate::robot::venue::BinanceVenue::data_only(crate::core::types::Market::from_label(&market)));
+                // Registry'yi config.venues'tan bir kez kur (operatör seçimi). data-only:
+                // price-poll yalnız public mum çeker (auth yok). Sembol → for_symbol. [[venue]]
+                let registry = registry_cell.get_or_insert_with(||
+                    crate::robot::venue::VenueRegistry::from_specs(&venues, None));
 
                 let mut new_prices: Vec<(String, f64)> = Vec::with_capacity(symbols.len());
                 let mut errors: Vec<(String, String)> = Vec::new();
@@ -163,10 +164,14 @@ impl Engine {
                 let mut stale_skipped: Vec<String> = Vec::new();
                 for sym in &symbols {
                     if sym.is_empty() { continue; }
-                    // MARKET-FARKINDA: engine market'inin endpoint'inden çek (futures→fapi). Eskiden
-                    // trait `fetch_latest` SPOT kısayoluydu → futures-only sembol (MYX/SIREN) spot'ta
-                    // "-1121 Invalid symbol" → sahte delisting purge. download job Faz 2'de geçmişti,
-                    // price-poll kalmıştı. [[project_symbol_status_registry]] [[feedback_market_agnostic]].
+                    // MARKET-FARKINDA: sembol kendi venue'sine yönlenir (Exchange::classify);
+                    // venue market'in doğru endpoint'inden çeker (futures→fapi). Eskiden trait
+                    // `fetch_latest` SPOT kısayoluydu → futures-only sembol (MYX/SIREN) spot'ta
+                    // "-1121 Invalid symbol" → sahte delisting purge. [[venue]] [[feedback_market_agnostic]].
+                    let Some(venue) = registry.for_symbol(sym) else {
+                        errors.push((sym.clone(), "venue bulunamadı (registry boş?)".to_string()));
+                        continue;
+                    };
                     match venue.fetch_candles(sym, &interval, 1).await.map_err(|e| e.to_string()) {
                         Ok(candles) => {
                             // Fetch döndü → sembol borsada var (delisted değil); sayacı sıfırla.

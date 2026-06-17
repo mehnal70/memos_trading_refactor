@@ -89,6 +89,10 @@ pub struct SessionFilterConfig {
 pub struct RoboticLoopConfig {
     pub exchange: String,
     pub market: String,
+    /// 🏛️ Aktif venue'lar (borsa+market). Env `VENUES="binance:futures,bybit:spot"`;
+    /// boşsa tek-eleman [exchange:market] (geriye-uyum). Operatör çoklu-piyasa seçimi
+    /// bununla yapılır → `VenueRegistry::from_specs`. [[project_venue_multimarket]]
+    pub venues: Vec<crate::core::types::VenueSpec>,
     pub symbol: String,
     pub interval: String,
     pub interval_secs: u64,
@@ -138,6 +142,10 @@ impl Default for RoboticLoopConfig {
         Self {
             exchange: "binance".into(),
             market: "futures".into(),
+            venues: vec![crate::core::types::VenueSpec::new(
+                crate::core::types::Exchange::Binance,
+                crate::core::types::Market::Futures,
+            )],
             symbol: "BTCUSDT".into(),
             interval: "1m".into(),
             interval_secs: 60,
@@ -215,6 +223,26 @@ impl RoboticLoopConfig {
             capital,
             api_key:    crate::core::env::env_opt("BINANCE_API_KEY"),
             secret_key: crate::core::env::env_opt("BINANCE_API_SECRET"),
+            // VENUES="binance:futures,bybit:spot" → aktif venue listesi. Boş/geçersiz ise
+            // tek-eleman [exchange:market] (geriye-uyum; market = TRADE_MARKET yukarıda çözüldü).
+            venues: {
+                let raw = crate::core::env::env_or("VENUES", "");
+                let parsed: Vec<crate::core::types::VenueSpec> = raw
+                    .split(',')
+                    .filter_map(crate::core::types::VenueSpec::parse_token)
+                    .collect();
+                if parsed.is_empty() {
+                    vec![crate::core::types::VenueSpec::new(
+                        crate::core::types::Exchange::from_token(&d.exchange)
+                            .unwrap_or(crate::core::types::Exchange::Binance),
+                        crate::core::types::Market::from_label(
+                            &crate::core::env::env_or("TRADE_MARKET", "spot"),
+                        ),
+                    )]
+                } else {
+                    parsed
+                }
+            },
             ..d
         }
     }
