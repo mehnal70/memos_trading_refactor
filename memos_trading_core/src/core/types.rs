@@ -231,6 +231,7 @@ pub enum Exchange {
     Bist,
     Coinbase, // Yeni eklendi
     Kucoin,   // Yeni eklendi
+    Bybit,    // Çoklu-piyasa Faz 1: gerçek 2. kripto borsa (VenueAdapter = BybitVenue)
 }
 
 impl Exchange {
@@ -240,6 +241,7 @@ impl Exchange {
             Self::Bist => "bist",
             Self::Coinbase => "coinbase",
             Self::Kucoin => "kucoin",
+            Self::Bybit => "bybit",
         }
     }
 
@@ -250,6 +252,7 @@ impl Exchange {
             "bist"    => Some(Self::Bist),
             "coinbase" => Some(Self::Coinbase),
             "kucoin"  => Some(Self::Kucoin),
+            "bybit"   => Some(Self::Bybit),
             _ => None,
         }
     }
@@ -263,7 +266,7 @@ impl Exchange {
             // BIST: bu dağıtımda canlı feed yok (manuel/gecikmeli liste). Operatör
             // RuntimeTuning.force_live_exchanges ile yine de zorlayabilir.
             Self::Bist => false,
-            Self::Binance | Self::Coinbase | Self::Kucoin => true,
+            Self::Binance | Self::Coinbase | Self::Kucoin | Self::Bybit => true,
         }
     }
 
@@ -280,7 +283,7 @@ impl Exchange {
     /// vardır). Yeni borsa eklerken sınıfını BURAYA bir kol olarak ekle; tek-kaynak.
     pub fn asset_class(&self) -> AssetClass {
         match self {
-            Self::Binance | Self::Coinbase | Self::Kucoin => AssetClass::Crypto,
+            Self::Binance | Self::Coinbase | Self::Kucoin | Self::Bybit => AssetClass::Crypto,
             Self::Bist => AssetClass::Equity,
         }
     }

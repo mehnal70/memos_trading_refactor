@@ -11,6 +11,7 @@ use crate::core::types::{Exchange, VenueSpec};
 use crate::robot::engines::binance_executor::BinanceFuturesExecutor;
 use crate::robot::venue::adapter::VenueAdapter;
 use crate::robot::venue::binance::BinanceVenue;
+use crate::robot::venue::bybit::BybitVenue;
 
 pub struct VenueRegistry {
     venues: HashMap<Exchange, Arc<dyn VenueAdapter>>,
@@ -42,6 +43,10 @@ impl VenueRegistry {
                         None => BinanceVenue::data_only(spec.market),
                     };
                     reg.register(Arc::new(venue));
+                }
+                Exchange::Bybit => {
+                    // Bybit veri venue'su (auth gerekmez; yürütme Faz 1+ → açık hata).
+                    reg.register(Arc::new(BybitVenue::new(spec.market)));
                 }
                 _ => {
                     log::warn!(
@@ -153,5 +158,20 @@ mod tests {
         let v = reg.for_symbol("BTCUSDT").expect("Binance venue var");
         assert_eq!(v.exchange(), Exchange::Binance);
         assert_eq!(v.market(), Market::Futures);
+    }
+
+    #[test]
+    fn from_specs_builds_binance_and_bybit() {
+        // Bybit gerçek adaptör → kurulur. İkisi de kayıtlı; sembol-şekli aynı (BTCUSDT) olduğu
+        // için for_symbol default'a (ilk spec=Binance) düşer — Bybit explicit get ile erişilir.
+        let specs = vec![
+            VenueSpec::new(Exchange::Binance, Market::Futures),
+            VenueSpec::new(Exchange::Bybit, Market::Futures),
+        ];
+        let reg = VenueRegistry::from_specs(&specs, None);
+        assert_eq!(reg.len(), 2, "Binance + Bybit kurulmalı");
+        assert_eq!(reg.get(Exchange::Bybit).expect("bybit var").exchange(), Exchange::Bybit);
+        // for_symbol kripto sembolünü default borsaya (Binance) yönlendirir (şekil ayırt etmez).
+        assert_eq!(reg.for_symbol("BTCUSDT").unwrap().exchange(), Exchange::Binance);
     }
 }
