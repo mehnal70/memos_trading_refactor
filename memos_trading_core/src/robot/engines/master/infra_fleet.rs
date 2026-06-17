@@ -83,10 +83,12 @@ impl Engine {
         // ── Task 3: Fiyat poll — aktif semboller için REST üzerinden son fiyatı çek
         let st_px = Arc::clone(&state);
         tokio::spawn(async move {
-            use crate::robot::data_fetcher::binance::BinanceFetcher;
-            use crate::robot::data_fetcher::market_fetcher::MarketFetcher;
             use crate::robot::data_pipeline::{StepStatus, AnomalySeverity, AnomalyKind};
-            let fetcher = BinanceFetcher::new();
+            use crate::robot::venue::MarketData; // fetch_candles trait metodu için
+            // Faz 0-D: canlı fiyat-poll mum çekimi venue::VenueAdapter üzerinden (data-only —
+            // auth gerekmez). Behavior-identik: BinanceVenue::fetch_candles → fetcher.
+            // fetch_latest_market(market.as_str(),1). config.market sabit → venue bir kez kurulur. [[venue]]
+            let mut venue_cell: Option<crate::robot::venue::BinanceVenue> = None;
             let started_at = std::time::Instant::now();
             let poll_secs = 5_u64;
             // İlk başarılı çekimde özet log'u TUI'ye düşür (sonrasında sessiz, sadece anomalide konuşur).
@@ -131,6 +133,11 @@ impl Engine {
                 };
                 if stop { break; }
 
+                // Venue'yu market belli olunca bir kez kur (config.market değişmez). data-only:
+                // price-poll yalnız public mum çeker (auth yok). [[venue]]
+                let venue = venue_cell.get_or_insert_with(||
+                    crate::robot::venue::BinanceVenue::data_only(crate::core::types::Market::from_label(&market)));
+
                 let mut new_prices: Vec<(String, f64)> = Vec::with_capacity(symbols.len());
                 let mut errors: Vec<(String, String)> = Vec::new();
                 // PRICE_POLL_MAX_CANDLE_AGE_SECS: Binance 1m kline endpoint düşük
@@ -160,7 +167,7 @@ impl Engine {
                     // trait `fetch_latest` SPOT kısayoluydu → futures-only sembol (MYX/SIREN) spot'ta
                     // "-1121 Invalid symbol" → sahte delisting purge. download job Faz 2'de geçmişti,
                     // price-poll kalmıştı. [[project_symbol_status_registry]] [[feedback_market_agnostic]].
-                    match fetcher.fetch_latest_market(sym, &interval, &market, 1).await {
+                    match venue.fetch_candles(sym, &interval, 1).await.map_err(|e| e.to_string()) {
                         Ok(candles) => {
                             // Fetch döndü → sembol borsada var (delisted değil); sayacı sıfırla.
                             delisted_record_success(sym);

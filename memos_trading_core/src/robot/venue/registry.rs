@@ -67,7 +67,7 @@ mod tests {
             true,
             "futures",
         ));
-        Arc::new(BinanceVenue::new(Market::Futures, exec))
+        Arc::new(BinanceVenue::with_executor(Market::Futures, exec))
     }
 
     #[test]
