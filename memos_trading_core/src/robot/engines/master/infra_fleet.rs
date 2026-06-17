@@ -85,11 +85,10 @@ impl Engine {
         tokio::spawn(async move {
             use crate::robot::data_pipeline::{StepStatus, AnomalySeverity, AnomalyKind};
             use crate::robot::venue::MarketData; // fetch_candles trait metodu için
-            // Faz 0-D + Faz 1: canlı fiyat-poll mumu venue katmanı üzerinden çeker. Registry
-            // config.venues'tan (operatör seçimi) bir kez kurulur; sembol → for_symbol ile
-            // doğru venue'ya yönlenir (data-only, auth gerekmez). Binance için behavior-identik:
-            // BinanceVenue::fetch_candles → fetcher.fetch_latest_market(market.as_str(),1). [[venue]]
-            let mut registry_cell: Option<crate::robot::venue::VenueRegistry> = None;
+            // Canlı fiyat-poll mumu venue katmanı üzerinden çeker. Registry AppState'te bir kez
+            // kurulur (config.venues, operatör seçimi); burada Arc-clone ile okunur. Sembol →
+            // route ile doğru venue'ya yönlenir (explicit @borsa etiketi + şekil default).
+            // Binance için behavior-identik: BinanceVenue::fetch_candles → fetcher. [[venue]]
             let started_at = std::time::Instant::now();
             let poll_secs = 5_u64;
             // İlk başarılı çekimde özet log'u TUI'ye düşür (sonrasında sessiz, sadece anomalide konuşur).
@@ -101,10 +100,10 @@ impl Engine {
             let mut last_error_summary_msg: String = String::new();
 
             loop {
-                let (symbols, interval, venues, stop) = {
+                let (symbols, interval, registry, stop) = {
                     let st = match st_px.lock() { Ok(s) => s, Err(_) => break };
                     if st.app_stop_signal.load(Ordering::Relaxed) {
-                        (vec![], String::new(), Vec::new(), true)
+                        (vec![], String::new(), Arc::clone(&st.venue_registry), true)
                     } else {
                         // Canlı feed'i olmayan borsa sembolleri (örn. BIST) Binance API'ye
                         // gönderilmez ("Veri Format Hatası" → ApiError anomaly). Market-agnostik
@@ -129,15 +128,10 @@ impl Engine {
                                 if !syms.contains(sym) { syms.push(sym.clone()); }
                             }
                         }
-                        (syms, st.config.interval.clone(), st.config.venues.clone(), false)
+                        (syms, st.config.interval.clone(), Arc::clone(&st.venue_registry), false)
                     }
                 };
                 if stop { break; }
-
-                // Registry'yi config.venues'tan bir kez kur (operatör seçimi). data-only:
-                // price-poll yalnız public mum çeker (auth yok). Sembol → for_symbol. [[venue]]
-                let registry = registry_cell.get_or_insert_with(||
-                    crate::robot::venue::VenueRegistry::from_specs(&venues, None));
 
                 let mut new_prices: Vec<(String, f64)> = Vec::with_capacity(symbols.len());
                 let mut errors: Vec<(String, String)> = Vec::new();
