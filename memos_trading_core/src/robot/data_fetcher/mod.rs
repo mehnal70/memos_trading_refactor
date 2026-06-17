@@ -8,14 +8,12 @@ pub use websocket::{BinanceKlineUpdate, BinanceKline, parse_kline, validate_ohlc
 pub mod binance;
 pub use binance::BinanceFetcher;
 
-pub mod hybrid;
-pub use hybrid::{HybridBinanceFetcher, FetchMode};
-
 pub mod market_fetcher;
 pub use market_fetcher::MarketFetcher;
 
 pub mod bist_fetcher;
 pub use bist_fetcher::BistFetcher;
 
-pub mod live_adapter;
-pub use live_adapter::BinanceLiveAdapter;
+// NOT: hybrid (HybridBinanceFetcher) + live_adapter (BinanceLiveAdapter) kaldırıldı
+// (çoklu-piyasa Faz 0-C): ölü LiveDataFetcher kümesi, bozuk URL'ler. Canlı veri venue::VenueAdapter
+// (MarketData) üzerinden; WS feed deseni data_pipeline::price_feed'de korunuyor.
