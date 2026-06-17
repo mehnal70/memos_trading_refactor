@@ -517,7 +517,10 @@ impl Engine {
                 new_pos, alloc_capital, graded_target, qty_val,
                 kelly_fraction: kelly.kelly_fraction, risk_appetite, ml_conf,
                 tp_pct, sl_pct, strategy_name: strategy_name.to_string(),
-                live_executor: st.live_executor.clone(),
+                // Executor venue-farkında seçilir: sembolün venue'sü Binance ise canlı executor,
+                // değilse (data-only/paper/@bybit) None → paper yolu. Binance sembolde
+                // st.live_executor ile birebir aynı (registry onunla kuruldu). [[venue]]
+                live_executor: st.venue_registry.binance_executor_for(symbol),
                 live_dry_run: st.live_dry_run,
                 live_max_notional: st.live_max_notional_usd,
                 atr_mult,

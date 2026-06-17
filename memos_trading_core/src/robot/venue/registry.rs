@@ -16,12 +16,18 @@ use crate::robot::venue::bybit::BybitVenue;
 pub struct VenueRegistry {
     venues: HashMap<Exchange, Arc<dyn VenueAdapter>>,
     default_exchange: Exchange,
+    /// 🌉 GEÇİŞ KÖPRÜSÜ: canlı execution şu an Binance-ÖZEL zengin yüzey kullanıyor
+    /// (`place_smart_limit_entry`/`place_protection_orders`/`apply_filters`/`close_position` —
+    /// VenueAdapter trait'inde yok). Registry, kurulurken aldığı Binance executor'ı saklar;
+    /// execution call-site'ları `binance_executor_for(sym)` ile venue-FARKINDA seçer (global
+    /// `st.live_executor` yerine). Normalize edilmiş execution surface (Faz 1+) bunu kaldıracak.
+    binance_executor: Option<Arc<BinanceFuturesExecutor>>,
 }
 
 impl VenueRegistry {
     /// Sembolü hiçbir kayıtlı venue karşılamazsa düşülecek varsayılan borsa ile kur.
     pub fn new(default_exchange: Exchange) -> Self {
-        Self { venues: HashMap::new(), default_exchange }
+        Self { venues: HashMap::new(), default_exchange, binance_executor: None }
     }
 
     /// Config venue-spec'lerinden registry kur (operatör seçimi → çalışan registry).
@@ -57,7 +63,22 @@ impl VenueRegistry {
                 }
             }
         }
+        // Geçiş köprüsü: execution call-site'larının venue-farkında executor seçimi için sakla.
+        reg.binance_executor = binance_executor;
         reg
+    }
+
+    /// 🌉 Sembolün venue'sü Binance ise canlı Binance executor'ı döndür (yoksa None: paper /
+    /// data-only / Binance-dışı venue). Execution call-site'ları `st.live_executor` yerine bunu
+    /// kullanır → executor SEÇİMİ venue-farkında (örn. `SYM@bybit` → None → Binance emri gitmez).
+    /// GEÇİŞ köprüsü: zengin Binance execution yüzeyi trait'te normalize edilince (Faz 1+) kalkar.
+    pub fn binance_executor_for(&self, symbol: &str) -> Option<Arc<BinanceFuturesExecutor>> {
+        let (venue, _bare) = self.route(symbol)?;
+        if venue.exchange() == Exchange::Binance {
+            self.binance_executor.clone()
+        } else {
+            None
+        }
     }
 
     /// Bir venue'yu kaydet (borsa-anahtarlı; aynı borsa tekrar kaydedilirse üzerine yazar).
