@@ -71,11 +71,29 @@ impl VenueRegistry {
         self.venues.get(&exchange)
     }
 
-    /// Sembolü venue'suna yönlendir: `Exchange::classify(symbol)` → kayıtlıysa o, değilse
-    /// varsayılan borsa. Hiçbiri yoksa None (boş registry).
+    /// Sembolü venue'suna yönlendir + ÇIPLAK sembolü döndür. Explicit routing:
+    ///   * "BTCUSDT@bybit" → açık etiket: o borsa kayıtlıysa ORAYA (aynı-şekil semboller
+    ///     Binance/Bybit ayrımını classify yapamaz → etiket tek çözüm).
+    ///   * "BTCUSDT" (etiketsiz) → `Exchange::classify` (şekil) → kayıtlıysa o, değilse default.
+    /// Dönen `&str` çıplak semboldür (etiket soyulmuş) — `fetch_candles`'a bu verilmeli.
+    pub fn route<'r, 's>(
+        &'r self,
+        symbol: &'s str,
+    ) -> Option<(&'r Arc<dyn VenueAdapter>, &'s str)> {
+        let (bare, tag) = split_venue_tag(symbol);
+        // Açık etiket kayıtlıysa onu kullan; yoksa şekil-tabanlı sınıflandır.
+        let target = tag
+            .filter(|ex| self.venues.contains_key(ex))
+            .unwrap_or_else(|| Exchange::classify(bare));
+        self.venues
+            .get(&target)
+            .or_else(|| self.venues.get(&self.default_exchange))
+            .map(|v| (v, bare))
+    }
+
+    /// Sembolü venue'suna yönlendir (yalnız venue; çıplak sembol gerekmiyorsa). [`route`] kısayolu.
     pub fn for_symbol(&self, symbol: &str) -> Option<&Arc<dyn VenueAdapter>> {
-        let ex = Exchange::classify(symbol);
-        self.venues.get(&ex).or_else(|| self.venues.get(&self.default_exchange))
+        self.route(symbol).map(|(v, _)| v)
     }
 
     /// Kayıtlı borsalar.
@@ -89,6 +107,19 @@ impl VenueRegistry {
 
     pub fn len(&self) -> usize {
         self.venues.len()
+    }
+}
+
+/// Sembolden açık venue etiketini ayır: "BTCUSDT@bybit" → ("BTCUSDT", Some(Bybit)).
+/// '@' yoksa ya da etiket geçerli bir borsa değilse → (sembol-aynen, None). Kripto/BIST
+/// sembolleri alfanümeriktir, '@' içermez → güvenli ayraç. [[project_venue_multimarket]]
+pub fn split_venue_tag(symbol: &str) -> (&str, Option<Exchange>) {
+    match symbol.split_once('@') {
+        Some((bare, tag)) => match Exchange::from_token(tag) {
+            Some(ex) => (bare, Some(ex)),
+            None => (symbol, None), // geçersiz etiket → ham sembol (güvenli geriye-düşüş)
+        },
+        None => (symbol, None),
     }
 }
 
@@ -173,5 +204,38 @@ mod tests {
         assert_eq!(reg.get(Exchange::Bybit).expect("bybit var").exchange(), Exchange::Bybit);
         // for_symbol kripto sembolünü default borsaya (Binance) yönlendirir (şekil ayırt etmez).
         assert_eq!(reg.for_symbol("BTCUSDT").unwrap().exchange(), Exchange::Binance);
+    }
+
+    #[test]
+    fn split_venue_tag_parses() {
+        assert_eq!(split_venue_tag("BTCUSDT@bybit"), ("BTCUSDT", Some(Exchange::Bybit)));
+        assert_eq!(split_venue_tag("BTCUSDT@binance"), ("BTCUSDT", Some(Exchange::Binance)));
+        assert_eq!(split_venue_tag("BTCUSDT"), ("BTCUSDT", None));
+        // Geçersiz etiket → ham sembol (güvenli).
+        assert_eq!(split_venue_tag("BTCUSDT@nasdaq"), ("BTCUSDT@nasdaq", None));
+    }
+
+    #[test]
+    fn explicit_tag_routes_to_tagged_venue_with_bare_symbol() {
+        // Aynı-şekil sembol: etiketle Bybit'e yönlenir, çıplak sembol döner.
+        let specs = vec![
+            VenueSpec::new(Exchange::Binance, Market::Futures),
+            VenueSpec::new(Exchange::Bybit, Market::Futures),
+        ];
+        let reg = VenueRegistry::from_specs(&specs, None);
+
+        let (v, bare) = reg.route("BTCUSDT@bybit").expect("etiketli yönlenir");
+        assert_eq!(v.exchange(), Exchange::Bybit, "etiket Bybit'e yönlendirmeli");
+        assert_eq!(bare, "BTCUSDT", "çıplak sembol (etiket soyulmuş)");
+
+        // Etiketsiz → şekil → default (Binance), çıplak sembol aynen.
+        let (v2, bare2) = reg.route("BTCUSDT").unwrap();
+        assert_eq!(v2.exchange(), Exchange::Binance);
+        assert_eq!(bare2, "BTCUSDT");
+
+        // Etiketli ama o borsa kayıtlı DEĞİL → şekil-tabanlı default'a düşer (çıplak sembol korunur).
+        let (v3, bare3) = reg.route("BTCUSDT@coinbase").unwrap();
+        assert_eq!(v3.exchange(), Exchange::Binance);
+        assert_eq!(bare3, "BTCUSDT");
     }
 }

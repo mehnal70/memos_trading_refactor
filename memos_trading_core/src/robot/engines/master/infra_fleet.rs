@@ -164,15 +164,15 @@ impl Engine {
                 let mut stale_skipped: Vec<String> = Vec::new();
                 for sym in &symbols {
                     if sym.is_empty() { continue; }
-                    // MARKET-FARKINDA: sembol kendi venue'sine yönlenir (Exchange::classify);
-                    // venue market'in doğru endpoint'inden çeker (futures→fapi). Eskiden trait
-                    // `fetch_latest` SPOT kısayoluydu → futures-only sembol (MYX/SIREN) spot'ta
-                    // "-1121 Invalid symbol" → sahte delisting purge. [[venue]] [[feedback_market_agnostic]].
-                    let Some(venue) = registry.for_symbol(sym) else {
+                    // MARKET-FARKINDA + explicit routing: sembol kendi venue'sine yönlenir.
+                    // "SYM@bybit" açık etikettir; etiketsizse şekille (classify) → venue market'in
+                    // doğru endpoint'inden çeker (futures→fapi). `bare` = etiket soyulmuş sembol →
+                    // HTTP'ye o gider; harita/log anahtarı `sym` (özgün) kalır. [[venue]] [[feedback_market_agnostic]].
+                    let Some((venue, bare)) = registry.route(sym) else {
                         errors.push((sym.clone(), "venue bulunamadı (registry boş?)".to_string()));
                         continue;
                     };
-                    match venue.fetch_candles(sym, &interval, 1).await.map_err(|e| e.to_string()) {
+                    match venue.fetch_candles(bare, &interval, 1).await.map_err(|e| e.to_string()) {
                         Ok(candles) => {
                             // Fetch döndü → sembol borsada var (delisted değil); sayacı sıfırla.
                             delisted_record_success(sym);
