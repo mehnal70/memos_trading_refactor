@@ -35,7 +35,12 @@ NC='\033[0m'
 # Defaults
 MODE="snapshot"
 MINUTES=10
-LOG_DIR="./logs"
+# Aktif profilin log dizinini .launch.conf'tan türet (HEARTBEAT_PATH'in dizini) → profil-doğru.
+# Yoksa kök ./logs. --log-dir flag'i (aşağıda) yine de bunu ezer. [[project_profiles]]
+# shellcheck source=scripts/lib_launchconf.sh
+. "scripts/lib_launchconf.sh" 2>/dev/null \
+    && load_launch_conf "scripts/.launch.conf" 2>/dev/null || true
+if [ -n "${HEARTBEAT_PATH:-}" ]; then LOG_DIR="$(dirname "$HEARTBEAT_PATH")"; else LOG_DIR="./logs"; fi
 
 # Arg parse
 while [ $# -gt 0 ]; do

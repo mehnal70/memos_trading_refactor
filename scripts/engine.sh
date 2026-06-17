@@ -25,11 +25,19 @@
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
+# Aktif profilin çalışma-zamanı env'ini yükle → trade/heartbeat logları profil-doğru olsun.
+# Motor logs/<profil>/...'e yazarken bu script kök logs/...'e bakarsa BAYAT/yetim veri gösterir
+# (watchdog.sh ile aynı tek-kaynak desen). [[project_profiles]]
+# shellcheck source=scripts/lib_launchconf.sh
+. "$REPO_DIR/scripts/lib_launchconf.sh" 2>/dev/null \
+    && load_launch_conf "$REPO_DIR/scripts/.launch.conf" 2>/dev/null || true
+
 PID_FILE="logs/.engine.pid"
 STDOUT_LOG="logs/engine_stdout.log"
 STDERR_LOG="logs/engine_stderr.log"
-HEARTBEAT_LOG="logs/heartbeat.jsonl"
-TRADES_LOG="logs/trades.jsonl"
+HEARTBEAT_LOG="${HEARTBEAT_PATH:-logs/heartbeat.jsonl}"
+TRADES_LOG="${TRADES_LOG_PATH:-logs/trades.jsonl}"
+ROBOTIC_LOG="${TRADING_LOG_PATH:-logs/robotic_trading.log}"
 
 mkdir -p logs
 
@@ -216,8 +224,8 @@ cmd_logs() {
     echo "── stderr son $n satır ──"
     tail -n "$n" "$STDERR_LOG" 2>/dev/null || echo "(stderr boş)"
     echo
-    echo "── robotic_trading.log son $n satır ──"
-    tail -n "$n" logs/robotic_trading.log 2>/dev/null || echo "(yok)"
+    echo "── robotic_trading.log son $n satır ($ROBOTIC_LOG) ──"
+    tail -n "$n" "$ROBOTIC_LOG" 2>/dev/null || echo "(yok)"
 }
 
 cmd_build() {
