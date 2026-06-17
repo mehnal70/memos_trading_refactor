@@ -274,6 +274,44 @@ impl Exchange {
     pub fn classify(symbol: &str) -> Self {
         if bist_symbol_shape(symbol) { Self::Bist } else { Self::Binance }
     }
+
+    /// Bu borsanın işlediği varlık sınıfı. Edge/risk/veri-feed mantığı varlık-sınıfına
+    /// göre dallanır (örn. funding-carry yalnız Crypto-perp'te anlamlı, equity'de seans/halt
+    /// vardır). Yeni borsa eklerken sınıfını BURAYA bir kol olarak ekle; tek-kaynak.
+    pub fn asset_class(&self) -> AssetClass {
+        match self {
+            Self::Binance | Self::Coinbase | Self::Kucoin => AssetClass::Crypto,
+            Self::Bist => AssetClass::Equity,
+        }
+    }
+}
+
+/// İşlem gören varlık sınıfı — borsa-üstü, davranış dallanmasının tek-kaynağı.
+/// (Crypto: 7/24, perp'te funding; Equity: seans/halt/temettü; Commodity: futures/spot
+/// emtia; Forex: 24/5 döviz.) Yeni sınıf gerektiğinde buraya bir kol ekle.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum AssetClass {
+    Crypto,
+    Equity,
+    Commodity,
+    Forex,
+}
+
+impl AssetClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Crypto => "crypto",
+            Self::Equity => "equity",
+            Self::Commodity => "commodity",
+            Self::Forex => "forex",
+        }
+    }
+
+    /// 7/24 işlem görür mü? (Crypto/Forex süreklilik varsayımı; Equity/Commodity seanslı.)
+    /// Stale-feed kapısı + işlem-takvimi mantığı bunu temel alır.
+    pub fn is_continuous(&self) -> bool {
+        matches!(self, Self::Crypto)
+    }
 }
 
 /// BIST equity sembol biçimi heuristic'i: 3-6 büyük-harf/rakam, kripto quote'suz.
