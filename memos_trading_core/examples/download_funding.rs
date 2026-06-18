@@ -46,8 +46,10 @@ fn main() {
 
     let now_ms = memos_trading_core::core::time::now_epoch_millis() as i64;
     let start_ms = now_ms - years * 365 * 86_400 * 1000;
-    // Funding ~3/gün → years×365×3 kayıt; ≤1000/istek → sayfa tavanını bolca ver.
-    let max_requests = ((years * 365 * 3) / 1000 + 2).max(3) as usize;
+    // Funding ~3/gün → years×365×3 kayıt. Sayfa-boyutu BORSA-farkında: Binance ≤1000/istek,
+    // Bybit ≤200/istek → istek tavanını sayfa boyutuna göre ver (yoksa Bybit erken kesilir).
+    let per_page: i64 = if exchange == "bybit" { 200 } else { 1000 };
+    let max_requests = ((years * 365 * 3) / per_page + 2).max(3) as usize;
 
     let fetcher = BinanceFetcher::new();
     let bybit = BybitVenue::new(Market::Futures);
