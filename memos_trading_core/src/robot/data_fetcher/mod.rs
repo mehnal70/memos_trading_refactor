@@ -20,6 +20,9 @@ pub use yahoo::YahooFetcher;
 pub mod twelvedata;
 pub use twelvedata::TwelveDataFetcher;
 
+pub mod isyatirim;
+pub use isyatirim::IsYatirimFetcher;
+
 // NOT: hybrid (HybridBinanceFetcher) + live_adapter (BinanceLiveAdapter) kaldırıldı
 // (çoklu-piyasa Faz 0-C): ölü LiveDataFetcher kümesi, bozuk URL'ler. Canlı veri venue::VenueAdapter
 // (MarketData) üzerinden; WS feed deseni data_pipeline::price_feed'de korunuyor.
