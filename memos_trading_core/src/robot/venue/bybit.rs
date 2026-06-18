@@ -129,6 +129,99 @@ impl BybitVenue {
         }
     }
 
+    /// 💰 `/v5/market/funding/history` tek sayfasını parse et — `(funding_time_ms, rate)` listesi.
+    /// Bybit EN YENİ BAŞTA döner; sıralama çağırana bırakılır (paginate sort eder). Saf → ağsız test.
+    fn parse_funding_page(symbol: &str, body: &str) -> Result<Vec<(i64, f64)>> {
+        let v: serde_json::Value =
+            serde_json::from_str(body).map_err(|e| format!("Bybit JSON parse: {e}"))?;
+        let ret_code = v.get("retCode").and_then(|c| c.as_i64()).unwrap_or(-1);
+        if ret_code != 0 {
+            let msg = v.get("retMsg").and_then(|m| m.as_str()).unwrap_or("");
+            return Err(format!("Bybit funding hatası (retCode {ret_code} {msg}) [{symbol}]").into());
+        }
+        let list = v
+            .get("result")
+            .and_then(|r| r.get("list"))
+            .and_then(|l| l.as_array())
+            .ok_or_else(|| format!("Bybit funding yanıtında result.list yok [{symbol}]"))?;
+        let mut out = Vec::with_capacity(list.len());
+        for item in list {
+            // Bybit alan adları: fundingRateTimestamp (ms, string), fundingRate (string).
+            let t = item.get("fundingRateTimestamp")
+                .and_then(|x| x.as_str())
+                .and_then(|s| s.parse::<i64>().ok());
+            let r = item.get("fundingRate")
+                .and_then(|x| x.as_str())
+                .and_then(|s| s.parse::<f64>().ok());
+            if let (Some(t), Some(r)) = (t, r) {
+                if t > 0 {
+                    out.push((t, r));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// 💰 Funding-rate geçmişi (YALNIZ linear/inverse perp). Bybit funding/history `startTime`/
+    /// `endTime` ister ve sayfa başı ≤200 kayıt EN YENİ BAŞTA döner → `endTime`'ı geriye yürüterek
+    /// `start_ms`'e kadar pagine eder. Dönen `(funding_time_ms, rate)` kronolojik (artan), dedup'lı.
+    /// Binance `fetch_funding_history` ile aynı sözleşme (cross-exchange hizalama için).
+    pub async fn fetch_funding_history(
+        &self, symbol: &str, start_ms: i64, max_requests: usize,
+    ) -> Result<Vec<(i64, f64)>> {
+        if matches!(self.market, Market::Spot) {
+            return Err(format!("funding yalnız perp'te var (market=spot) [{symbol}]").into());
+        }
+        let now_ms = crate::core::time::now_epoch_millis() as i64;
+        let start_ms = start_ms.max(0);
+        let mut end_cursor = now_ms;
+        let mut out: Vec<(i64, f64)> = Vec::new();
+        let mut last_err: Option<String> = None;
+
+        for _ in 0..max_requests.max(1) {
+            if end_cursor <= start_ms {
+                break;
+            }
+            let url = format!(
+                "{BYBIT_BASE}/v5/market/funding/history?category={}&symbol={}&startTime={}&endTime={}&limit=200",
+                Self::category(self.market),
+                symbol,
+                start_ms,
+                end_cursor,
+            );
+            let body = match self.client.get(&url).send().await {
+                Ok(resp) => match resp.text().await {
+                    Ok(b) => b,
+                    Err(e) => { last_err = Some(format!("Bybit funding gövde: {e}")); break; }
+                },
+                Err(e) => { last_err = Some(format!("Bybit funding bağlantı: {e}")); break; }
+            };
+            match Self::parse_funding_page(symbol, &body) {
+                Ok(batch) => {
+                    if batch.is_empty() { break; }
+                    let min_t = batch.iter().map(|(t, _)| *t).min().unwrap_or(end_cursor);
+                    let n = batch.len();
+                    out.extend(batch);
+                    let next_end = min_t - 1; // en eski kaydın bir öncesi → geriye yürü
+                    if next_end >= end_cursor { break; } // ilerleme yok → kır
+                    end_cursor = next_end;
+                    if n < 200 { break; } // tam-dolmayan sayfa → pencere sonuna ulaşıldı
+                }
+                Err(e) => { last_err = Some(e.to_string()); break; }
+            }
+        }
+
+        if out.is_empty() {
+            return Err(last_err
+                .unwrap_or_else(|| format!("{symbol} funding: aralıkta veri yok"))
+                .into());
+        }
+        // Geriye-yürüme + olası örtüşme → dedup + artan sırala.
+        out.sort_by_key(|(t, _)| *t);
+        out.dedup_by_key(|(t, _)| *t);
+        Ok(out)
+    }
+
     /// Yürütme/filtre henüz yok — sahte değer DÖNMEZ, açık hata döner.
     fn unsupported<T>(what: &str) -> Result<T> {
         Err(format!("Bybit {what} henüz uygulanmadı (Faz 1+ yürütme katmanı) — şu an veri-only venue").into())
@@ -264,6 +357,51 @@ mod tests {
         let (b, a) = BybitVenue::parse_book_ticker("BTCUSDT", &body).unwrap();
         assert_eq!(b, 100.0);
         assert_eq!(a, 100.2);
+    }
+
+    #[test]
+    fn parse_funding_page_extracts_time_rate() {
+        // Bybit en-yeni-başta döner; parser ham düzeni korur (sıralama paginate'te).
+        let body = json!({
+            "retCode": 0, "retMsg": "OK",
+            "result": {"category":"linear","list":[
+                {"symbol":"BTCUSDT","fundingRate":"0.0001","fundingRateTimestamp":"1700028800000"},
+                {"symbol":"BTCUSDT","fundingRate":"-0.00005","fundingRateTimestamp":"1700000000000"}
+            ]}
+        })
+        .to_string();
+        let f = BybitVenue::parse_funding_page("BTCUSDT", &body).unwrap();
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0], (1_700_028_800_000, 0.0001));
+        assert_eq!(f[1], (1_700_000_000_000, -0.00005));
+    }
+
+    #[test]
+    fn parse_funding_page_api_error_is_err() {
+        let body = json!({"retCode": 10001, "retMsg": "params error", "result": {}}).to_string();
+        assert!(BybitVenue::parse_funding_page("BTCUSDT", &body).is_err());
+    }
+
+    #[test]
+    fn parse_funding_page_skips_malformed_rows() {
+        let body = json!({
+            "retCode": 0,
+            "result": {"list":[
+                {"symbol":"BTCUSDT","fundingRate":"0.0001","fundingRateTimestamp":"1700000000000"},
+                {"symbol":"BTCUSDT","fundingRate":"bad","fundingRateTimestamp":"1700008800000"},
+                {"symbol":"BTCUSDT","fundingRateTimestamp":"1700017600000"}
+            ]}
+        })
+        .to_string();
+        let f = BybitVenue::parse_funding_page("BTCUSDT", &body).unwrap();
+        assert_eq!(f.len(), 1, "yalnız tam-geçerli satır");
+        assert_eq!(f[0].0, 1_700_000_000_000);
+    }
+
+    #[tokio::test]
+    async fn funding_spot_is_err() {
+        let v = BybitVenue::new(Market::Spot);
+        assert!(v.fetch_funding_history("BTCUSDT", 0, 1).await.is_err());
     }
 
     #[tokio::test]

@@ -409,12 +409,44 @@ pub fn read_funding_market(
     Ok(v)
 }
 
+/// 💰 Borsa-FARKINDA funding okuma. `read_funding_market` yalnız (symbol,market) ile sorgular →
+/// aynı sembolün çok-borsalı funding'i KARIŞIR; cross-exchange analiz için exchange'i de filtreler.
+pub fn read_funding_exchange(
+    db_path: &str, exchange: &str, symbol: &str, market: &str, limit: usize,
+) -> Result<Vec<(i64, f64)>, crate::MemosTradingError> {
+    let conn = crate::persistence::open_db(db_path)
+        .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
+    let mut stmt = match conn.prepare(
+        "SELECT funding_time, rate FROM funding_rates WHERE exchange=?1 AND symbol=?2 AND market=?3 \
+         ORDER BY funding_time DESC LIMIT ?4",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Ok(Vec::new()), // tablo yok → boş
+    };
+    let rows = stmt.query_map(params![exchange, symbol, market, limit as i64],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?)))
+        .map_err(|e| crate::MemosTradingError::Database(format!("funding okuma: {}", e)))?;
+    let mut v: Vec<(i64, f64)> = rows.filter_map(|r| r.ok()).collect();
+    v.reverse(); // DESC → ASC (kronolojik)
+    Ok(v)
+}
+
 /// 💰 Son funding_time (gap-farkında indirme için). Tablo/kayıt yoksa None.
 pub fn last_funding_ts(db_path: &str, symbol: &str, market: &str) -> Option<i64> {
     let conn = crate::persistence::open_db(db_path).ok()?;
     conn.query_row(
         "SELECT MAX(funding_time) FROM funding_rates WHERE symbol=?1 AND market=?2",
         params![symbol, market],
+        |row| row.get::<_, Option<i64>>(0),
+    ).ok().flatten()
+}
+
+/// 💰 Borsa-FARKINDA son funding_time (çok-borsalı gap-farkında indirme için).
+pub fn last_funding_ts_exchange(db_path: &str, exchange: &str, symbol: &str, market: &str) -> Option<i64> {
+    let conn = crate::persistence::open_db(db_path).ok()?;
+    conn.query_row(
+        "SELECT MAX(funding_time) FROM funding_rates WHERE exchange=?1 AND symbol=?2 AND market=?3",
+        params![exchange, symbol, market],
         |row| row.get::<_, Option<i64>>(0),
     ).ok().flatten()
 }
