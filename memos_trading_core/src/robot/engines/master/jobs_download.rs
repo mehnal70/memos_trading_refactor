@@ -217,11 +217,18 @@ impl Engine {
                     total_failed += 1;
                     log::warn!("🌐 Download fetch hatası: {} → {}", sym, e);
                     push_state_log(state, format!("    └─ {} ❌ fetch hatası: {}", sym, e));
-                    // Delisted auto-detect: ardışık başarısızlık sayacı.
-                    let n_fail = delisted_record_failure(sym);
-                    let threshold = delisted_detection_threshold();
-                    if threshold > 0 && n_fail >= threshold {
-                        Self::purge_delisted_symbol(state, sym, n_fail);
+                    // Delisted auto-detect: ardışık başarısızlık sayacı. YALNIZ gerçek
+                    // "sembol yok" (delisted/-1121/boş-veri) sayacı artırır — price_poll
+                    // yolu (infra_fleet) ile pariteli. GEÇİCİ hata (bağlantı/timeout/
+                    // rate-limit) sürekli stall'da (DataStall/Recovering) GEÇERLİ majörü
+                    // (BLEND book bacağı gibi) yanlışça purge edip PnL=0 force-close
+                    // ettiriyordu → bayat-fiyat churn. [[project_symbol_status_registry]].
+                    if crate::robot::data_fetcher::binance::fetch_error_is_delisting(&e) {
+                        let n_fail = delisted_record_failure(sym);
+                        let threshold = delisted_detection_threshold();
+                        if threshold > 0 && n_fail >= threshold {
+                            Self::purge_delisted_symbol(state, sym, n_fail);
+                        }
                     }
                 }
             }
