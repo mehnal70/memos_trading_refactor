@@ -232,6 +232,7 @@ pub enum Exchange {
     Coinbase, // Yeni eklendi
     Kucoin,   // Yeni eklendi
     Bybit,    // Çoklu-piyasa Faz 1: gerçek 2. kripto borsa (VenueAdapter = BybitVenue)
+    Mt5,      // MetaTrader 5 köprüsü (forex/emtia/endeks CFD) — VenueAdapter = Mt5Venue
 }
 
 impl Exchange {
@@ -242,6 +243,7 @@ impl Exchange {
             Self::Coinbase => "coinbase",
             Self::Kucoin => "kucoin",
             Self::Bybit => "bybit",
+            Self::Mt5 => "mt5",
         }
     }
 
@@ -253,6 +255,7 @@ impl Exchange {
             "coinbase" => Some(Self::Coinbase),
             "kucoin"  => Some(Self::Kucoin),
             "bybit"   => Some(Self::Bybit),
+            "mt5" | "metatrader" | "metatrader5" => Some(Self::Mt5),
             _ => None,
         }
     }
@@ -266,7 +269,9 @@ impl Exchange {
             // BIST: bu dağıtımda canlı feed yok (manuel/gecikmeli liste). Operatör
             // RuntimeTuning.force_live_exchanges ile yine de zorlayabilir.
             Self::Bist => false,
-            Self::Binance | Self::Coinbase | Self::Kucoin | Self::Bybit => true,
+            // MT5: köprü (yerel MT5 terminali) ayaktayken feed gelir; soyutlama düzeyinde
+            // feed-yetenekli kabul edilir (bağlantı yoksa adaptör açık Err döner, sahte değil).
+            Self::Binance | Self::Coinbase | Self::Kucoin | Self::Bybit | Self::Mt5 => true,
         }
     }
 
@@ -285,6 +290,9 @@ impl Exchange {
         match self {
             Self::Binance | Self::Coinbase | Self::Kucoin | Self::Bybit => AssetClass::Crypto,
             Self::Bist => AssetClass::Equity,
+            // MT5 ağırlıkla forex (24/5). XAUUSD vb. emtia CFD'leri de barındırır; per-sembol
+            // emtia ayrımı edge-ölçümü gerektirirse follow-up (venue-düzeyinde kaba Forex yeter).
+            Self::Mt5 => AssetClass::Forex,
         }
     }
 }

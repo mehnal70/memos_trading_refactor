@@ -12,6 +12,7 @@ use crate::robot::engines::binance_executor::BinanceFuturesExecutor;
 use crate::robot::venue::adapter::VenueAdapter;
 use crate::robot::venue::binance::BinanceVenue;
 use crate::robot::venue::bybit::BybitVenue;
+use crate::robot::venue::mt5::{Mt5Bridge, Mt5Venue};
 
 pub struct VenueRegistry {
     venues: HashMap<Exchange, Arc<dyn VenueAdapter>>,
@@ -53,6 +54,13 @@ impl VenueRegistry {
                 Exchange::Bybit => {
                     // Bybit veri venue'su (auth gerekmez; yürütme Faz 1+ → açık hata).
                     reg.register(Arc::new(BybitVenue::new(spec.market)));
+                }
+                Exchange::Mt5 => {
+                    // MT5 veri venue'su (Faz 1). Tek köprü tüm MT5 sembollerince paylaşılır;
+                    // adres operatör-ayarı (MT5_BRIDGE_ADDR, varsayılan loopback). Köprü tembel
+                    // bağlanır (ilk istekte EA'yı kabul eder); yürütme Faz 2 → açık hata.
+                    let bridge = Arc::new(Mt5Bridge::with_defaults(std::env::var("MT5_BRIDGE_ADDR").ok()));
+                    reg.register(Arc::new(Mt5Venue::new(spec.market, bridge)));
                 }
                 _ => {
                     log::warn!(

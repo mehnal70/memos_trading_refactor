@@ -14,11 +14,13 @@
 pub mod adapter;
 pub mod binance;
 pub mod bybit;
+pub mod mt5;
 pub mod registry;
 pub mod types;
 
 pub use adapter::{MarketData, OrderExecution, VenueAdapter};
 pub use binance::BinanceVenue;
 pub use bybit::BybitVenue;
+pub use mt5::{Mt5Bridge, Mt5Venue};
 pub use registry::VenueRegistry;
 pub use types::{OrderKind, OrderReceipt, OrderRequest, OrderSide, OrderStatus};
