@@ -122,7 +122,11 @@ HANDLERS = {"status": cmd_status, "pos": cmd_pos, "positions": cmd_pos,
             "pnl": cmd_pnl, "trades": cmd_trades, "report": cmd_report}
 
 def handle(text):
-    cmd = text.lstrip("/").split("@")[0].split()[0].lower()
+    # Çıplak "/" veya "/@bot" gibi komutsuz girdi → boş parça; sessiz yoksay (çökme yerine).
+    parts = text.lstrip("/").split("@")[0].split()
+    if not parts:
+        return None
+    cmd = parts[0].lower()
     if cmd == "help" or cmd == "start":
         return HELP
     h = HANDLERS.get(cmd)
