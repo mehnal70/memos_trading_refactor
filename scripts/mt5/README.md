@@ -53,5 +53,17 @@ MT5 sembolleri (EURUSD/XAUUSD) BIST equity şekliyle çakıştığı için **oto
 - Köprü adresi (varsayılan dışıysa): `MT5_BRIDGE_ADDR=127.0.0.1:9001`
 - Sembolü etiketle: `EURUSD@mt5`, `XAUUSD@mt5`
 
+### Veriyi DB'ye alma (edge ölçümü yakıtı)
+
+EA bağlıyken `download_mt5` örneği mumu kanonik `candles` şemasına yazar:
+
+```
+cargo run --release --example download_mt5 -- mt5 1h EURUSD,GBPUSD,XAUUSD 2000
+```
+
+İzolasyon: MT5 verisi `exchange="mt5"`, `market=<market_tag>` (örn. `mt5`) ile saklanır.
+`read_candles_market` yalnız `market` ile filtrelediğinden, MT5'e **ayrı etiket** verilir
+(kripto `spot` / Yahoo `forex` ile karışmasın). Env: `DB_PATH`, `MT5_BRIDGE_ADDR`.
+
 > **Faz duvarı:** Yürütme (`order`) Faz 2'dir. Önce MT5 verisiyle izole edge ölçümü yapılır
 > (forex/emtia), edge doğrulanırsa `OrderExecution` (Rust `Mt5Venue` + EA `HandleOrder`) açılır.
