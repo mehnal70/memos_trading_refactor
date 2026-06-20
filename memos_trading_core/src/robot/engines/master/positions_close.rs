@@ -171,7 +171,9 @@ impl Engine {
             let target_pos = if let Ok(mut positions) = st.finance.live_positions.write() {
                 positions.remove(symbol)
             } else { None };
-            let exec = st.live_executor.clone();
+            // Executor venue-farkında seçilir (registry); Binance sembolde st.live_executor
+            // ile birebir aynı, @bybit/data-only'de None → paper kapanış. [[venue]]
+            let exec = st.venue_registry.binance_executor_for(symbol);
             let dry = st.live_dry_run;
             let tag = if exec.is_some() && !dry { "LIVE" }
                       else if exec.is_some() && dry { "DRY-RUN" }

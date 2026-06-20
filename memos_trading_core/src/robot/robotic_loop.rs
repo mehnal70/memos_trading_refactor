@@ -313,6 +313,11 @@ pub struct AppState {
     /// freshness/sapma eşikleri, log cooldown'ları, BIST toggle). Cycle hot-path'i
     /// per-tick getenv yapmak yerine bu Arc'tan okur. Bkz. master::RuntimeTuning.
     pub tuning: Arc<crate::robot::engines::master::RuntimeTuning>,
+
+    /// 🏛️ Venue kayıt defteri (config.venues'tan bir kez kurulur). Sembol→venue yönlendirme
+    /// (explicit `@borsa` etiketi + şekil-tabanlı default) tek-kaynak. price_poll/download/
+    /// execution call-site'ları bu paylaşılan registry'yi kullanır. [[project_venue_multimarket]]
+    pub venue_registry: Arc<crate::robot::venue::VenueRegistry>,
 }
 
 impl AppState {
@@ -502,6 +507,16 @@ impl AppState {
             None
         };
 
+        // 🏛️ Venue registry — config.venues'tan kur. live_executor varsa Binance venue auth'lu
+        // (veri+yürütme), yoksa data-only (yalnız public veri). fetch_candles her iki halde de
+        // fetcher kullanır → veri yolu davranışı executor'dan bağımsız. [[project_venue_multimarket]]
+        let venue_registry = Arc::new(
+            crate::robot::venue::VenueRegistry::from_specs(&config.venues, live_executor.clone()),
+        );
+        log::info!(target:"STATE_INIT", "🏛️ Venue registry: {} venue ({})",
+            venue_registry.len(),
+            config.venues.iter().map(|v| v.token()).collect::<Vec<_>>().join(","));
+
         // LIVE_DRY_RUN: executor olsa bile gerçek emir gönderme; sadece "gönderilecekti" log'la.
         let live_dry_run = std::env::var("LIVE_DRY_RUN")
             .map(|v| v == "true" || v == "1").unwrap_or(false);
@@ -566,6 +581,7 @@ impl AppState {
             app_stop_signal: stop_sig,
             pause_signal: Arc::new(AtomicBool::new(false)),
             tuning,
+            venue_registry,
         }
     }
 

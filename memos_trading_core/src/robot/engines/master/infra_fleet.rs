@@ -83,10 +83,12 @@ impl Engine {
         // ── Task 3: Fiyat poll — aktif semboller için REST üzerinden son fiyatı çek
         let st_px = Arc::clone(&state);
         tokio::spawn(async move {
-            use crate::robot::data_fetcher::binance::BinanceFetcher;
-            use crate::robot::data_fetcher::market_fetcher::MarketFetcher;
             use crate::robot::data_pipeline::{StepStatus, AnomalySeverity, AnomalyKind};
-            let fetcher = BinanceFetcher::new();
+            use crate::robot::venue::MarketData; // fetch_candles trait metodu için
+            // Canlı fiyat-poll mumu venue katmanı üzerinden çeker. Registry AppState'te bir kez
+            // kurulur (config.venues, operatör seçimi); burada Arc-clone ile okunur. Sembol →
+            // route ile doğru venue'ya yönlenir (explicit @borsa etiketi + şekil default).
+            // Binance için behavior-identik: BinanceVenue::fetch_candles → fetcher. [[venue]]
             let started_at = std::time::Instant::now();
             let poll_secs = 5_u64;
             // İlk başarılı çekimde özet log'u TUI'ye düşür (sonrasında sessiz, sadece anomalide konuşur).
@@ -98,10 +100,10 @@ impl Engine {
             let mut last_error_summary_msg: String = String::new();
 
             loop {
-                let (symbols, interval, market, stop) = {
+                let (symbols, interval, registry, stop) = {
                     let st = match st_px.lock() { Ok(s) => s, Err(_) => break };
                     if st.app_stop_signal.load(Ordering::Relaxed) {
-                        (vec![], String::new(), String::new(), true)
+                        (vec![], String::new(), Arc::clone(&st.venue_registry), true)
                     } else {
                         // Canlı feed'i olmayan borsa sembolleri (örn. BIST) Binance API'ye
                         // gönderilmez ("Veri Format Hatası" → ApiError anomaly). Market-agnostik
@@ -126,7 +128,7 @@ impl Engine {
                                 if !syms.contains(sym) { syms.push(sym.clone()); }
                             }
                         }
-                        (syms, st.config.interval.clone(), st.config.market.clone(), false)
+                        (syms, st.config.interval.clone(), Arc::clone(&st.venue_registry), false)
                     }
                 };
                 if stop { break; }
@@ -156,11 +158,15 @@ impl Engine {
                 let mut stale_skipped: Vec<String> = Vec::new();
                 for sym in &symbols {
                     if sym.is_empty() { continue; }
-                    // MARKET-FARKINDA: engine market'inin endpoint'inden çek (futures→fapi). Eskiden
-                    // trait `fetch_latest` SPOT kısayoluydu → futures-only sembol (MYX/SIREN) spot'ta
-                    // "-1121 Invalid symbol" → sahte delisting purge. download job Faz 2'de geçmişti,
-                    // price-poll kalmıştı. [[project_symbol_status_registry]] [[feedback_market_agnostic]].
-                    match fetcher.fetch_latest_market(sym, &interval, &market, 1).await {
+                    // MARKET-FARKINDA + explicit routing: sembol kendi venue'sine yönlenir.
+                    // "SYM@bybit" açık etikettir; etiketsizse şekille (classify) → venue market'in
+                    // doğru endpoint'inden çeker (futures→fapi). `bare` = etiket soyulmuş sembol →
+                    // HTTP'ye o gider; harita/log anahtarı `sym` (özgün) kalır. [[venue]] [[feedback_market_agnostic]].
+                    let Some((venue, bare)) = registry.route(sym) else {
+                        errors.push((sym.clone(), "venue bulunamadı (registry boş?)".to_string()));
+                        continue;
+                    };
+                    match venue.fetch_candles(bare, &interval, 1).await.map_err(|e| e.to_string()) {
                         Ok(candles) => {
                             // Fetch döndü → sembol borsada var (delisted değil); sayacı sıfırla.
                             delisted_record_success(sym);

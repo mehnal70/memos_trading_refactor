@@ -231,6 +231,8 @@ pub enum Exchange {
     Bist,
     Coinbase, // Yeni eklendi
     Kucoin,   // Yeni eklendi
+    Bybit,    // Çoklu-piyasa Faz 1: gerçek 2. kripto borsa (VenueAdapter = BybitVenue)
+    Mt5,      // MetaTrader 5 köprüsü (forex/emtia/endeks CFD) — VenueAdapter = Mt5Venue
 }
 
 impl Exchange {
@@ -240,6 +242,8 @@ impl Exchange {
             Self::Bist => "bist",
             Self::Coinbase => "coinbase",
             Self::Kucoin => "kucoin",
+            Self::Bybit => "bybit",
+            Self::Mt5 => "mt5",
         }
     }
 
@@ -250,6 +254,8 @@ impl Exchange {
             "bist"    => Some(Self::Bist),
             "coinbase" => Some(Self::Coinbase),
             "kucoin"  => Some(Self::Kucoin),
+            "bybit"   => Some(Self::Bybit),
+            "mt5" | "metatrader" | "metatrader5" => Some(Self::Mt5),
             _ => None,
         }
     }
@@ -263,7 +269,9 @@ impl Exchange {
             // BIST: bu dağıtımda canlı feed yok (manuel/gecikmeli liste). Operatör
             // RuntimeTuning.force_live_exchanges ile yine de zorlayabilir.
             Self::Bist => false,
-            Self::Binance | Self::Coinbase | Self::Kucoin => true,
+            // MT5: köprü (yerel MT5 terminali) ayaktayken feed gelir; soyutlama düzeyinde
+            // feed-yetenekli kabul edilir (bağlantı yoksa adaptör açık Err döner, sahte değil).
+            Self::Binance | Self::Coinbase | Self::Kucoin | Self::Bybit | Self::Mt5 => true,
         }
     }
 
@@ -273,6 +281,83 @@ impl Exchange {
     /// sembol biçimi farklıysa buraya bir kol ekle.
     pub fn classify(symbol: &str) -> Self {
         if bist_symbol_shape(symbol) { Self::Bist } else { Self::Binance }
+    }
+
+    /// Bu borsanın işlediği varlık sınıfı. Edge/risk/veri-feed mantığı varlık-sınıfına
+    /// göre dallanır (örn. funding-carry yalnız Crypto-perp'te anlamlı, equity'de seans/halt
+    /// vardır). Yeni borsa eklerken sınıfını BURAYA bir kol olarak ekle; tek-kaynak.
+    pub fn asset_class(&self) -> AssetClass {
+        match self {
+            Self::Binance | Self::Coinbase | Self::Kucoin | Self::Bybit => AssetClass::Crypto,
+            Self::Bist => AssetClass::Equity,
+            // MT5 ağırlıkla forex (24/5). XAUUSD vb. emtia CFD'leri de barındırır; per-sembol
+            // emtia ayrımı edge-ölçümü gerektirirse follow-up (venue-düzeyinde kaba Forex yeter).
+            Self::Mt5 => AssetClass::Forex,
+        }
+    }
+}
+
+/// İşlem gören varlık sınıfı — borsa-üstü, davranış dallanmasının tek-kaynağı.
+/// (Crypto: 7/24, perp'te funding; Equity: seans/halt/temettü; Commodity: futures/spot
+/// emtia; Forex: 24/5 döviz.) Yeni sınıf gerektiğinde buraya bir kol ekle.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum AssetClass {
+    Crypto,
+    Equity,
+    Commodity,
+    Forex,
+}
+
+impl AssetClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Crypto => "crypto",
+            Self::Equity => "equity",
+            Self::Commodity => "commodity",
+            Self::Forex => "forex",
+        }
+    }
+
+    /// 7/24 işlem görür mü? (Crypto/Forex süreklilik varsayımı; Equity/Commodity seanslı.)
+    /// Stale-feed kapısı + işlem-takvimi mantığı bunu temel alır.
+    pub fn is_continuous(&self) -> bool {
+        matches!(self, Self::Crypto)
+    }
+}
+
+/// Bir venue kimliği (borsa + market). Operatör config'i (`VENUES` env → RoboticLoopConfig.venues)
+/// aktif venue'ları bunlarla listeler; `VenueRegistry` bunlardan adaptörleri kurar. [[venue]]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct VenueSpec {
+    pub exchange: Exchange,
+    pub market: Market,
+}
+
+impl VenueSpec {
+    pub fn new(exchange: Exchange, market: Market) -> Self {
+        Self { exchange, market }
+    }
+
+    /// "binance:futures" / "bybit:spot" token'ından parse. Borsa bilinmiyorsa `None`;
+    /// market kısmı yoksa Spot (tek-kaynak `Exchange::from_token` + `Market::from_label`).
+    pub fn parse_token(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+        let (ex_str, mk_str) = match s.split_once(':') {
+            Some((e, m)) => (e, m),
+            None => (s, "spot"),
+        };
+        Some(Self {
+            exchange: Exchange::from_token(ex_str)?,
+            market: Market::from_label(mk_str),
+        })
+    }
+
+    /// "exchange:market" token'ı (parse_token ile round-trip).
+    pub fn token(&self) -> String {
+        format!("{}:{}", self.exchange.as_str(), self.market.as_str())
     }
 }
 

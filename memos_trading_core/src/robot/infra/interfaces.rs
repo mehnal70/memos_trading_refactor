@@ -1,8 +1,7 @@
 // robot/interfaces.rs - Modüler mimari için ana trait ve interface şablonları
 
-use crate::core::types::{Candle, FundingRatePoint, Signal, StrategyParams, Trade, Exchange, Market};
+use crate::core::types::{Candle, Signal, StrategyParams, Trade};
 use crate::Result;
-use async_trait::async_trait;
 
 /// DataFetcher: Her türlü veri kaynağından veri çeker
 pub trait DataFetcher: Send + Sync {
@@ -10,31 +9,10 @@ pub trait DataFetcher: Send + Sync {
     fn source_type(&self) -> &str;
 }
 
-/// LiveDataFetcher: Async live veri çekme trait'i
-#[async_trait]
-pub trait LiveDataFetcher: Send + Sync {
-    async fn fetch_latest(
-        &self,
-        exchange: Exchange,
-        market: Market,
-        symbol: &str,
-        interval: &str,
-        limit: usize,
-    ) -> Result<Vec<Candle>>;
-    
-    /// Futures/CoinM için anlık funding rate — diğer piyasalarda `Ok(None)` döner.
-    async fn fetch_funding_rate(
-        &self,
-        _market: Market,
-        _symbol: &str,
-    ) -> Result<Option<FundingRatePoint>> {
-        Ok(None)
-    }
-
-    fn source_name(&self) -> &str;
-    fn supported_markets(&self) -> Vec<Market>;
-    fn supported_symbols(&self, market: Market) -> Vec<String>;
-}
+// NOT: `LiveDataFetcher` trait'i + (BinanceLiveAdapter/HybridBinanceFetcher) implementasyonları
+// kaldırıldı (çoklu-piyasa Faz 0-C). Ölü-kümeydi: canlı tüketici yoktu, URL'leri bozuktu
+// (binance.com), funding `data_fetcher::binance::fetch_funding_history`'den geliyor. Canlı veri/
+// fiyat artık `venue::VenueAdapter` (MarketData) üzerinden tek-kaynaklı. [[venue]]
 
 /// StrategyEngine: Strateji yönetimi ve sinyal üretimi
 pub trait StrategyEngine: Send + Sync {
