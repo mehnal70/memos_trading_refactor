@@ -22,20 +22,26 @@
 //|      bir grafiğe ekle. EA bağlanır ve istekleri yanıtlar.         |
 //+------------------------------------------------------------------+
 #property copyright "Memos"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
+
+#include <Trade/Trade.mqh>              // Faz 2: CTrade market/limit OrderSend
 
 input string InpHost      = "127.0.0.1"; // Rust köprü host
 input int    InpPort      = 9001;        // Rust köprü port (MT5_BRIDGE_ADDR ile aynı)
 input int    InpPollMs    = 50;          // OnTimer periyodu (ms)
 input bool   InpEnableExec = false;      // Faz 2: emir yürütmeyi aç (varsayılan kapalı)
+input long   InpMagic     = 770077;      // Faz 2: emir magic numarası (memos kimliği)
 
-int    g_sock = INVALID_HANDLE;          // soket handle
-string g_buf  = "";                      // satır-birleştirme tamponu
+int     g_sock = INVALID_HANDLE;         // soket handle
+string  g_buf  = "";                     // satır-birleştirme tamponu
+CTrade  g_trade;                         // Faz 2: yürütme yardımcısı
 
 //+------------------------------------------------------------------+
 int OnInit()
   {
+   g_trade.SetExpertMagicNumber(InpMagic);
+   g_trade.SetAsyncMode(false); // senkron: yanıt yazmadan önce sonucu öğren
    EventSetMillisecondTimer(InpPollMs);
    PrintFormat("MemosBridge: %s:%d hedefine bağlanılacak (poll %dms, exec=%s)",
                InpHost, InpPort, InpPollMs, (string)InpEnableExec);
@@ -204,13 +210,13 @@ void HandleRequest(const string req)
    long   id  = (long)JsonNum(req, "id");
    string cmd = JsonStr(req, "cmd");
 
-   if(cmd == "candles")      { HandleCandles(id, req); return; }
-   if(cmd == "tick")         { HandleTick(id, req);    return; }
-   if(cmd == "filters")      { HandleFilters(id, req); return; }
-   if(cmd == "balance")      { HandleBalance(id);      return; }
-   if(cmd == "order")        { HandleOrder(id, req);   return; }
-   if(cmd == "cancel_all")   { ReplyError(id, "cancel_all Faz 2");   return; }
-   if(cmd == "set_leverage") { ReplyError(id, "set_leverage Faz 2"); return; }
+   if(cmd == "candles")      { HandleCandles(id, req);    return; }
+   if(cmd == "tick")         { HandleTick(id, req);       return; }
+   if(cmd == "filters")      { HandleFilters(id, req);    return; }
+   if(cmd == "balance")      { HandleBalance(id);         return; }
+   if(cmd == "order")        { HandleOrder(id, req);      return; }
+   if(cmd == "cancel_all")   { HandleCancelAll(id, req);  return; }
+   if(cmd == "set_leverage") { HandleSetLeverage(id, req);return; }
    ReplyError(id, "bilinmeyen cmd: " + cmd);
   }
 
@@ -279,6 +285,10 @@ void HandleBalance(const long id)
 
 //+------------------------------------------------------------------+
 //| Faz 2 yürütme. InpEnableExec kapalıyken açık hata (sahte değil).  |
+//| market  -> CTrade.Buy/Sell (anında dolum, status "filled")        |
+//| limit   -> CTrade.BuyLimit/SellLimit (bekleyen, status "placed")  |
+//| Rust compact JSON ürettiği için reduce_only düz alt-dize ile      |
+//| denetlenir ("\"reduce_only\":true").                              |
 //+------------------------------------------------------------------+
 void HandleOrder(const long id, const string req)
   {
@@ -287,7 +297,94 @@ void HandleOrder(const long id, const string req)
       ReplyError(id, "order Faz 2 (InpEnableExec=false)");
       return;
      }
-   // Faz 2 iskeleti: CTrade ile market/limit OrderSend burada uygulanacak.
-   ReplyError(id, "order Faz 2 — yürütme henüz uygulanmadı");
+   string sym  = JsonStr(req, "symbol");
+   string side = JsonStr(req, "side");
+   string kind = JsonStr(req, "kind");
+   double qty  = JsonNum(req, "qty");
+   double price= JsonNum(req, "price");
+   bool   is_buy = (side == "buy");
+
+   if(StringLen(sym) == 0 || qty <= 0.0)
+     {
+      ReplyError(id, "geçersiz order (symbol/qty)");
+      return;
+     }
+
+   bool ok;
+   if(kind == "market")
+      ok = is_buy ? g_trade.Buy(qty, sym, 0.0, 0.0, 0.0, "memos")
+                  : g_trade.Sell(qty, sym, 0.0, 0.0, 0.0, "memos");
+   else if(kind == "limit")
+     {
+      if(price <= 0.0) { ReplyError(id, "limit order fiyatsız"); return; }
+      ok = is_buy ? g_trade.BuyLimit(qty, price, sym)
+                  : g_trade.SellLimit(qty, price, sym);
+     }
+   else
+     {
+      ReplyError(id, "bilinmeyen order kind: " + kind);
+      return;
+     }
+
+   uint rc = g_trade.ResultRetcode();
+   if(!ok && rc != TRADE_RETCODE_DONE && rc != TRADE_RETCODE_PLACED
+         && rc != TRADE_RETCODE_DONE_PARTIAL)
+     {
+      ReplyError(id, StringFormat("OrderSend retcode %u: %s",
+                 rc, g_trade.ResultRetcodeDescription()));
+      return;
+     }
+
+   long   ticket = (long)g_trade.ResultOrder();
+   double fv     = g_trade.ResultVolume();
+   double fp     = g_trade.ResultPrice();
+   string st;
+   if(kind == "limit")               st = "placed";   // bekleyen emir (henüz dolmadı)
+   else if(rc == TRADE_RETCODE_DONE_PARTIAL) st = "partial";
+   else                              st = "filled";
+
+   SendLine(StringFormat(
+      "{\"id\":%I64d,\"ok\":true,\"order_id\":\"%I64d\",\"status\":\"%s\",\"filled_qty\":%.8f,\"avg_price\":%.8f}",
+      id, ticket, st, (kind == "limit" ? 0.0 : fv), (kind == "limit" ? 0.0 : fp)));
+  }
+
+//+------------------------------------------------------------------+
+//| Sembolün TÜM bekleyen emirlerini sil (koruma/limit). Açık pozisyon|
+//| kapatmaz — o, reduce_only market emriyle yapılır.                 |
+//+------------------------------------------------------------------+
+void HandleCancelAll(const long id, const string req)
+  {
+   if(!InpEnableExec)
+     {
+      ReplyError(id, "cancel_all Faz 2 (InpEnableExec=false)");
+      return;
+     }
+   string sym = JsonStr(req, "symbol");
+   int canceled = 0;
+   // Sondan başa: OrderDelete indeksleri kaydırır.
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0) continue;
+      if(StringLen(sym) > 0 && OrderGetString(ORDER_SYMBOL) != sym) continue;
+      if(g_trade.OrderDelete(ticket)) canceled++;
+     }
+   SendLine(StringFormat("{\"id\":%I64d,\"ok\":true,\"canceled\":%d}", id, canceled));
+  }
+
+//+------------------------------------------------------------------+
+//| MT5 kaldıracı hesap-seviyesidir (broker tarafı; sembol-API yok).  |
+//| Sözleşme uyumu için no-op onay döner (sahte başarı değil — gerçek |
+//| MT5 davranışı: kaldıraç burada ayarlanamaz).                      |
+//+------------------------------------------------------------------+
+void HandleSetLeverage(const long id, const string req)
+  {
+   if(!InpEnableExec)
+     {
+      ReplyError(id, "set_leverage Faz 2 (InpEnableExec=false)");
+      return;
+     }
+   SendLine(StringFormat(
+      "{\"id\":%I64d,\"ok\":true,\"note\":\"mt5 kaldiraci hesap-seviyesi, no-op\"}", id));
   }
 //+------------------------------------------------------------------+

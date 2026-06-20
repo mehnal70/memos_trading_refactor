@@ -183,6 +183,13 @@ pub fn parse_balance(body: &str) -> Result<f64> {
         .ok_or_else(|| "MT5 balance alanı yok".into())
 }
 
+/// Veri döndürmeyen komutların (`cancel_all`/`set_leverage`) onay çözücüsü — yalnız `ok`
+/// bayrağını doğrular. `ok:false` → `error` alanını taşıyan açık `Err` (sahte başarı yok).
+pub fn parse_ack(symbol: &str, body: &str) -> Result<()> {
+    ok_value(symbol, body)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +290,13 @@ mod tests {
     #[test]
     fn parse_balance_reads_field() {
         assert_eq!(parse_balance(r#"{"ok":true,"balance":10000.5}"#).unwrap(), 10000.5);
+    }
+
+    #[test]
+    fn parse_ack_honors_ok_flag() {
+        assert!(parse_ack("EURUSD", r#"{"ok":true,"canceled":2}"#).is_ok());
+        let e = parse_ack("EURUSD", r#"{"ok":false,"error":"no pending orders"}"#);
+        assert!(e.is_err());
+        assert!(format!("{}", e.unwrap_err()).contains("no pending orders"));
     }
 }
