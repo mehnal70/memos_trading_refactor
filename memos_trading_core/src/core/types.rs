@@ -383,6 +383,10 @@ pub enum Market {
     Spot,
     Futures,
     Coinm,
+    /// CFD piyasası (forex/emtia/endeks — örn. MT5 venue). Türev-benzeri: short serbest,
+    /// kaldıraçlı. Crypto `Futures`'tan AYRI tutulur → izole DB-namespace (market="mt5") +
+    /// kripto-futures evrenine karışmaz. [[project_venue_multimarket]]
+    Cfd,
 }
 
 impl Market {
@@ -391,22 +395,24 @@ impl Market {
             Self::Spot => "spot",
             Self::Futures => "futures",
             Self::Coinm => "coinm",
+            Self::Cfd => "cfd",
         }
     }
 
     /// config.market gibi serbest etiket string'inden Market'e (case-insensitive).
     /// Tanınmayan → Spot (en kısıtlı/güvenli varsayım). String karşılaştırmasını
-    /// koda serpmek yerine tek-nokta.
+    /// koda serpmek yerine tek-nokta. MT5/forex/emtia → Cfd (short serbest; izole namespace).
     pub fn from_label(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "futures" | "fut" | "perp" => Self::Futures,
             "coinm" | "coin-m" => Self::Coinm,
+            "cfd" | "mt5" | "forex" | "commodity" => Self::Cfd,
             _ => Self::Spot,
         }
     }
 
     /// Bu piyasada short (açığa satış) mekanik olarak mümkün mü? Spot'ta borrow
-    /// yoktur → long-only. Futures/coinm türevdir → short serbest.
+    /// yoktur → long-only. Futures/coinm/CFD türevdir → short serbest.
     pub fn allows_short(&self) -> bool {
         !matches!(self, Self::Spot)
     }
@@ -425,6 +431,10 @@ mod market_tests {
         // Tanınmayan/boş → en güvenli (long-only) varsayım.
         assert_eq!(Market::from_label("garip"), Market::Spot);
         assert_eq!(Market::from_label(""), Market::Spot);
+        // MT5/forex/emtia → Cfd (izole namespace + short serbest).
+        assert_eq!(Market::from_label("mt5"), Market::Cfd);
+        assert_eq!(Market::from_label("FOREX"), Market::Cfd);
+        assert_eq!(Market::from_label("cfd"), Market::Cfd);
     }
 
     #[test]
@@ -432,5 +442,6 @@ mod market_tests {
         assert!(!Market::Spot.allows_short(), "spot = long-only");
         assert!(Market::Futures.allows_short());
         assert!(Market::Coinm.allows_short());
+        assert!(Market::Cfd.allows_short(), "CFD (forex/emtia) = short serbest");
     }
 }

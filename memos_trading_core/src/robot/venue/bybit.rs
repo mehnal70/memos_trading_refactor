@@ -44,6 +44,9 @@ impl BybitVenue {
             Market::Futures => "linear",
             Market::Coinm => "inverse",
             Market::Spot => "spot",
+            // CFD Bybit'te yok (MT5 venue'ya özgü); kategori sorulursa linear'a düş (zararsız —
+            // CFD sembolü Bybit'e route olmaz). Exhaustive match için kol.
+            Market::Cfd => "linear",
         }
     }
 

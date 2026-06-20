@@ -533,7 +533,11 @@ impl RuntimeTuning {
         // exchangeInfo statü registry'si: açıkça TRADING-dışı (BREAK/HALT/delisted) → uygun değil.
         // (Bilinmeyen sembol registry dolmadan izinli; refresh job + boot hydrate doldurur.)
         if !is_symbol_tradeable(symbol) { return false; }
-        let ex = crate::core::types::Exchange::classify(symbol);
+        // Borsa belirleme: açık venue etiketi (örn. "EURUSD@mt5") varsa ona saygı duy
+        // (split_venue_tag tek-kaynak) — aksi halde "EURUSD" şekil-heuristic'iyle yanlışlıkla
+        // BIST'e (feed yok) sınıflanıp uygunsuz görünürdü. Etiketsiz → şekil-sınıflandırma.
+        let (_bare, tag) = crate::robot::venue::registry::split_venue_tag(symbol);
+        let ex = tag.unwrap_or_else(|| crate::core::types::Exchange::classify(symbol));
         ex.has_live_feed() || self.force_live_exchanges.contains(&ex)
     }
 }

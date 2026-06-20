@@ -212,6 +212,10 @@ impl RoboticLoopConfig {
             .unwrap_or(d.capital);
         Self {
             symbol:   crate::core::env::env_or("TRADE_SYMBOL", "BTCUSDT"),
+            // candles tablosunun exchange sütununu belirler (UNIQUE key'in parçası). MT5/dünya
+            // verisini izole namespace'te tutmak için TRADE_EXCHANGE=mt5 → engine download_mt5 ile
+            // AYNI satırlara yazar (çift satır olmaz; read_candles_market market-saf okur).
+            exchange: crate::core::env::env_or("TRADE_EXCHANGE", &d.exchange),
             market:   crate::core::env::env_or("TRADE_MARKET", "spot"),
             interval: crate::core::env::env_or("TRADE_INTERVAL", "1m"),
             db_path:  crate::core::env::env_or("DB_PATH", "data/trader.db"),
@@ -242,6 +246,18 @@ impl RoboticLoopConfig {
                 } else {
                     parsed
                 }
+            },
+            // PINNED_SYMBOLS="EURUSD@mt5,XAUUSD@mt5" → orchestrator'a doğrudan kaydedilen elit
+            // sembol listesi (screener'dan bağımsız). Venue etiketi (@mt5) korunur → routing +
+            // eligibility tag-farkında çalışır. Boşsa default ([BTCUSDT,ETHUSDT]) korunur.
+            pinned_symbols: {
+                let raw = crate::core::env::env_or("PINNED_SYMBOLS", "");
+                let parsed: Vec<String> = raw
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if parsed.is_empty() { d.pinned_symbols.clone() } else { parsed }
             },
             ..d
         }

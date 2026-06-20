@@ -24,9 +24,10 @@ impl Engine {
         // aksi halde "Veri Format Hatası" log kirliliği. Karar market-agnostik tek nokta:
         // RuntimeTuning.symbol_eligible_for_live (hydrate/price_poll/cycle ile aynı).
         let (symbols, interval, symbol_interval, db_path, limit, exchange, market,
-             backfill_enabled, backfill_max_requests) = {
+             backfill_enabled, backfill_max_requests, venue_registry) = {
             let st = state.lock().map_err(|e| format!("state lock: {}", e))?;
             let tuning = Arc::clone(&st.tuning);
+            let venue_registry = Arc::clone(&st.venue_registry);
             let eligible = |s: &str| tuning.symbol_eligible_for_live(s);
 
             let mut syms: Vec<String> = vec![];
@@ -58,7 +59,7 @@ impl Engine {
             (syms, st.config.interval.clone(), symbol_interval, st.config.db_path.clone(),
              st.config.download_candle_limit.max(50),
              st.config.exchange.clone(), st.config.market.clone(),
-             tuning.backfill_enabled, tuning.backfill_max_requests)
+             tuning.backfill_enabled, tuning.backfill_max_requests, venue_registry)
         };
 
         if symbols.is_empty() {
@@ -92,21 +93,42 @@ impl Engine {
             // Derin gap (>1000 bar geride): startTime-pagination ile gap'in BAŞINDAN ileri
             // doldur (fetch_latest son-1000 çekip aradaki deliği kalıcı bırakırdı). Sığ
             // gap/yeni sembol → tek-istek son-N (mevcut Faz 2 yolu, sıfır regresyon).
-            let fetch_fut = match backfill_enabled
-                .then(|| deep_gap_start_ms(last_ms, now_ms, iv_secs))
-                .flatten()
-            {
-                Some(start_ms) => {
-                    push_state_log(state, format!(
-                        "    └─ {} 🕳️ derin gap → backfill (start={}, ≤{}×1000 bar)",
-                        sym, start_ms, backfill_max_requests,
-                    ));
-                    fetcher.fetch_history_market(sym, &sym_iv, &market, start_ms, iv_secs, backfill_max_requests).await
+            // 🏛️ Venue-farkında çekim: sembol Binance-DIŞI bir venue'ya route oluyorsa (örn.
+            // "EURUSD@mt5" → MT5 köprüsü) onun MarketData::fetch_candles'ı kullanılır.
+            // BinanceFetcher forex/CFD sembolünü çözemez → "symbol not found" churn'ü +
+            // delisted-purge yanlış-pozitifi olurdu. Etiketsiz kripto + Binance default MEVCUT
+            // gap-aware yolu korur (sıfır regresyon). [[project_venue_multimarket]]
+            use crate::robot::venue::adapter::MarketData;
+            let route = venue_registry.route(sym);
+            let is_binance_venue = route
+                .as_ref()
+                .map(|(v, _)| v.exchange() == crate::core::types::Exchange::Binance)
+                .unwrap_or(true);
+            let fetch_fut = if is_binance_venue {
+                match backfill_enabled
+                    .then(|| deep_gap_start_ms(last_ms, now_ms, iv_secs))
+                    .flatten()
+                {
+                    Some(start_ms) => {
+                        push_state_log(state, format!(
+                            "    └─ {} 🕳️ derin gap → backfill (start={}, ≤{}×1000 bar)",
+                            sym, start_ms, backfill_max_requests,
+                        ));
+                        fetcher.fetch_history_market(sym, &sym_iv, &market, start_ms, iv_secs, backfill_max_requests).await
+                    }
+                    None => {
+                        let fetch_limit = gap_aware_fetch_limit(last_ms, now_ms, iv_secs, limit);
+                        fetcher.fetch_latest_market(sym, &sym_iv, &market, fetch_limit).await
+                    }
                 }
-                None => {
-                    let fetch_limit = gap_aware_fetch_limit(last_ms, now_ms, iv_secs, limit);
-                    fetcher.fetch_latest_market(sym, &sym_iv, &market, fetch_limit).await
-                }
+            } else {
+                // Binance-dışı venue: trait fetch_candles son-N mum verir (gap-aware backfill yok);
+                // ÇIPLAK sembolle (etiket soyulmuş) çek. Köprü kapalıysa adaptör açık Err döner.
+                let (venue, bare) = route.expect("route Some → Binance-dışı dalı");
+                let fetch_limit = gap_aware_fetch_limit(last_ms, now_ms, iv_secs, limit);
+                // Venue hatası (MemosTradingError) → String (BinanceFetcher yolu String döndürür;
+                // if/else kolları tek tip olmalı).
+                venue.fetch_candles(bare, &sym_iv, fetch_limit).await.map_err(|e| e.to_string())
             };
             match fetch_fut {
                 Ok(candles) => {
