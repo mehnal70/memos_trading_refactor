@@ -57,6 +57,13 @@ pub struct XsConfig {
     pub top_k: usize,
     /// İşlem maliyeti — turnover BİRİMİ başına tek-yön oran (fee+slippage). Σ|Δw|·fee_rate düşülür.
     pub fee_rate: f64,
+    /// 🌙 TUTMA (overnight swap/rollover) maliyeti — gross-exposure birimi başına BAR-başı oran.
+    /// turnover'dan AYRI: spread bir kez (giriş/çıkış) ödenir, swap pozisyon AÇIK kaldıkça HER BAR
+    /// ödenir. Her bar `Σ|w_j|·swap_rate_per_bar` düşülür (market-nötr L/S'te gross≈2 → iki bacak da
+    /// tutulur). FX'in asıl düşmanı (günlük rebalance'ta turnover≈full ama swap her gün tekrar).
+    /// Default 0.0 = KAPALI (sıfır regresyon; kripto/spot ölçümleri etkilenmez). fee gibi unlevered
+    /// düşülür → finalize'da leverage ile ölçeklenir (exposure-orantılı maliyet, tutarlı).
+    pub swap_rate_per_bar: f64,
     /// true = momentum (en güçlü long / en zayıf short); false = reversal (ters).
     pub momentum: bool,
     /// true = market-nötr long-short (gross=2); false = long-only top (gross=1).
@@ -105,6 +112,7 @@ impl Default for XsConfig {
             lookback: 7,
             top_k: 3,
             fee_rate: 0.0005, // 5 bps / turnover birimi (round-turn ~10bps futures taker+slippage)
+            swap_rate_per_bar: 0.0, // tutma maliyeti KAPALI (opt-in; FX swap ölçümünde XS_SWAP_RATE ile aç)
             momentum: true,
             long_short: true,
             rebalance_every: 1, // her bar (geri-uyumlu); yavaş sinyalde XS_REBALANCE>1 ile churn kıs
@@ -243,7 +251,10 @@ fn xs_returns(
         } else {
             0.0
         };
-        rets.push(port - turnover * cfg.fee_rate);
+        // 🌙 Tutma (swap) maliyeti: pozisyon AÇIK olduğu HER bar, gross-exposure başına. turnover'dan
+        // bağımsız → seyrek rebalance / band turnover'ı kısar ama swap'i kısmaz (FX'te asıl drag bu).
+        let gross: f64 = (0..n_sym).map(|j| w[j].abs()).sum();
+        rets.push(port - turnover * cfg.fee_rate - gross * cfg.swap_rate_per_bar);
         turnovers.push(turnover);
         prev_w = w;
     }
@@ -825,6 +836,37 @@ mod tests {
         let costly = evaluate_xs(&closes, &XsConfig { fee_rate: 0.05, ..base.clone() });
         assert!(costly.total_return < free.total_return, "fee turnover üzerinden getiriyi aşındırır");
         assert!(costly.avg_turnover > 0.0, "yer değiştiren sepet → pozitif turnover");
+    }
+
+    // 🌙 Swap (tutma maliyeti) turnover'dan BAĞIMSIZ: sabit kitap (düşük turnover) tutulsa bile
+    // her bar gross·swap düşer — fee'nin aksine seyrek rebalance onu kısmaz.
+    #[test]
+    fn evaluate_xs_swap_erodes_held_positions() {
+        // A sürekli lider (trend), B sabit → kitap (long A / short B) stabil → ilk girişten sonra
+        // turnover≈0. fee=0 → fark yalnız swap'ten gelir.
+        let closes = vec![
+            vec![Some(100.0), Some(100.0)],
+            vec![Some(101.0), Some(100.0)],
+            vec![Some(102.0), Some(100.0)],
+            vec![Some(103.0), Some(100.0)],
+            vec![Some(104.0), Some(100.0)],
+            vec![Some(105.0), Some(100.0)],
+        ];
+        let base = XsConfig {
+            symbols: vec!["A".into(), "B".into()],
+            lookback: 1, top_k: 1, momentum: true, long_short: true, wf_window: 2,
+            fee_rate: 0.0, rebalance_every: 3, ..Default::default()
+        };
+        let no_swap = evaluate_xs(&closes, &base);
+        let with_swap = evaluate_xs(&closes, &XsConfig { swap_rate_per_bar: 0.01, ..base.clone() });
+        assert!(with_swap.total_return < no_swap.total_return,
+            "swap tutulan pozisyonu her bar aşındırır");
+        // Kavramsal fark: AYNI oranda fee yalnız giriş turnover'ında bir kez ödenir; swap kitap
+        // tutuldukça HER bar → stabil (düşük-turnover) kitapta swap fee'den daha çok aşındırır.
+        let with_fee = evaluate_xs(&closes, &XsConfig { fee_rate: 0.01, ..base.clone() });
+        assert!(with_swap.total_return < with_fee.total_return,
+            "stabil kitapta swap (her-bar) fee'den (turnover-bir-kez) daha çok aşındırmalı: swap={} fee={}",
+            with_swap.total_return, with_fee.total_return);
     }
 
     // Rebalance kadansı turnover'ı kısar: aynı testere veride rb=3, rb=1'den daha az turnover öder.

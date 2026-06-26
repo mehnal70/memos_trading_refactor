@@ -17,6 +17,8 @@
 //
 // Env: DB_PATH (default data/trader.db), XS_TOP_K (sepet kenarı, default 3),
 //      XS_FEE_RATE (turnover birimi başına tek-yön maliyet, default 0.0005=5bps),
+//      XS_SWAP_RATE (overnight swap/rollover — gross-exposure başına BAR-başı tutma maliyeti,
+//                    turnover'dan ayrı; FX'te asıl drag; default 0=kapalı),
 //      XS_LOOKBACKS (csv, default 1,3,7,14,30), XS_WF_WINDOW (binom pencere bar, default 30),
 //      XS_LONG_ONLY=1 (long-short yerine long-only top), XS_FAMILY_ALPHA (Šidák aile α, default 0.10).
 
@@ -66,10 +68,14 @@ fn main() {
     let sr_window: usize = std::env::var("XS_SR_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
     // Sembol başına yüklenen en-yeni mum tavanı. Düşük TF + derin geçmişte (4h 5y ≈ 10950 bar) artır.
     let candle_limit: usize = std::env::var("XS_CANDLE_LIMIT").ok().and_then(|s| s.parse().ok()).unwrap_or(5000);
+    // 🌙 Overnight swap/rollover — gross-exposure başına BAR-başı tutma maliyeti (turnover'dan ayrı).
+    // FX'in asıl drag'i: günlük rebalance'ta swap her gün tekrar ödenir. Default 0 = kapalı.
+    let swap_rate: f64 = std::env::var("XS_SWAP_RATE").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0);
 
     let base = XsConfig {
         db_path, market: market.clone(), interval: interval.clone(), symbols: symbols.clone(),
-        candle_limit, top_k, fee_rate, long_short, wf_window, rebalance_every, exit_buffer, leverage,
+        candle_limit, top_k, fee_rate, swap_rate_per_bar: swap_rate, long_short, wf_window,
+        rebalance_every, exit_buffer, leverage,
         bars_per_year: bars_per_year(&interval), sr_tilt, sr_band_pct, sr_min_strength, sr_window,
         ..Default::default() // lookback/momentum: aile döngüsünde override edilir
     };
@@ -92,8 +98,8 @@ fn main() {
 
     println!("📐 Kesitsel relatif-güç · market={market} · interval={interval} · sepet={} sembol",
         symbols.len());
-    println!("   top_k={top_k} · fee={:.4}/turnover · {} · rebalance={rebalance_every} · band={exit_buffer} · lev={leverage} · aile={} · Šidák p≤{:.4}",
-        fee_rate, if long_short { "LONG-SHORT" } else { "LONG-ONLY" }, configs.len(), sidak);
+    println!("   top_k={top_k} · fee={:.4}/turnover · swap={:.4}/bar · {} · rebalance={rebalance_every} · band={exit_buffer} · lev={leverage} · aile={} · Šidák p≤{:.4}",
+        fee_rate, swap_rate, if long_short { "LONG-SHORT" } else { "LONG-ONLY" }, configs.len(), sidak);
     if sr_tilt > 0.0 {
         println!("   🧱 S/R EĞİMİ AÇIK: tilt={sr_tilt} · band={sr_band_pct}% · min_güç={sr_min_strength} · pencere={sr_window} bar");
     }
