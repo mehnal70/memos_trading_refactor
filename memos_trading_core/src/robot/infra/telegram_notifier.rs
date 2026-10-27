@@ -9,7 +9,7 @@
 // 5. WASM koruması — ağ katmanı sadece native target'ta derlenir
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -27,8 +27,8 @@ impl Severity {
     /// Mesaj başına eklenecek görsel ön ek.
     pub fn prefix(&self) -> &'static str {
         match self {
-            Severity::Info     => "ℹ️",
-            Severity::Warning  => "⚠️",
+            Severity::Info => "ℹ️",
+            Severity::Warning => "⚠️",
             Severity::Critical => "🚨",
         }
     }
@@ -69,12 +69,12 @@ pub fn parse_cooldown_from_env() -> Duration {
 /// TelegramNotifier — kritik trading olayları için otonom push kanalı.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct TelegramNotifier {
-    api_url:  String,
-    chat_id:  String,
-    client:   Client,
+    api_url: String,
+    chat_id: String,
+    client: Client,
     cooldown: Duration,
     /// Per-key son gönderim zamanı — dedup/throttle için.
-    last_sent: Mutex<HashMap<String, Instant>>,
+    last_sent: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -82,7 +82,7 @@ impl TelegramNotifier {
     /// Env'den otonom yapılandırıcı. TELEGRAM_BOT_TOKEN ve TELEGRAM_CHAT_ID
     /// her ikisi de boş olmadan set edilmemişse None döner (Telegram bağlı değil).
     pub fn from_env() -> Option<Self> {
-        let token   = std::env::var("TELEGRAM_BOT_TOKEN").ok()?;
+        let token = std::env::var("TELEGRAM_BOT_TOKEN").ok()?;
         let chat_id = std::env::var("TELEGRAM_CHAT_ID").ok()?;
         let (token, chat_id) = (token.trim(), chat_id.trim());
         if token.is_empty() || chat_id.is_empty() {
@@ -96,7 +96,7 @@ impl TelegramNotifier {
                 .build()
                 .unwrap_or_default(),
             cooldown: parse_cooldown_from_env(),
-            last_sent: Mutex::new(HashMap::new()),
+            last_sent: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -110,7 +110,7 @@ impl TelegramNotifier {
                 .build()
                 .unwrap_or_default(),
             cooldown,
-            last_sent: Mutex::new(HashMap::new()),
+            last_sent: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -151,16 +151,25 @@ impl TelegramNotifier {
         if !self.check_and_mark(key, Instant::now()) {
             return false;
         }
-        let url   = self.api_url.clone();
-        let chat  = self.chat_id.clone();
-        let text  = format_message(severity, msg);
+        let url = self.api_url.clone();
+        let chat = self.chat_id.clone();
+        let key = key.to_string();
+        let text = format_message(severity, msg);
         let client = self.client.clone();
+        let last_sent = Arc::clone(&self.last_sent);
         tokio::spawn(async move {
             let payload = build_payload(&chat, &text);
             let res = client.post(&url).json(&payload).send().await;
             match res.and_then(|r| r.error_for_status()) {
                 Ok(_) => {}
-                Err(e) => eprintln!("[Telegram] gönderim hatası: {}", e),
+                Err(e) => {
+                    let mut map = match last_sent.lock() {
+                        Ok(m) => m,
+                        Err(p) => p.into_inner(),
+                    };
+                    map.remove(&key);
+                    eprintln!("[Telegram] gönderim hatası: {}", e);
+                }
             }
         });
         true

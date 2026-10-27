@@ -1,31 +1,31 @@
 // src/robot/security/types.rs - Güvenlik Kontrat Modelleri
 // Srivastava ATP - Saf Veri Yapıları Katmanı
 
-use serde::{Serialize, Deserialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Rol Tanımları (Role-Based Access Control)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UserRole {
-    Admin,           // Tam kontrol
-    Trader,          // İşlem yetkilisi
-    Monitor,         // Sadece görüntüleme
-    Auditor,         // Denetim ve raporlama
+    Admin,   // Tam kontrol
+    Trader,  // İşlem yetkilisi
+    Monitor, // Sadece görüntüleme
+    Auditor, // Denetim ve raporlama
 }
 
 impl UserRole {
     pub fn can_trade(&self) -> bool {
         matches!(self, Self::Admin | Self::Trader)
     }
-    
+
     pub fn can_view_audit(&self) -> bool {
         matches!(self, Self::Admin | Self::Auditor | Self::Monitor)
     }
-    
+
     pub fn can_modify_settings(&self) -> bool {
         matches!(self, Self::Admin)
     }
-    
+
     pub fn can_emergency_stop(&self) -> bool {
         matches!(self, Self::Admin | Self::Trader)
     }

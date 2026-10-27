@@ -1,0 +1,7 @@
+# Intraday teyit için seçilmiş semboller.
+# Listeyi genişletmeden önce Yahoo rate-limit ve günlük istek hacmini izleyin.
+AKBNK
+ASELS
+GARAN
+THYAO
+TUPRS

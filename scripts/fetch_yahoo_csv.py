@@ -6,13 +6,15 @@
 (THYAO.csv, EURUSD.csv, ...) yazar; sonra Rust tarafında:
     cargo run --release --example import_csv -- <market> 1d <out_dir>
 
-Kurulum:  pip install yfinance
-Kullanım: python3 scripts/fetch_yahoo_csv.py <bist|forex|commodity|usequity> <out_dir> SYM1,SYM2,...
+Kurulum:  python3 -m pip install --upgrade "yfinance>=1.0"
+Kullanım: python3 scripts/fetch_yahoo_csv.py <bist|forex|commodity|usequity> <out_dir> SYM1,SYM2,...|SYMBOL_FILE
 Örnek:    python3 scripts/fetch_yahoo_csv.py bist ./csv_bist THYAO,GARAN,AKBNK,EREGL
           python3 scripts/fetch_yahoo_csv.py forex ./csv_fx EURUSD,GBPUSD,USDJPY
 """
 import os
 import sys
+import time
+from pathlib import Path
 
 import yfinance as yf
 
@@ -31,16 +33,32 @@ def yahoo_ticker(asset_class: str, base: str) -> str:
     return b  # usequity / index / etf → çıplak
 
 
+def load_symbols(raw: str) -> list[str]:
+    source = Path(raw)
+    if source.is_file():
+        values = []
+        for line in source.read_text(encoding="utf-8").splitlines():
+            values.extend(line.split("#", 1)[0].split(","))
+    else:
+        values = raw.split(",")
+    return list(dict.fromkeys(s.strip().upper() for s in values if s.strip()))
+
+
 def main() -> int:
     if len(sys.argv) < 4:
-        print("Kullanım: fetch_yahoo_csv.py <bist|forex|commodity|usequity> <out_dir> SYM1,SYM2,...")
+        print("Kullanım: fetch_yahoo_csv.py <asset_class> <out_dir> SYM1,SYM2,...|SYMBOL_FILE")
         return 2
     asset_class, out_dir, symbols_csv = sys.argv[1], sys.argv[2], sys.argv[3]
-    symbols = [s.strip().upper() for s in symbols_csv.split(",") if s.strip()]
+    symbols = load_symbols(symbols_csv)
+    if not symbols:
+        print(f"⚠ sembol bulunamadı: {symbols_csv}")
+        return 2
     os.makedirs(out_dir, exist_ok=True)
 
     ok = 0
-    for base in symbols:
+    for index, base in enumerate(symbols):
+        if index:
+            time.sleep(0.4)
         ticker = yahoo_ticker(asset_class, base)
         try:
             df = yf.download(ticker, period="max", interval="1d", auto_adjust=False, progress=False)

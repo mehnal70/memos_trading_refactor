@@ -8,27 +8,50 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Interval {
-    M1, M5, M15, M30, H1, H4, D1
+    M1,
+    M5,
+    M15,
+    M30,
+    H1,
+    H4,
+    D1,
 }
 
 impl Interval {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Interval::M1 => "1m", Interval::M5 => "5m", Interval::M15 => "15m",
-            Interval::M30 => "30m", Interval::H1 => "1h", Interval::H4 => "4h", Interval::D1 => "1d",
+            Interval::M1 => "1m",
+            Interval::M5 => "5m",
+            Interval::M15 => "15m",
+            Interval::M30 => "30m",
+            Interval::H1 => "1h",
+            Interval::H4 => "4h",
+            Interval::D1 => "1d",
         }
     }
 
     #[inline]
     pub fn minutes(&self) -> usize {
         match self {
-            Interval::M1 => 1, Interval::M5 => 5, Interval::M15 => 15,
-            Interval::M30 => 30, Interval::H1 => 60, Interval::H4 => 240, Interval::D1 => 1440,
+            Interval::M1 => 1,
+            Interval::M5 => 5,
+            Interval::M15 => 15,
+            Interval::M30 => 30,
+            Interval::H1 => 60,
+            Interval::H4 => 240,
+            Interval::D1 => 1440,
         }
     }
 
     pub fn all_upper() -> &'static [Interval] {
-        &[Interval::M5, Interval::M15, Interval::M30, Interval::H1, Interval::H4, Interval::D1]
+        &[
+            Interval::M5,
+            Interval::M15,
+            Interval::M30,
+            Interval::H1,
+            Interval::H4,
+            Interval::D1,
+        ]
     }
 }
 
@@ -96,7 +119,7 @@ impl<'a> CandleSynth<'a> {
                 }
                 Some(acc) => {
                     acc.update(candle);
-                    
+
                     if acc.count >= target_mins {
                         let synthesized = Candle {
                             timestamp: acc.start_ts,

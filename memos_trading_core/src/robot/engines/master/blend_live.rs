@@ -17,8 +17,17 @@ impl Engine {
     /// sinyal üreteci + carry-dominant kadans (rebalance_bars) ile çağırır. Mod kapalı/sepet yetersiz → no-op.
     pub(crate) async fn process_blend_book(state: &Arc<Mutex<AppState>>) {
         let (cfg, tuning, db_path, mom_lb, carry_lb, fmax, flimit, wm, wc, closed_only) = {
-            let st = match state.lock() { Ok(s) => s, Err(_) => return };
-            let bl = match st.brain.parameters.read().ok().map(|p| p.blend_live.clone()) {
+            let st = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let bl = match st
+                .brain
+                .parameters
+                .read()
+                .ok()
+                .map(|p| p.blend_live.clone())
+            {
                 Some(x) if x.enabled && x.top_k >= 1 && x.symbols.len() >= 2 * x.top_k => x,
                 _ => return,
             };
@@ -39,25 +48,48 @@ impl Engine {
                 // Harman carry-ağırlıklı (düşük-turnover faktör baskın) → carry kadansı: ≥14 bar.
                 rebalance_min_bars: bl.rebalance_bars.max(1),
             };
-            (cfg, Arc::clone(&st.tuning), st.config.db_path.clone(),
-             bl.mom_lookback, bl.carry_lookback, bl.funding_max_age_secs, bl.funding_limit,
-             bl.weight_momentum, bl.weight_carry, st.tuning.signal_closed_bar_only)
+            (
+                cfg,
+                Arc::clone(&st.tuning),
+                st.config.db_path.clone(),
+                bl.mom_lookback,
+                bl.carry_lookback,
+                bl.funding_max_age_secs,
+                bl.funding_limit,
+                bl.weight_momentum,
+                bl.weight_carry,
+                st.tuning.signal_closed_bar_only,
+            )
         };
 
-        let interval_secs = crate::robot::data_pipeline::DataNormalizer::parse_interval(&cfg.interval)
-            .max(1) as i64;
+        let interval_secs =
+            crate::robot::data_pipeline::DataNormalizer::parse_interval(&cfg.interval).max(1)
+                as i64;
         let db_path_sig = db_path.clone();
         // Kesitsel HARMAN üreteci: iki dik faktörü ORTAK helper'lardan al, z-score'la birleştir (DRY).
         // Yalnız her iki faktörde de skoru olan semboller harmana girer (blend_zscores kesişimi).
         let signal_source = move |candles_map: &std::collections::HashMap<String, Vec<Candle>>| {
-            let mom = super::xs_live::momentum_signals(candles_map, interval_secs, closed_only, mom_lb);
+            let mom =
+                super::xs_live::momentum_signals(candles_map, interval_secs, closed_only, mom_lb);
             let carry = super::carry_live::carry_signals(
-                candles_map, &db_path_sig, carry_lb, interval_secs, fmax, flimit);
+                candles_map,
+                &db_path_sig,
+                carry_lb,
+                interval_secs,
+                fmax,
+                flimit,
+            );
             super::book_core::blend_zscores(&mom, &carry, wm, wc)
         };
 
         Self::process_book(
-            state, &cfg, super::book_core::BookKind::Blend, &tuning, &db_path, signal_source,
-        ).await;
+            state,
+            &cfg,
+            super::book_core::BookKind::Blend,
+            &tuning,
+            &db_path,
+            signal_source,
+        )
+        .await;
     }
 }

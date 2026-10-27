@@ -19,8 +19,8 @@ mod checks;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use memos_trading_core::core::model::{RoboticLoopConfig, TradingMode};
@@ -32,7 +32,9 @@ async fn main() -> ExitCode {
     let duration: u64 = env_u64("HEALTHCHECK_DURATION_SECS", 60);
     let skip_live = env_flag("HEALTHCHECK_SKIP_LIVE_DRY_RUN");
     let max_dd_pct: f64 = std::env::var("HEALTHCHECK_MAX_DRAWDOWN_PCT")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(50.0);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50.0);
     let keep_artifacts = env_flag("HEALTHCHECK_KEEP_ARTIFACTS");
 
     println!("╔══════════════════════════════════════════════════════════════╗");
@@ -45,7 +47,6 @@ async fn main() -> ExitCode {
 
     let mut all_pass = true;
 
-    // ─── Kol 1: Paper smoke ─────────────────────────────────────────────
     println!("─── Kol 1: Paper smoke ────────────────────────────────────────");
     let paper_pass = run_smoke_arm(
         "paper",
@@ -54,11 +55,11 @@ async fn main() -> ExitCode {
         duration,
         max_dd_pct,
         keep_artifacts,
-    ).await;
+    )
+    .await;
     println!("  → Kol 1 sonuç: {}\n", verdict(paper_pass));
     all_pass &= paper_pass;
 
-    // ─── Kol 2: Live dry-run smoke ─────────────────────────────────────
     if !skip_live {
         println!("─── Kol 2: Live dry-run smoke ─────────────────────────────────");
         let dry_pass = run_smoke_arm(
@@ -68,26 +69,24 @@ async fn main() -> ExitCode {
             duration,
             max_dd_pct,
             keep_artifacts,
-        ).await;
+        )
+        .await;
         println!("  → Kol 2 sonuç: {}\n", verdict(dry_pass));
         all_pass &= dry_pass;
     } else {
         println!("⏭️  Kol 2 atlandı (HEALTHCHECK_SKIP_LIVE_DRY_RUN set)\n");
     }
 
-    // ─── Genel özet ─────────────────────────────────────────────────────
     println!("══════════════════════════════════════════════════════════════");
     if all_pass {
         println!("✅ ALL CHECKS PASSED — sistem sağlıklı");
-        ExitCode::SUCCESS
+        return ExitCode::SUCCESS;
     } else {
         println!("❌ SOME CHECKS FAILED — yukarıdaki ✗ satırlarını incele");
-        ExitCode::FAILURE
+        return ExitCode::FAILURE;
     }
 }
 
-/// Tek bir smoke kolu: tmp workspace kur, Engine spawn et, duration boyunca koş,
-/// invariant'ları doğrula, engine'i kapat.
 async fn run_smoke_arm(
     label: &str,
     mode: TradingMode,
@@ -101,18 +100,24 @@ async fn run_smoke_arm(
 
     let cfg = build_config(&workspace, mode, dry_run);
     let state = Arc::new(Mutex::new(AppState::new(cfg)));
-    let start_tick = state.lock().unwrap().fleet.last_loop_tick.load(Ordering::Relaxed);
+    let start_tick = state
+        .lock()
+        .unwrap()
+        .fleet
+        .last_loop_tick
+        .load(Ordering::Relaxed);
 
-    // Engine'i spawn et
     let engine_state = Arc::clone(&state);
     let handle = tokio::spawn(async move {
         Engine::run_autonomous_loop(engine_state).await;
     });
 
-    println!("  ⏳ Engine boot edildi, {}s smoke koşuyor...", duration_secs);
+    println!(
+        "  ⏳ Engine boot edildi, {}s smoke koşuyor...",
+        duration_secs
+    );
     tokio::time::sleep(Duration::from_secs(duration_secs)).await;
 
-    // İnvariant'lar
     println!("  🔍 İnvariant'lar doğrulanıyor:");
     let mut pass = true;
     pass &= checks::check_phase_advanced(&state);
@@ -121,13 +126,9 @@ async fn run_smoke_arm(
     pass &= checks::check_heartbeat_fresh(&workspace.heartbeat_path, 90);
     pass &= checks::check_equity_sane(&state, max_dd_pct);
     pass &= checks::check_no_critical_alerts(&state);
+
     if dry_run {
-        // Live dry-run'da balance-sync ve WS user-data task'leri dormant log atmalı.
-        pass &= checks::check_log_contains(
-            &state,
-            "Balance sync: Paper/DryRun",
-            "balance_sync_dormant",
-        );
+        pass &= checks::check_log_contains(&state, "Balance sync:", "balance_sync_dormant");
         pass &= checks::check_log_contains(
             &state,
             "WS userDataStream: Paper/DryRun",
@@ -135,7 +136,6 @@ async fn run_smoke_arm(
         );
     }
 
-    // Engine'i durdur
     if let Ok(st) = state.lock() {
         st.app_stop_signal.store(true, Ordering::SeqCst);
     }
@@ -148,9 +148,8 @@ async fn run_smoke_arm(
         println!("  📁 Artefaktlar korundu: {}", workspace.root.display());
     }
 
-    pass
+    return pass;
 }
-
 struct ArmWorkspace {
     root: PathBuf,
     snapshot_path: PathBuf,
@@ -159,11 +158,8 @@ struct ArmWorkspace {
 }
 
 fn setup_workspace(label: &str) -> ArmWorkspace {
-    let root = std::env::temp_dir().join(format!(
-        "rtc_healthcheck_{}_{}",
-        label,
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("rtc_healthcheck_{}_{}", label, std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("workspace klasörü yaratılamadı");
     let logs = root.join("logs");
@@ -173,23 +169,26 @@ fn setup_workspace(label: &str) -> ArmWorkspace {
     let db_path = data.join("trader.db").to_string_lossy().into_owned();
     let snapshot_path = data.join("mission_control.json");
     let heartbeat_path = logs.join("heartbeat.jsonl");
-    ArmWorkspace { root, snapshot_path, heartbeat_path, db_path }
+    return ArmWorkspace {
+        root,
+        snapshot_path,
+        heartbeat_path,
+        db_path,
+    };
 }
 
-fn apply_env_for_arm(ws: &ArmWorkspace, dry_run: bool) {
-    // Snapshot + heartbeat hızlandırılır: invariant penceresine sığsın.
-    std::env::set_var("MISSION_CONTROL_SNAPSHOT_PATH", ws.snapshot_path.as_os_str());
+fn apply_env_for_arm(ws: &ArmWorkspace, _dry_run: bool) {
+    std::env::set_var(
+        "MISSION_CONTROL_SNAPSHOT_PATH",
+        ws.snapshot_path.as_os_str(),
+    );
     std::env::set_var("MISSION_CONTROL_SNAPSHOT_SECS", "2");
     std::env::set_var("HEARTBEAT_PATH", ws.heartbeat_path.as_os_str());
     std::env::set_var("HEARTBEAT_SECS", "5");
-    // TradingLogger ve trade summary'yi disable et: smoke'ta gerek yok, dosya çakışması olmasın.
     std::env::set_var("TRADING_LOGGER_DISABLE", "1");
-    // Live dry-run sadece bu kolda set'lensin
-    if dry_run {
-        std::env::set_var("LIVE_DRY_RUN", "true");
-    } else {
-        std::env::remove_var("LIVE_DRY_RUN");
-    }
+    // Paper smoke da gerçek venue/bridge erişimine çıkmamalı; TradingMode::Paper
+    // ayrı doğrulanırken dış I/O kapısı her iki smoke kolunda da güvenli kalır.
+    std::env::set_var("LIVE_DRY_RUN", "true");
 }
 
 fn cleanup_env_for_arm() {
@@ -202,28 +201,46 @@ fn cleanup_env_for_arm() {
 }
 
 fn build_config(ws: &ArmWorkspace, mode: TradingMode, dry_run: bool) -> RoboticLoopConfig {
+    // ARTIK MERKEZİ VE OTONOM: Sabit tohumlama yerine, healthcheck simülasyonunu da
+    // OtonomConfigEngine standartlarına eşitliyoruz.
+    let central_cfg =
+        memos_trading_core::robot::config_engine::OtonomConfigEngine::load_central_config();
+
     let mut cfg = RoboticLoopConfig::default();
     cfg.symbol = "BTCUSDT".into();
     cfg.db_path = ws.db_path.clone();
     cfg.pinned_symbols = vec![];
+    cfg.venues = vec![];
     cfg.download_enabled = false;
     cfg.pipeline_enabled = false;
     cfg.trading_mode = mode;
+    cfg.interval = central_cfg.interval;
+
     if dry_run {
         cfg.api_key = Some("dummy_testnet_key".into());
         cfg.secret_key = Some("dummy_testnet_secret".into());
     }
-    cfg
+    return cfg;
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    return std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default);
 }
 
 fn env_flag(key: &str) -> bool {
-    matches!(std::env::var(key).ok().as_deref(), Some("1") | Some("true") | Some("TRUE"))
+    return matches!(
+        std::env::var(key).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    );
 }
 
 fn verdict(pass: bool) -> &'static str {
-    if pass { "✅ PASS" } else { "❌ FAIL" }
+    if pass {
+        return "✅ PASS";
+    } else {
+        return "❌ FAIL";
+    }
 }

@@ -1,12 +1,12 @@
 // persistence/memory.rs
 // Modernize edilmiş bellek içi veri katmanı ve AI veri kalitesi motoru
 
-use async_trait::async_trait;
 use crate::core::types::{Candle, Trade};
 use crate::Result;
-use serde::{Serialize, Deserialize};
-use std::sync::{Arc, RwLock};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 // --- 1. ML/AI VERİ KALİTESİ MOTORU (DatabaseEngine) ---
 
@@ -17,31 +17,47 @@ impl DatabaseEngine {
     /// Performans: Allocation yapmadan iterator üzerinden hesaplama yapar.
     pub fn detect_anomaly(candles: &[Candle]) -> Vec<usize> {
         let n = candles.len();
-        if n < 5 { return vec![]; } // Güvenilir istatistik için min örneklem
+        if n < 5 {
+            return vec![];
+        } // Güvenilir istatistik için min örneklem
 
         let sum: f64 = candles.iter().map(|c| c.close).sum();
         let mean = sum / n as f64;
-        
-        let variance: f64 = candles.iter()
+
+        let variance: f64 = candles
+            .iter()
             .map(|c| (c.close - mean).powi(2))
-            .sum::<f64>() / n as f64;
+            .sum::<f64>()
+            / n as f64;
         let std = variance.sqrt();
 
         // 3-Sigma kuralı (Verinin %99.7'sini kapsar, dışı anomalidir)
-        candles.iter().enumerate().filter_map(|(i, c)| {
-            if (c.close - mean).abs() > 3.0 * std { Some(i) } else { None }
-        }).collect()
+        candles
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                if (c.close - mean).abs() > 3.0 * std {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// ML tabanlı veri tamamlama (İnterpolasyon hazırlığı)
     pub fn auto_complete(candles: &mut [Candle]) {
-        if candles.is_empty() { return; }
-        
+        if candles.is_empty() {
+            return;
+        }
+
         let sum: f64 = candles.iter().map(|c| c.close).sum();
         let mean = sum / candles.len() as f64;
-        
+
         for c in candles.iter_mut() {
-            if c.close <= 0.0 { c.close = mean; }
+            if c.close <= 0.0 {
+                c.close = mean;
+            }
         }
     }
 }
@@ -97,21 +113,31 @@ impl MemoryDatabase {
 #[async_trait]
 impl Database for MemoryDatabase {
     async fn save_candle(&self, candle: &Candle) -> Result<()> {
-        let mut lock = self.candles.write().map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut lock = self
+            .candles
+            .write()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
         lock.push(candle.clone());
         Ok(())
     }
 
     async fn save_candles(&self, candles: &[Candle]) -> Result<()> {
-        let mut lock = self.candles.write().map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut lock = self
+            .candles
+            .write()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
         lock.extend_from_slice(candles);
         Ok(())
     }
 
     async fn get_candles(&self, symbol: &str, interval: &str, limit: usize) -> Result<Vec<Candle>> {
-        let lock = self.candles.read().map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let lock = self
+            .candles
+            .read()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
         // Filtreleme ve ters çevirme (Zero-copy referanslarla başla, sadece sonuçları kopyala)
-        Ok(lock.iter()
+        Ok(lock
+            .iter()
             .filter(|c| c.symbol == symbol && c.interval == interval)
             .rev()
             .take(limit)
@@ -120,13 +146,19 @@ impl Database for MemoryDatabase {
     }
 
     async fn save_trade(&self, trade: &Trade) -> Result<()> {
-        let mut lock = self.trades.write().map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut lock = self
+            .trades
+            .write()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
         lock.push(trade.clone());
         Ok(())
     }
 
     async fn update_trade(&self, trade: &Trade) -> Result<()> {
-        let mut lock = self.trades.write().map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut lock = self
+            .trades
+            .write()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
         if let Some(pos) = lock.iter().position(|t| t.id == trade.id) {
             lock[pos] = trade.clone();
         }
@@ -134,8 +166,12 @@ impl Database for MemoryDatabase {
     }
 
     async fn get_trades(&self, symbol: Option<&str>, limit: usize) -> Result<Vec<Trade>> {
-        let lock = self.trades.read().map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(lock.iter()
+        let lock = self
+            .trades
+            .read()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(lock
+            .iter()
             .filter(|t| symbol.is_none() || symbol.is_some_and(|s| t.symbol == s))
             .rev()
             .take(limit)
@@ -144,20 +180,32 @@ impl Database for MemoryDatabase {
     }
 
     async fn save_setting(&self, key: &str, value: &str) -> Result<()> {
-        let mut lock = self.settings.write().map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut lock = self
+            .settings
+            .write()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
         lock.insert(key.to_owned(), value.to_owned());
         Ok(())
     }
 
     async fn get_setting(&self, key: &str) -> Result<Option<String>> {
-        let lock = self.settings.read().map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let lock = self
+            .settings
+            .read()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(lock.get(key).cloned())
     }
 
-    async fn init(&self) -> Result<()> { Ok(()) }
-    async fn health_check(&self) -> Result<()> { Ok(()) }
+    async fn init(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn health_check(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl Default for MemoryDatabase {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

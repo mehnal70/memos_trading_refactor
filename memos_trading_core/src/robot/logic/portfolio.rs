@@ -1,9 +1,11 @@
 // portfolio.rs - Portföy ve Durum Yönetimi Modülü
 
-use crate::core::types::{Trade, Signal, RiskParams};
-use crate::robot::infra::monitoring::health_monitor::{HealthCheck, AnomalyDetector, HealthStatus, AnomalyType};
+use crate::core::types::{RiskParams, Signal, Trade};
+use crate::robot::infra::monitoring::health_monitor::{
+    AnomalyDetector, AnomalyType, HealthCheck, HealthStatus,
+};
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default)]
 pub struct Position {
@@ -36,16 +38,23 @@ pub struct Portfolio {
 
 impl Portfolio {
     pub fn new(balance: f64, risk_params: Option<RiskParams>) -> Self {
-        Self { 
-            balance, 
+        Self {
+            balance,
             positions: Vec::with_capacity(10), // Allocation optimizasyonu
-            trade_history: Vec::with_capacity(100), 
-            risk_params 
+            trade_history: Vec::with_capacity(100),
+            risk_params,
         }
     }
 
     /// Pozisyon aç - Performans: to_owned() ile bellek yönetimi
-    pub fn open_position(&mut self, symbol: &str, entry_price: f64, amount: f64, signal: Signal, strategy: &str) {
+    pub fn open_position(
+        &mut self,
+        symbol: &str,
+        entry_price: f64,
+        amount: f64,
+        signal: Signal,
+        strategy: &str,
+    ) {
         let pos = Position {
             symbol: symbol.to_owned(),
             entry_price,
@@ -62,7 +71,7 @@ impl Portfolio {
     pub fn close_position(&mut self, symbol: &str, exit_price: f64) {
         if let Some(idx) = self.positions.iter().position(|p| p.symbol == symbol) {
             let pos = self.positions.remove(idx);
-            
+
             let pnl_multiplier = match pos.signal {
                 Signal::Buy => 1.0,
                 Signal::Sell => -1.0,
@@ -89,13 +98,20 @@ impl Portfolio {
 
     /// Toplam riskli varlık (Exposure) hesabı
     pub fn total_risk_exposure(&self) -> f64 {
-        self.positions.iter().map(|p| p.amount * p.entry_price).sum()
+        self.positions
+            .iter()
+            .map(|p| p.amount * p.entry_price)
+            .sum()
     }
 
     /// Risk limiti kontrolü - Early return mantığı
     pub fn is_risk_limit_exceeded(&self) -> bool {
-        let Some(risk) = &self.risk_params else { return false };
-        let Some(max_risk_pct) = risk.max_portfolio_risk_pct else { return false };
+        let Some(risk) = &self.risk_params else {
+            return false;
+        };
+        let Some(max_risk_pct) = risk.max_portfolio_risk_pct else {
+            return false;
+        };
 
         let exposure = self.total_risk_exposure();
         let total_value = self.balance + exposure;
@@ -105,7 +121,9 @@ impl Portfolio {
     /// Metrikleri tek bir geçişte (single-pass) hesapla - O(n) optimizasyonu
     pub fn update_metrics(&self) -> PortfolioMetrics {
         let total = self.trade_history.len();
-        if total == 0 { return PortfolioMetrics::default(); }
+        if total == 0 {
+            return PortfolioMetrics::default();
+        }
 
         let mut total_pnl = 0.0;
         let mut win_count = 0;
@@ -114,8 +132,11 @@ impl Portfolio {
         for trade in &self.trade_history {
             let pnl = trade.pnl.unwrap_or(0.0);
             total_pnl += pnl;
-            if pnl > 0.0 { win_count += 1; }
-            else if pnl < 0.0 { loss_count += 1; }
+            if pnl > 0.0 {
+                win_count += 1;
+            } else if pnl < 0.0 {
+                loss_count += 1;
+            }
         }
 
         PortfolioMetrics {
@@ -136,8 +157,12 @@ impl HealthCheck for Portfolio {
     fn check_health(&self) -> HealthStatus {
         let m = self.update_metrics();
         match m {
-            _ if m.total_pnl < 0.0 => HealthStatus::Warning(format!("Negatif PnL: {:.2}", m.total_pnl)),
-            _ if m.trade_count > 10 && m.win_rate < 0.2 => HealthStatus::Warning("Düşük Win-Rate".to_owned()),
+            _ if m.total_pnl < 0.0 => {
+                HealthStatus::Warning(format!("Negatif PnL: {:.2}", m.total_pnl))
+            }
+            _ if m.trade_count > 10 && m.win_rate < 0.2 => {
+                HealthStatus::Warning("Düşük Win-Rate".to_owned())
+            }
             _ => HealthStatus::Healthy,
         }
     }
@@ -147,7 +172,10 @@ impl AnomalyDetector for Portfolio {
     fn detect_anomaly(&self) -> Option<AnomalyType> {
         let m = self.update_metrics();
         if m.total_pnl < -1000.0 {
-            return Some(AnomalyType::Custom(format!("Aşırı Zarar: {:.2}", m.total_pnl)));
+            return Some(AnomalyType::Custom(format!(
+                "Aşırı Zarar: {:.2}",
+                m.total_pnl
+            )));
         }
         if m.trade_count > 5 && m.win_rate == 0.0 {
             return Some(AnomalyType::Custom("Sıfır Kazanç Anomalisi".to_owned()));

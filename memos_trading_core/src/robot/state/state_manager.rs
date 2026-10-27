@@ -1,20 +1,20 @@
 // src/robot/state/state_manager.rs - Srivastava ATP Merkezi Harekat ve Hafıza Yönetimi
 // Srivastava ATP - Canlı ve Operasyonel Hafıza Çekirdeği (Unified Omni-State)
 
-use crate::prelude::*; 
-use super::types::{RobotState, SystemStatistics, SystemStatus}; 
-use crate::robot::logic::anomaly_detector::AnomalyDetector; 
+use super::types::{RobotState, SystemStatistics, SystemStatus};
 use crate::core::types::Trade;
+use crate::prelude::*;
+use crate::robot::logic::anomaly_detector::AnomalyDetector;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
 // =============================================================================
 // 1. ASENKRON CANLI HAFIZA PAYLAŞIM KATMANI (Eski manager.rs'ten Süzülen Zeka)
 // =============================================================================
 
-/// TradingStateInner: robotic_loop ve TUI'nin kilitlenme (deadlock) yaşamadan 
+/// TradingStateInner: robotic_loop ve TUI'nin kilitlenme (deadlock) yaşamadan
 /// asenkron paylaştığı "Canlı" hafıza otobanı.
 pub struct TradingStateInner {
     pub robot_state: Arc<RwLock<RobotState>>,
@@ -50,7 +50,7 @@ pub struct LoopState {
     pub peak_equity: f64,
     pub cumulative_pnl: f64,
     pub day_start_equity: f64,
-    
+
     // Performans Sayaçları
     pub loss_streak: usize,
     pub short_loss_streak: u32,
@@ -70,7 +70,7 @@ pub struct LoopState {
     pub tp_win_dir_map: HashMap<String, (bool, Instant)>, // (is_long, time)
 
     // Otonom Koruma Muhafızları (Circuit Breaker)
-    pub api_circuit_breaker: AnomalyDetector, 
+    pub api_circuit_breaker: AnomalyDetector,
     pub hf_error_log: HashMap<String, VecDeque<Instant>>,
     pub symbol_slip_bps: HashMap<String, VecDeque<f64>>,
     pub last_health_check: Instant,
@@ -82,51 +82,63 @@ impl LoopState {
     pub fn record_pnl_dir(&mut self, pnl: f64, is_long: bool) {
         self.cumulative_pnl += pnl;
         self.current_equity = (self.capital + self.cumulative_pnl).max(0.0);
-        
+
         if self.current_equity > self.peak_equity {
             self.peak_equity = self.current_equity;
         }
 
         self.session_closed += 1;
         self.total_trades += 1;
-        
+
         if pnl > 0.0 {
             self.session_wins += 1;
             self.session_profit += pnl;
             self.win_trades += 1;
             self.loss_streak = 0;
-            if !is_long { self.short_loss_streak = 0; }
+            if !is_long {
+                self.short_loss_streak = 0;
+            }
         } else {
             self.session_loss += pnl.abs();
             self.loss_streak += 1;
-            if !is_long { self.short_loss_streak += 1; }
+            if !is_long {
+                self.short_loss_streak += 1;
+            }
         }
     }
 
     /// 📊 Slippage (Kayma) Analitiği (Bps Tabanlı)
     pub fn record_slippage_bps(&mut self, symbol: &str, expected: f64, actual: f64) {
-        if expected <= 0.0 { return; }
+        if expected <= 0.0 {
+            return;
+        }
         let bps = (actual - expected).abs() / expected * 10_000.0;
-        let hist = self.symbol_slip_bps.entry(symbol.to_string()).or_insert_with(|| VecDeque::with_capacity(20));
-        if hist.len() >= 20 { hist.pop_front(); }
+        let hist = self
+            .symbol_slip_bps
+            .entry(symbol.to_string())
+            .or_insert_with(|| VecDeque::with_capacity(20));
+        if hist.len() >= 20 {
+            hist.pop_front();
+        }
         hist.push_back(bps);
     }
 
     /// 🛡️ Yüksek Frekanslı Hata Koruması ve Otonom Karantina (HF Blacklist)
     pub fn record_hf_error(&mut self, symbol: &str) -> bool {
         let now = Instant::now();
-        let log = self.hf_error_log.entry(symbol.to_string()).or_insert_with(|| VecDeque::with_capacity(5));
+        let log = self
+            .hf_error_log
+            .entry(symbol.to_string())
+            .or_insert_with(|| VecDeque::with_capacity(5));
         log.push_back(now);
-        
+
         // Son 1 saat (3600 sn) içindeki hataları temizle (Memory Cleanup)
         log.retain(|&t| now.duration_since(t).as_secs() < 3600);
-        
+
         // Son 1 saatte 2'den fazla donma/hata alındıysa sembolü 4 saat karantinaya al
         if log.len() >= 2 {
-            self.dynamic_blacklist.insert(
-                symbol.to_string(), 
-                now + Duration::from_secs(14400)
-            );
+            self.dynamic_blacklist
+                .insert(symbol.to_string(), now + Duration::from_secs(14400));
             return true;
         }
         false
@@ -167,11 +179,11 @@ impl StateManager for LoopState {
     fn get_symbols(&self) -> Result<Vec<String>, crate::MemosTradingError> {
         Ok(self.open_positions.keys().cloned().collect())
     }
-    
+
     fn get_balance(&self) -> Result<f64, crate::MemosTradingError> {
         Ok(self.current_equity)
     }
-    
+
     fn add_trade(&mut self, _trade: Trade) -> Result<(), crate::MemosTradingError> {
         Ok(())
     }

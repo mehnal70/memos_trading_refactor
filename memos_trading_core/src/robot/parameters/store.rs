@@ -2,21 +2,23 @@
 //! rejim-patch / feedback / trail / interval). parameters/mod.rs'ten ayrıldı
 //! (Faz 2 modülerleştirme; davranış birebir korundu).
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-use super::types::*;
 use super::symbol_stats::SymbolStats;
-use super::trail_feedback::{TrailFeedback, PendingTrailObservation};
-use super::{parse_env_f64, parse_env_bool, now_epoch_secs};
+use super::trail_feedback::{PendingTrailObservation, TrailFeedback};
+use super::types::*;
+use super::{now_epoch_secs, parse_env_bool, parse_env_f64};
+use crate::core::types::Exchange;
+use crate::robot::strategies::keys;
 
 /// Tüm dinamik parametrelerin merkezi store'u. Faz 2 boyunca alan eklenecek;
 /// her yeni alan `Default` ve gerekirse `from_env` desteği taşımalı.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParameterStore {
     pub edge_thresholds: EdgeThresholds,
-    pub partial_fill:    PartialFillParams,
-    pub trade_risk:      TradeRiskParams,
+    pub partial_fill: PartialFillParams,
+    pub trade_risk: TradeRiskParams,
     /// Scalp/Swing ayrımı eşiği (dakika). Holding < bu eşik → SCALP, üstü → SWING.
     pub scalp_swing_threshold_min: i64,
     /// Periyodik S/R updater task'ının yenileme aralığı (saniye).
@@ -100,7 +102,8 @@ pub struct ParameterStore {
     /// eşleşmezse uygulanmaz (1d paramını 4h'ye / CCI eşiğini RSI'ya verme hatasını önler).
     /// Boş → mevcut davranış (global/default), sıfır regresyon. [[project_param_optimize_tool]].
     #[serde(default)]
-    pub symbol_strategy_params: HashMap<String, Vec<(String, String, crate::core::types::StrategyParams)>>,
+    pub symbol_strategy_params:
+        HashMap<String, Vec<(String, String, crate::core::types::StrategyParams)>>,
     /// Kesitsel (cross-sectional) relatif-güç ADANMIŞ MOD parametreleri ([[project_xs_momentum]]).
     /// enabled iken sepet sembolleri market-nötr long/short kitabıyla yönetilir (ScalpSwing/seed pas).
     /// Default disabled → sıfır regresyon. `from_env` XS_LIVE_* ile doldurur.
@@ -119,6 +122,51 @@ pub struct ParameterStore {
     /// ranging→averaging) HTF-teyitli kurar. Default disabled → sıfır regresyon. `from_env` GRADED_* ile.
     #[serde(default)]
     pub graded_entry: GradedEntryParams,
+    /// Sabit strateji profillerinde (örn. EMA 50/100) fırsat-hafızasına göre periyot/eşik
+    /// oynatılmasın. Default true = mevcut adaptif davranış korunur.
+    #[serde(default = "default_opportunity_param_adapt")]
+    pub opportunity_param_adapt: bool,
+    /// Venue bazlı trailing target override'ları. Key: exchange token.
+    #[serde(default)]
+    pub venue_trail_targets: HashMap<Exchange, f64>,
+    /// Venue bazlı pyramiding ATR trigger override'ları. Key: exchange token.
+    #[serde(default)]
+    pub venue_graded_trigger_atr_mult: HashMap<Exchange, f64>,
+    /// Venue bazlı pyramiding yüzde trigger override'ları. Key: exchange token.
+    #[serde(default)]
+    pub venue_graded_favorable_move_pct: HashMap<Exchange, f64>,
+    /// Venue bazlı adverse yüzde override'ları. `pyramiding_only=0` olursa kullanılır.
+    #[serde(default)]
+    pub venue_graded_adverse_move_pct: HashMap<Exchange, f64>,
+}
+
+fn default_opportunity_param_adapt() -> bool {
+    true
+}
+
+fn parse_exchange_f64_env_map(var_name: &str) -> HashMap<Exchange, f64> {
+    let raw = std::env::var(var_name).unwrap_or_default();
+    let mut out = HashMap::new();
+    for item in raw.split([',', ';']) {
+        let Some((k, v)) = item.split_once(':') else {
+            continue;
+        };
+        let Some(ex) = Exchange::from_token(k.trim()) else {
+            continue;
+        };
+        let Some(val) = v.trim().parse::<f64>().ok() else {
+            continue;
+        };
+        if val.is_finite() && val >= 0.0 {
+            out.insert(ex, val);
+        }
+    }
+    out
+}
+
+fn exchange_for_symbol(symbol: &str) -> Exchange {
+    let (bare, tag) = crate::robot::venue::registry::split_venue_tag(symbol);
+    tag.unwrap_or_else(|| Exchange::classify(bare))
 }
 
 /// Strateji niyetiyle hizalı default trail target'lar (yüzde, entry'den uzaklık).
@@ -126,21 +174,21 @@ pub struct ParameterStore {
 fn default_strategy_trail_targets() -> HashMap<String, f64> {
     let mut m = HashMap::new();
     // Trend takipçileri — geniş trail, küçük dalgalanmalarda çıkmaz, trend süresince ride.
-    m.insert("SUPERTREND".to_string(),     1.2);
-    m.insert("MA_CROSSOVER".to_string(),   1.5);
-    m.insert("EMA".to_string(),            1.2);
-    m.insert("MACD".to_string(),           1.5);
-    m.insert("DONCHIAN".to_string(),       1.5);
-    m.insert("ADX".to_string(),            1.3);
-    m.insert("VWAP".to_string(),           1.2);
+    m.insert("SUPERTREND".to_string(), 1.2);
+    m.insert("MA_CROSSOVER".to_string(), 1.5);
+    m.insert("EMA".to_string(), 1.2);
+    m.insert("MACD".to_string(), 1.5);
+    m.insert("DONCHIAN".to_string(), 1.5);
+    m.insert("ADX".to_string(), 1.3);
+    m.insert("VWAP".to_string(), 1.2);
     // Mean-reversion — sıkı trail, hızlı kâr al/çık (BB mean'e dön mantığı).
-    m.insert("BB".to_string(),             0.5);
+    m.insert("BB".to_string(), 0.5);
     // Momentum osilatörleri — orta sıkılık.
-    m.insert("RSI".to_string(),            0.7);
-    m.insert("STOCH_RSI".to_string(),      0.6);
-    m.insert("CCI".to_string(),            0.7);
+    m.insert("RSI".to_string(), 0.7);
+    m.insert("STOCH_RSI".to_string(), 0.6);
+    m.insert("CCI".to_string(), 0.7);
     // Default fallback için anahtar (resolve sırasında bulunamayan strateji adına).
-    m.insert("default".to_string(),        0.7);
+    m.insert("default".to_string(), 0.7);
     m
 }
 
@@ -150,30 +198,52 @@ fn default_strategy_trail_targets() -> HashMap<String, f64> {
 /// Dönüş: (symbol, interval, strategy, oos_score, StrategyParams). Çakışmada (çok-dosya birleştirme)
 /// oos_score ile karar verilir. Bozuk/yok dosya → boş (no-op). [[project_param_optimize_tool]].
 fn load_param_sweep_rows(
-    path: &str, require_wf: bool, engine_market: &str, ignore_market: bool,
-) -> Vec<(String, String, String, f64, crate::core::types::StrategyParams)> {
+    path: &str,
+    require_wf: bool,
+    engine_market: &str,
+    ignore_market: bool,
+) -> Vec<(
+    String,
+    String,
+    String,
+    f64,
+    crate::core::types::StrategyParams,
+)> {
     #[derive(Deserialize)]
-    struct PsParam { name: String, value: f64 }
+    struct PsParam {
+        name: String,
+        value: f64,
+    }
     #[derive(Deserialize)]
     struct PsRow {
         symbol: String,
         interval: String,
         strategy: String,
-        #[serde(default)] wf_robust: bool,
-        #[serde(default)] oos_score: f64,
-        #[serde(default)] params: Vec<PsParam>,
+        #[serde(default)]
+        wf_robust: bool,
+        #[serde(default)]
+        oos_score: f64,
+        #[serde(default)]
+        params: Vec<PsParam>,
     }
     #[derive(Deserialize)]
     struct PsReport {
-        #[serde(default)] market: String,
-        #[serde(default)] rows: Vec<PsRow>,
+        #[serde(default)]
+        market: String,
+        #[serde(default)]
+        rows: Vec<PsRow>,
     }
-    let Ok(txt) = std::fs::read_to_string(path) else { return Vec::new(); };
-    let Ok(rep) = serde_json::from_str::<PsReport>(&txt) else { return Vec::new(); };
+    let Ok(txt) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(rep) = serde_json::from_str::<PsReport>(&txt) else {
+        return Vec::new();
+    };
     if !ignore_market && !rep.market.is_empty() && !rep.market.eq_ignore_ascii_case(engine_market) {
         return Vec::new();
     }
-    rep.rows.into_iter()
+    rep.rows
+        .into_iter()
         .filter(|r| !require_wf || r.wf_robust)
         .map(|r| {
             let mut sp = crate::core::types::StrategyParams::default();
@@ -194,12 +264,12 @@ impl Default for ParameterStore {
     fn default() -> Self {
         Self {
             edge_thresholds: EdgeThresholds::default(),
-            partial_fill:    PartialFillParams::default(),
-            trade_risk:      TradeRiskParams::default(),
+            partial_fill: PartialFillParams::default(),
+            trade_risk: TradeRiskParams::default(),
             scalp_swing_threshold_min: 60,
-            sr_update_every_secs:      30,
+            sr_update_every_secs: 30,
             regime_overrides: HashMap::new(),
-            regime_feedback:  HashMap::new(),
+            regime_feedback: HashMap::new(),
             last_observed_regime: None,
             pending_regime: None,
             last_drift_at_secs: 0,
@@ -217,6 +287,11 @@ impl Default for ParameterStore {
             carry_live: CarryLiveParams::default(),
             blend_live: BlendLiveParams::default(),
             graded_entry: GradedEntryParams::default(),
+            opportunity_param_adapt: true,
+            venue_trail_targets: HashMap::new(),
+            venue_graded_trigger_atr_mult: HashMap::new(),
+            venue_graded_favorable_move_pct: HashMap::new(),
+            venue_graded_adverse_move_pct: HashMap::new(),
         }
     }
 }
@@ -254,20 +329,26 @@ impl ParameterStore {
         if let Some(v) = parse_env_f64("PARTIAL_FILL_MAX_SLIPPAGE_PCT") {
             store.partial_fill.max_slippage_pct = v;
         }
-        if let Some(v) = std::env::var("SCALP_SWING_THRESHOLD_MIN").ok()
-            .and_then(|v| v.parse::<i64>().ok()) {
+        if let Some(v) = std::env::var("SCALP_SWING_THRESHOLD_MIN")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+        {
             store.scalp_swing_threshold_min = v;
         }
-        if let Some(v) = std::env::var("SR_UPDATE_EVERY_SECS").ok()
-            .and_then(|v| v.parse::<u64>().ok()) {
+        if let Some(v) = std::env::var("SR_UPDATE_EVERY_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
             store.sr_update_every_secs = v;
         }
         // Multi-TF (Faz B) env override'ları.
         if let Some(v) = parse_env_bool("MULTI_TF_ENABLED") {
             store.multi_tf.enabled = v;
         }
-        if let Some(v) = std::env::var("MULTI_TF_MIN_REQUIRED").ok()
-            .and_then(|v| v.parse::<usize>().ok()) {
+        if let Some(v) = std::env::var("MULTI_TF_MIN_REQUIRED")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+        {
             store.multi_tf.min_required = v;
         }
         if let Some(v) = parse_env_bool("MULTI_TF_DOWNLOAD") {
@@ -293,13 +374,18 @@ impl ParameterStore {
         // robustluk barını (EDGE_SEED_MIN_TRADES/EDGE_SEED_MIN_PF) geçen sembol→strateji
         // adayları symbol_strategy'ye PRIOR olarak yüklenir. Online backtest job sonra doğrular/
         // üzerine yazar. Boş/yok → no-op (sıfır regresyon). [[project_edge_scan]].
-        if let Some(path) = std::env::var("EDGE_SEED_REPORT").ok().filter(|s| !s.trim().is_empty()) {
+        if let Some(path) = std::env::var("EDGE_SEED_REPORT")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+        {
             // Fallback'ler SeedRobustness::default()'tan gelir (TEK KAYNAK; hardcoded sabit kaçağı yok →
             // default kalibrasyonu (max_pf=10 vb.) runtime'a otomatik yansır). [[feedback_config_externalization]].
             let d = crate::robot::backtester::SeedRobustness::default();
             let r = crate::robot::backtester::SeedRobustness {
-                min_trades: std::env::var("EDGE_SEED_MIN_TRADES").ok()
-                    .and_then(|v| v.parse().ok()).unwrap_or(d.min_trades),
+                min_trades: std::env::var("EDGE_SEED_MIN_TRADES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(d.min_trades),
                 min_pf: parse_env_f64("EDGE_SEED_MIN_PF").unwrap_or(d.min_pf),
                 // ÜST sanity cap: PF>max_pf fluke (illikit-alt fat-tail) → elenir.
                 // EDGE_SEED_MAX_PF ile gevşet (devre dışı için çok büyük değer).
@@ -307,11 +393,13 @@ impl ParameterStore {
                 // Default: yalnız WF-onaylı seed (EDGE_SEED_REQUIRE_WF=0 ile gevşet).
                 require_wf_robust: !matches!(
                     std::env::var("EDGE_SEED_REQUIRE_WF").ok().as_deref(),
-                    Some("0") | Some("false") | Some("off")),
+                    Some("0") | Some("false") | Some("off")
+                ),
                 // MAJÖR (likidite) tabanı: günlük quote-volume bunun altındaki illikit-alt seri
                 // seed'lenmez (canlı feed'de purge edilen MYX/SIREN tipi). Default 0.0=kapalı;
                 // EDGE_SEED_MIN_QVOL (USDT/gün) + taze rapor (avg_daily_quote_volume'lı) ile aktive.
-                min_daily_quote_volume: parse_env_f64("EDGE_SEED_MIN_QVOL").unwrap_or(d.min_daily_quote_volume),
+                min_daily_quote_volume: parse_env_f64("EDGE_SEED_MIN_QVOL")
+                    .unwrap_or(d.min_daily_quote_volume),
                 // ANLAMLILIK kapısı: WF pencere-tutarlılığının binom p-değeri ≤ bu (yazı-tura fluke eler).
                 // Serialize wf'ten hesaplanır → eski raporlara da uygular. 1.0 ile devre dışı. Default 0.10.
                 wf_max_pvalue: parse_env_f64("EDGE_SEED_WF_MAX_PVALUE").unwrap_or(d.wf_max_pvalue),
@@ -326,7 +414,8 @@ impl ParameterStore {
             let engine_market = crate::core::env::env_or("TRADE_MARKET", "spot");
             let ignore_market = matches!(
                 std::env::var("EDGE_SEED_IGNORE_MARKET").ok().as_deref(),
-                Some("1") | Some("true") | Some("on"));
+                Some("1") | Some("true") | Some("on")
+            );
             let mut loaded = 0usize;
             let mut skipped_market = 0usize;
             for (sym, entry) in &seed {
@@ -334,8 +423,12 @@ impl ParameterStore {
                     skipped_market += 1;
                     continue;
                 }
-                store.symbol_interval.insert(sym.clone(), entry.interval.clone());
-                store.symbol_strategy.insert(sym.clone(), entry.strategy.clone());
+                store
+                    .symbol_interval
+                    .insert(sym.clone(), entry.interval.clone());
+                store
+                    .symbol_strategy
+                    .insert(sym.clone(), entry.strategy.clone());
                 loaded += 1;
             }
             if loaded > 0 || skipped_market > 0 {
@@ -349,15 +442,20 @@ impl ParameterStore {
             // symbol_strategy'de). Kapalı → boş = tek-edge davranış, sıfır regresyon. [[project_edge_scan]].
             let multi_tf = matches!(
                 std::env::var("EDGE_SEED_MULTI_TF").ok().as_deref(),
-                Some("1") | Some("true") | Some("on"));
+                Some("1") | Some("true") | Some("on")
+            );
             if multi_tf {
-                let max_tracks = std::env::var("EDGE_SEED_MAX_TRACKS").ok()
+                let max_tracks = std::env::var("EDGE_SEED_MAX_TRACKS")
+                    .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(crate::robot::backtester::SEED_MAX_TRACKS_DEFAULT);
-                let multi = crate::robot::backtester::seed_symbol_multi_plan_from_file(&path, r, max_tracks);
+                let multi = crate::robot::backtester::seed_symbol_multi_plan_from_file(
+                    &path, r, max_tracks,
+                );
                 let mut tracks_total = 0usize;
                 for (sym, entries) in &multi {
-                    let tracks: Vec<(String, String)> = entries.iter()
+                    let tracks: Vec<(String, String)> = entries
+                        .iter()
                         .filter(|e| ignore_market || e.market.eq_ignore_ascii_case(&engine_market))
                         .map(|e| (e.interval.clone(), e.strategy.clone()))
                         .collect();
@@ -379,32 +477,46 @@ impl ParameterStore {
         // (sembol→(strateji,params)) yüklenir. EDGE_SEED_REPORT'un kardeşi: o "hangi strateji+TF",
         // bu "hangi indikatör paramı". PARAM_SWEEP_REQUIRE_WF=0 ile WF kapısını gevşet (fluke riski).
         // Market = TRADE_MARKET (EDGE_SEED_IGNORE_MARKET=1 ile baypas). Boş/yok → no-op. [[project_param_optimize_tool]].
-        if let Some(paths) = std::env::var("PARAM_SWEEP_REPORT").ok().filter(|s| !s.trim().is_empty()) {
+        if let Some(paths) = std::env::var("PARAM_SWEEP_REPORT")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+        {
             let require_wf = !matches!(
                 std::env::var("PARAM_SWEEP_REQUIRE_WF").ok().as_deref(),
-                Some("0") | Some("false") | Some("off"));
+                Some("0") | Some("false") | Some("off")
+            );
             let engine_market = crate::core::env::env_or("TRADE_MARKET", "spot");
             let ignore_market = matches!(
                 std::env::var("EDGE_SEED_IGNORE_MARKET").ok().as_deref(),
-                Some("1") | Some("true") | Some("on"));
+                Some("1") | Some("true") | Some("on")
+            );
             // Çok-dosya (csv) → her TF koşusunun raporu birleşir. Çakışmada (sym,iv,strat) → oos_score kazanır.
             use std::collections::HashMap as Map;
-            let mut best: Map<(String, String, String), (f64, crate::core::types::StrategyParams)> = Map::new();
+            let mut best: Map<(String, String, String), (f64, crate::core::types::StrategyParams)> =
+                Map::new();
             let mut files = 0usize;
             for path in paths.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
                 let rows = load_param_sweep_rows(path, require_wf, &engine_market, ignore_market);
-                if !rows.is_empty() { files += 1; }
+                if !rows.is_empty() {
+                    files += 1;
+                }
                 for (sym, iv, strat, score, params) in rows {
                     let key = (sym, iv, strat);
                     match best.get(&key) {
                         Some((s, _)) if *s >= score => {}
-                        _ => { best.insert(key, (score, params)); }
+                        _ => {
+                            best.insert(key, (score, params));
+                        }
                     }
                 }
             }
             let n = best.len();
             for ((sym, iv, strat), (_, params)) in best {
-                store.symbol_strategy_params.entry(sym).or_default().push((iv, strat, params));
+                store
+                    .symbol_strategy_params
+                    .entry(sym)
+                    .or_default()
+                    .push((iv, strat, params));
             }
             if n > 0 {
                 log::info!("🎛️ param_sweep seed: {} (sembol,TF,strateji) param izi yüklendi ({} dosya, wf_robust={}, market={})",
@@ -418,26 +530,59 @@ impl ParameterStore {
         let d = XsLiveParams::default();
         store.xs_live = XsLiveParams {
             enabled: parse_env_bool("XS_LIVE_ENABLED").unwrap_or(d.enabled),
-            symbols: std::env::var("XS_LIVE_SYMBOLS").ok()
-                .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            symbols: std::env::var("XS_LIVE_SYMBOLS")
+                .ok()
+                .map(|s| {
+                    s.split(',')
+                        .map(|x| x.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect()
+                })
                 .unwrap_or(d.symbols),
-            interval: std::env::var("XS_LIVE_INTERVAL").ok().filter(|s| !s.trim().is_empty()).unwrap_or(d.interval),
-            lookback: std::env::var("XS_LIVE_LOOKBACK").ok().and_then(|v| v.parse().ok()).unwrap_or(d.lookback),
-            top_k: std::env::var("XS_LIVE_TOP_K").ok().and_then(|v| v.parse().ok()).unwrap_or(d.top_k),
-            exit_buffer: std::env::var("XS_LIVE_BUFFER").ok().and_then(|v| v.parse().ok()).unwrap_or(d.exit_buffer),
+            interval: std::env::var("XS_LIVE_INTERVAL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(d.interval),
+            lookback: std::env::var("XS_LIVE_LOOKBACK")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d.lookback),
+            top_k: std::env::var("XS_LIVE_TOP_K")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d.top_k),
+            exit_buffer: std::env::var("XS_LIVE_BUFFER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d.exit_buffer),
             momentum: parse_env_bool("XS_LIVE_MOMENTUM").unwrap_or(d.momentum),
             position_pct: parse_env_f64("XS_LIVE_POSITION_PCT").unwrap_or(d.position_pct),
             leverage: parse_env_f64("XS_LIVE_LEVERAGE").unwrap_or(d.leverage),
             regime_gate: parse_env_bool("XS_LIVE_REGIME_GATE").unwrap_or(d.regime_gate),
             max_drawdown_pct: parse_env_f64("XS_LIVE_MAX_DD_PCT").unwrap_or(d.max_drawdown_pct),
-            cb_cooldown_secs: std::env::var("XS_LIVE_CB_COOLDOWN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(d.cb_cooldown_secs),
+            cb_cooldown_secs: std::env::var("XS_LIVE_CB_COOLDOWN_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d.cb_cooldown_secs),
             take_profit_pct: parse_env_f64("XS_LIVE_TP_PCT").unwrap_or(d.take_profit_pct),
-            tp_cooldown_secs: std::env::var("XS_LIVE_TP_COOLDOWN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(d.tp_cooldown_secs),
+            tp_cooldown_secs: std::env::var("XS_LIVE_TP_COOLDOWN_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d.tp_cooldown_secs),
         };
         if store.xs_live.enabled {
-            log::info!("📐 kesitsel adanmış mod AÇIK: {} sembol · lookback={} · top_k={} · band={} · {}",
-                store.xs_live.symbols.len(), store.xs_live.lookback, store.xs_live.top_k,
-                store.xs_live.exit_buffer, if store.xs_live.momentum { "momentum" } else { "reversal" });
+            log::info!(
+                "📐 kesitsel adanmış mod AÇIK: {} sembol · lookback={} · top_k={} · band={} · {}",
+                store.xs_live.symbols.len(),
+                store.xs_live.lookback,
+                store.xs_live.top_k,
+                store.xs_live.exit_buffer,
+                if store.xs_live.momentum {
+                    "momentum"
+                } else {
+                    "reversal"
+                }
+            );
         }
 
         // FUNDING-CARRY ADANMIŞ MOD (opt-in): CARRY_LIVE_ENABLED=1 + CARRY_LIVE_SYMBOLS=BTC,ETH,... ile
@@ -446,23 +591,56 @@ impl ParameterStore {
         let cd = CarryLiveParams::default();
         store.carry_live = CarryLiveParams {
             enabled: parse_env_bool("CARRY_LIVE_ENABLED").unwrap_or(cd.enabled),
-            symbols: std::env::var("CARRY_LIVE_SYMBOLS").ok()
-                .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            symbols: std::env::var("CARRY_LIVE_SYMBOLS")
+                .ok()
+                .map(|s| {
+                    s.split(',')
+                        .map(|x| x.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect()
+                })
                 .unwrap_or(cd.symbols),
-            interval: std::env::var("CARRY_LIVE_INTERVAL").ok().filter(|s| !s.trim().is_empty()).unwrap_or(cd.interval),
-            lookback: std::env::var("CARRY_LIVE_LOOKBACK").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.lookback),
-            rebalance_bars: std::env::var("CARRY_LIVE_REBALANCE_BARS").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.rebalance_bars),
-            top_k: std::env::var("CARRY_LIVE_TOP_K").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.top_k),
-            exit_buffer: std::env::var("CARRY_LIVE_BUFFER").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.exit_buffer),
+            interval: std::env::var("CARRY_LIVE_INTERVAL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(cd.interval),
+            lookback: std::env::var("CARRY_LIVE_LOOKBACK")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(cd.lookback),
+            rebalance_bars: std::env::var("CARRY_LIVE_REBALANCE_BARS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(cd.rebalance_bars),
+            top_k: std::env::var("CARRY_LIVE_TOP_K")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(cd.top_k),
+            exit_buffer: std::env::var("CARRY_LIVE_BUFFER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(cd.exit_buffer),
             position_pct: parse_env_f64("CARRY_LIVE_POSITION_PCT").unwrap_or(cd.position_pct),
             leverage: parse_env_f64("CARRY_LIVE_LEVERAGE").unwrap_or(cd.leverage),
             regime_gate: parse_env_bool("CARRY_LIVE_REGIME_GATE").unwrap_or(cd.regime_gate),
             max_drawdown_pct: parse_env_f64("CARRY_LIVE_MAX_DD_PCT").unwrap_or(cd.max_drawdown_pct),
-            cb_cooldown_secs: std::env::var("CARRY_LIVE_CB_COOLDOWN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.cb_cooldown_secs),
+            cb_cooldown_secs: std::env::var("CARRY_LIVE_CB_COOLDOWN_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(cd.cb_cooldown_secs),
             take_profit_pct: parse_env_f64("CARRY_LIVE_TP_PCT").unwrap_or(cd.take_profit_pct),
-            tp_cooldown_secs: std::env::var("CARRY_LIVE_TP_COOLDOWN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.tp_cooldown_secs),
-            funding_max_age_secs: std::env::var("CARRY_LIVE_FUNDING_MAX_AGE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.funding_max_age_secs),
-            funding_limit: std::env::var("CARRY_LIVE_FUNDING_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(cd.funding_limit),
+            tp_cooldown_secs: std::env::var("CARRY_LIVE_TP_COOLDOWN_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(cd.tp_cooldown_secs),
+            funding_max_age_secs: std::env::var("CARRY_LIVE_FUNDING_MAX_AGE_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(cd.funding_max_age_secs),
+            funding_limit: std::env::var("CARRY_LIVE_FUNDING_LIMIT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(cd.funding_limit),
         };
         if store.carry_live.enabled {
             log::info!("💰 funding-carry adanmış mod AÇIK: {} sembol · lookback={} · kadans={}bar · top_k={} · band={}",
@@ -475,26 +653,62 @@ impl ParameterStore {
         let bd = BlendLiveParams::default();
         store.blend_live = BlendLiveParams {
             enabled: parse_env_bool("BLEND_LIVE_ENABLED").unwrap_or(bd.enabled),
-            symbols: std::env::var("BLEND_LIVE_SYMBOLS").ok()
-                .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            symbols: std::env::var("BLEND_LIVE_SYMBOLS")
+                .ok()
+                .map(|s| {
+                    s.split(',')
+                        .map(|x| x.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect()
+                })
                 .unwrap_or(bd.symbols),
-            interval: std::env::var("BLEND_LIVE_INTERVAL").ok().filter(|s| !s.trim().is_empty()).unwrap_or(bd.interval),
-            mom_lookback: std::env::var("BLEND_LIVE_MOM_LOOKBACK").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.mom_lookback),
-            carry_lookback: std::env::var("BLEND_LIVE_CARRY_LOOKBACK").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.carry_lookback),
-            rebalance_bars: std::env::var("BLEND_LIVE_REBALANCE_BARS").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.rebalance_bars),
+            interval: std::env::var("BLEND_LIVE_INTERVAL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(bd.interval),
+            mom_lookback: std::env::var("BLEND_LIVE_MOM_LOOKBACK")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(bd.mom_lookback),
+            carry_lookback: std::env::var("BLEND_LIVE_CARRY_LOOKBACK")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(bd.carry_lookback),
+            rebalance_bars: std::env::var("BLEND_LIVE_REBALANCE_BARS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(bd.rebalance_bars),
             weight_momentum: parse_env_f64("BLEND_LIVE_WEIGHT_MOM").unwrap_or(bd.weight_momentum),
             weight_carry: parse_env_f64("BLEND_LIVE_WEIGHT_CARRY").unwrap_or(bd.weight_carry),
-            top_k: std::env::var("BLEND_LIVE_TOP_K").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.top_k),
-            exit_buffer: std::env::var("BLEND_LIVE_BUFFER").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.exit_buffer),
+            top_k: std::env::var("BLEND_LIVE_TOP_K")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(bd.top_k),
+            exit_buffer: std::env::var("BLEND_LIVE_BUFFER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(bd.exit_buffer),
             position_pct: parse_env_f64("BLEND_LIVE_POSITION_PCT").unwrap_or(bd.position_pct),
             leverage: parse_env_f64("BLEND_LIVE_LEVERAGE").unwrap_or(bd.leverage),
             regime_gate: parse_env_bool("BLEND_LIVE_REGIME_GATE").unwrap_or(bd.regime_gate),
             max_drawdown_pct: parse_env_f64("BLEND_LIVE_MAX_DD_PCT").unwrap_or(bd.max_drawdown_pct),
-            cb_cooldown_secs: std::env::var("BLEND_LIVE_CB_COOLDOWN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.cb_cooldown_secs),
+            cb_cooldown_secs: std::env::var("BLEND_LIVE_CB_COOLDOWN_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(bd.cb_cooldown_secs),
             take_profit_pct: parse_env_f64("BLEND_LIVE_TP_PCT").unwrap_or(bd.take_profit_pct),
-            tp_cooldown_secs: std::env::var("BLEND_LIVE_TP_COOLDOWN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.tp_cooldown_secs),
-            funding_max_age_secs: std::env::var("BLEND_LIVE_FUNDING_MAX_AGE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.funding_max_age_secs),
-            funding_limit: std::env::var("BLEND_LIVE_FUNDING_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(bd.funding_limit),
+            tp_cooldown_secs: std::env::var("BLEND_LIVE_TP_COOLDOWN_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(bd.tp_cooldown_secs),
+            funding_max_age_secs: std::env::var("BLEND_LIVE_FUNDING_MAX_AGE_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(bd.funding_max_age_secs),
+            funding_limit: std::env::var("BLEND_LIVE_FUNDING_LIMIT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(bd.funding_limit),
         };
         if store.blend_live.enabled {
             log::info!("🔀 iki-faktör harman adanmış mod AÇIK: {} sembol · w_mom={:.2} w_carry={:.2} · kadans={}bar · top_k={}",
@@ -506,19 +720,98 @@ impl ParameterStore {
         let gd = GradedEntryParams::default();
         store.graded_entry = GradedEntryParams {
             enabled: parse_env_bool("GRADED_ENTRY_ENABLED").unwrap_or(gd.enabled),
-            tranche_weights: std::env::var("GRADED_TRANCHE_WEIGHTS").ok()
-                .map(|s| s.split(',').filter_map(|x| x.trim().parse::<f64>().ok()).filter(|w| *w > 0.0).collect::<Vec<f64>>())
+            tranche_weights: std::env::var("GRADED_TRANCHE_WEIGHTS")
+                .ok()
+                .map(|s| {
+                    s.split(',')
+                        .filter_map(|x| x.trim().parse::<f64>().ok())
+                        .filter(|w| *w > 0.0)
+                        .collect::<Vec<f64>>()
+                })
                 .filter(|v: &Vec<f64>| !v.is_empty())
                 .unwrap_or(gd.tranche_weights),
-            favorable_move_pct: parse_env_f64("GRADED_FAVORABLE_MOVE_PCT").unwrap_or(gd.favorable_move_pct),
-            adverse_move_pct: parse_env_f64("GRADED_ADVERSE_MOVE_PCT").unwrap_or(gd.adverse_move_pct),
+            trigger_mode: std::env::var("GRADED_TRIGGER_MODE")
+                .ok()
+                .map(|v| match v.trim().to_ascii_lowercase().as_str() {
+                    "atr" => GradedTriggerMode::Atr,
+                    "percent" | "pct" => GradedTriggerMode::Percent,
+                    _ => GradedTriggerMode::Hybrid,
+                })
+                .unwrap_or(gd.trigger_mode),
+            weight_mode: std::env::var("GRADED_WEIGHT_MODE")
+                .ok()
+                .map(|v| match v.trim().to_ascii_lowercase().as_str() {
+                    "relative" | "henry" | "dying" => GradedWeightMode::Relative,
+                    _ => GradedWeightMode::Normalized,
+                })
+                .unwrap_or(gd.weight_mode),
+            trigger_atr_mult: parse_env_f64("GRADED_TRIGGER_ATR_MULT")
+                .unwrap_or(gd.trigger_atr_mult),
+            favorable_move_pct: parse_env_f64("GRADED_FAVORABLE_MOVE_PCT")
+                .unwrap_or(gd.favorable_move_pct),
+            adverse_move_pct: parse_env_f64("GRADED_ADVERSE_MOVE_PCT")
+                .unwrap_or(gd.adverse_move_pct),
             require_htf_align: parse_env_bool("GRADED_REQUIRE_HTF").unwrap_or(gd.require_htf_align),
+            pyramiding_only: parse_env_bool("GRADED_PYRAMIDING_ONLY").unwrap_or(gd.pyramiding_only),
         };
         if store.graded_entry.enabled {
-            log::info!("🪜 kademeli giriş AÇIK: {} kademe (ağırlık={:?}) · pyramiding≥%{} · averaging≥%{} · HTF-hiza={}",
+            log::info!("🪜 kademeli giriş AÇIK: {} kademe (ağırlık={:?}, mode={:?}) · trigger={:?} · ATR×{} · pyramiding≥%{} · averaging≥%{} · HTF-hiza={} · trend-only={}",
                 store.graded_entry.tranche_count(), store.graded_entry.tranche_weights,
+                store.graded_entry.weight_mode, store.graded_entry.trigger_mode, store.graded_entry.trigger_atr_mult,
                 store.graded_entry.favorable_move_pct, store.graded_entry.adverse_move_pct,
-                store.graded_entry.require_htf_align);
+                store.graded_entry.require_htf_align, store.graded_entry.pyramiding_only);
+        }
+
+        store.venue_trail_targets = parse_exchange_f64_env_map("TARGET_TRAIL_PCT_BY_EXCHANGE");
+        store.venue_graded_trigger_atr_mult =
+            parse_exchange_f64_env_map("GRADED_TRIGGER_ATR_MULT_BY_EXCHANGE");
+        store.venue_graded_favorable_move_pct =
+            parse_exchange_f64_env_map("GRADED_FAVORABLE_MOVE_PCT_BY_EXCHANGE");
+        store.venue_graded_adverse_move_pct =
+            parse_exchange_f64_env_map("GRADED_ADVERSE_MOVE_PCT_BY_EXCHANGE");
+
+        store.opportunity_param_adapt = !matches!(
+            std::env::var("OPPORTUNITY_PARAM_ADAPT").ok().as_deref(),
+            Some("0") | Some("false") | Some("off")
+        );
+
+        if let Some(strategy_name) = std::env::var("LIVE_STRATEGY")
+            .ok()
+            .map(|s| s.trim().to_ascii_uppercase())
+            .filter(|s| !s.is_empty() && s != "AUTO" && s != "DEFAULT")
+        {
+            if let Some(raw) = std::env::var("LIVE_STRATEGY_PARAMS")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+            {
+                let mut p = crate::core::types::StrategyParams::default();
+                for item in raw.split([',', ';']) {
+                    let Some((k, v)) = item.split_once('=') else {
+                        let Some((k, v)) = item.split_once(':') else {
+                            continue;
+                        };
+                        let key = k.trim();
+                        let Some(val) = v.trim().parse::<f64>().ok() else {
+                            continue;
+                        };
+                        crate::robot::strategies::param_spec::apply_param(&mut p, key, val);
+                        continue;
+                    };
+                    let key = k.trim();
+                    let Some(val) = v.trim().parse::<f64>().ok() else {
+                        continue;
+                    };
+                    crate::robot::strategies::param_spec::apply_param(&mut p, key, val);
+                }
+                if !p.is_empty() {
+                    store.set_strategy_params(strategy_name.clone(), p);
+                    log::info!(
+                        "🎯 sabit strateji paramlari yüklendi: {} <- {}",
+                        strategy_name,
+                        raw
+                    );
+                }
+            }
         }
         store
     }
@@ -548,9 +841,9 @@ impl ParameterStore {
 
         // Rejim modülasyonu
         lev *= match regime {
-            "HighVolatility" | "Volatile"               => 0.5,
-            "StrongUptrend"  | "StrongDowntrend"        => 1.3,
-            "Ranging"        | "LowVolatility"          => 1.0,
+            "HighVolatility" | "Volatile" => 0.5,
+            "StrongUptrend" | "StrongDowntrend" => 1.3,
+            "Ranging" | "LowVolatility" => 1.0,
             // Weak trends / Unknown → temkinli
             _ => 0.9,
         };
@@ -587,10 +880,19 @@ impl ParameterStore {
     /// store'un trade_risk alanına yazar. `f64` üçlüsü olarak iletilir ki
     /// modül bağımsızlığı korunsun (ParameterStore başka modüllere bağlı
     /// olmadan kendi başına test edilebilir).
-    pub fn apply_optimization(&mut self, take_profit_pct: f64, stop_loss_pct: f64, max_position_size: f64) {
+    pub fn apply_optimization(
+        &mut self,
+        take_profit_pct: f64,
+        stop_loss_pct: f64,
+        max_position_size: f64,
+    ) {
         // Sıfır/negatif değerler kabul edilmez; default'a düş.
-        if take_profit_pct > 0.0   { self.trade_risk.take_profit_pct   = take_profit_pct; }
-        if stop_loss_pct   > 0.0   { self.trade_risk.stop_loss_pct     = stop_loss_pct; }
+        if take_profit_pct > 0.0 {
+            self.trade_risk.take_profit_pct = take_profit_pct;
+        }
+        if stop_loss_pct > 0.0 {
+            self.trade_risk.stop_loss_pct = stop_loss_pct;
+        }
         if max_position_size > 0.0 && max_position_size <= 1.0 {
             self.trade_risk.max_position_size = max_position_size;
         }
@@ -605,21 +907,24 @@ impl ParameterStore {
 
     /// İlgili rejim için (override varsa o, yoksa base) EdgeThresholds.
     pub fn edge_thresholds_for(&self, regime: &str) -> EdgeThresholds {
-        self.regime_overrides.get(regime)
+        self.regime_overrides
+            .get(regime)
             .and_then(|p| p.edge_thresholds)
             .unwrap_or(self.edge_thresholds)
     }
 
     /// `edge_thresholds_for` üstüne `for_confidence` zinciri — engine direkt çağırır.
     pub fn edge_threshold_for(&self, regime: &str, ml_confidence: f64) -> f64 {
-        self.edge_thresholds_for(regime).for_confidence(ml_confidence)
+        self.edge_thresholds_for(regime)
+            .for_confidence(ml_confidence)
     }
 
     /// Bu rejimde rejim-yön disiplini uygulanmalı mı? Otonom per-rejim policy varsa onu
     /// (değerlendirme job'ı backtest A/B ile doldurur), yoksa `fallback` (RuntimeTuning
     /// env'i). Sparse: policy yoksa/None ise fallback → sıfır regresyon.
     pub fn regime_directional_for(&self, regime: &str, fallback: bool) -> bool {
-        self.regime_overrides.get(regime)
+        self.regime_overrides
+            .get(regime)
             .and_then(|p| p.policy)
             .and_then(|pol| pol.regime_directional)
             .unwrap_or(fallback)
@@ -629,14 +934,18 @@ impl ParameterStore {
     /// `symbol_interval` map'i değerlendirme job'ı doldurur; boş → tüm semboller fallback
     /// (sıfır regresyon). Cycle dispatch + download tek-nokta bunu çağırır.
     pub fn interval_for(&self, symbol: &str, fallback: &str) -> String {
-        self.symbol_interval.get(symbol).cloned().unwrap_or_else(|| fallback.to_string())
+        self.symbol_interval
+            .get(symbol)
+            .cloned()
+            .unwrap_or_else(|| fallback.to_string())
     }
 
     /// Bu sembol için otonom seçilmiş STRATEJİ; yoksa `None` (çağıran global/auto'ya düşer).
     /// `symbol_strategy` map'i edge_scan seed + backtest job WF/PF A/B'si doldurur. Boş değer
     /// (whitespace) güvenli şekilde None sayılır. Canlı cycle precedence'in 1. basamağı.
     pub fn strategy_for(&self, symbol: &str) -> Option<String> {
-        self.symbol_strategy.get(symbol)
+        self.symbol_strategy
+            .get(symbol)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
     }
@@ -649,7 +958,8 @@ impl ParameterStore {
 
     /// İlgili rejim için (override varsa o, yoksa base) TradeRiskParams.
     pub fn trade_risk_for(&self, regime: &str) -> TradeRiskParams {
-        self.regime_overrides.get(regime)
+        self.regime_overrides
+            .get(regime)
             .and_then(|p| p.trade_risk)
             .unwrap_or(self.trade_risk)
     }
@@ -657,13 +967,15 @@ impl ParameterStore {
     /// Sembol+interval için noise-floor stats'i günceller (perform_download çağrır).
     /// Zaten varsa üzerine yazar (taze veri eski hesabı geçersiz kılar).
     pub fn update_symbol_stats(&mut self, symbol: &str, interval: &str, stats: SymbolStats) {
-        self.symbol_stats.insert((symbol.to_string(), interval.to_string()), stats);
+        self.symbol_stats
+            .insert((symbol.to_string(), interval.to_string()), stats);
     }
 
     /// Stale stats temizliği (cold-start / bakım). TTL üstü kayıtları siler.
     /// Engine periyodik çağırmıyor; in-memory store küçük (~100 entry max).
     pub fn purge_stale_symbol_stats(&mut self, ttl_secs: u64) {
-        self.symbol_stats.retain(|_, s| super::symbol_stats::is_fresh(s, ttl_secs));
+        self.symbol_stats
+            .retain(|_, s| super::symbol_stats::is_fresh(s, ttl_secs));
     }
 
     /// Strateji ismine göre trail target yüzdesi (Phase B fallback).
@@ -676,21 +988,45 @@ impl ParameterStore {
         if let Some(&v) = self.strategy_trail_targets.get(strategy_name) {
             return v;
         }
-        self.strategy_trail_targets.get("default").copied().unwrap_or(0.7)
+        self.strategy_trail_targets
+            .get("default")
+            .copied()
+            .unwrap_or(0.7)
     }
 
     /// Strateji + sembol bağlamlı trail target — Phase C feedback katmanı dahil.
     /// Rejim-agnostik thin delege (geriye-uyum); rejim-farkında call site'lar
     /// `target_trail_pct_resolved`'i kullanmalı.
-    pub fn target_trail_pct_for_strategy_and_symbol(&self, symbol: &str, strategy_name: &str) -> f64 {
+    pub fn target_trail_pct_for_strategy_and_symbol(
+        &self,
+        symbol: &str,
+        strategy_name: &str,
+    ) -> f64 {
         self.target_trail_pct_resolved(symbol, strategy_name, None)
+    }
+
+    pub fn graded_entry_for_symbol(&self, symbol: &str) -> GradedEntryParams {
+        let mut out = self.graded_entry.clone();
+        let ex = exchange_for_symbol(symbol);
+        if let Some(v) = self.venue_graded_trigger_atr_mult.get(&ex).copied() {
+            out.trigger_atr_mult = v;
+        }
+        if let Some(v) = self.venue_graded_favorable_move_pct.get(&ex).copied() {
+            out.favorable_move_pct = v;
+        }
+        if let Some(v) = self.venue_graded_adverse_move_pct.get(&ex).copied() {
+            out.adverse_move_pct = v;
+        }
+        out
     }
 
     /// İlgili rejim için otonom backtest A/B'siyle yazılmış trailing hedefi (varsa).
     /// `regime_overrides[regime].target_trail_pct`; yoksa None → çözümleme strateji
     /// default'una düşer (sıfır regresyon).
     pub fn regime_trail_target_for(&self, regime: &str) -> Option<f64> {
-        self.regime_overrides.get(regime).and_then(|p| p.target_trail_pct)
+        self.regime_overrides
+            .get(regime)
+            .and_then(|p| p.target_trail_pct)
     }
 
     /// Trail target çözümleme — tam precedence (rejim-farkında).
@@ -704,12 +1040,22 @@ impl ParameterStore {
     /// Online feedback (2) rejim A/B'sinin (3) üstünde: canlı gözlem, offline-ölçülmüş
     /// rejim taban-çizgisini ezer. Rejim A/B static strateji default'unun (4) üstünde.
     pub fn target_trail_pct_resolved(
-        &self, symbol: &str, strategy_name: &str, regime: Option<&str>,
+        &self,
+        symbol: &str,
+        strategy_name: &str,
+        regime: Option<&str>,
     ) -> f64 {
         if let Some(v) = parse_env_f64("TARGET_TRAIL_PCT") {
             return v;
         }
-        if let Some(fb) = self.trail_feedback.get(&(symbol.to_string(), strategy_name.to_string())) {
+        let ex = exchange_for_symbol(symbol);
+        if let Some(v) = self.venue_trail_targets.get(&ex).copied() {
+            return v;
+        }
+        if let Some(fb) = self
+            .trail_feedback
+            .get(&(symbol.to_string(), strategy_name.to_string()))
+        {
             if let Some(override_pct) = fb.target_override {
                 return override_pct;
             }
@@ -722,7 +1068,10 @@ impl ParameterStore {
         if let Some(&v) = self.strategy_trail_targets.get(strategy_name) {
             return v;
         }
-        self.strategy_trail_targets.get("default").copied().unwrap_or(0.7)
+        self.strategy_trail_targets
+            .get("default")
+            .copied()
+            .unwrap_or(0.7)
     }
 
     /// Trailing-stop outcome'ını sayaçlara yaz; pencere dolmuşsa adjustment dener.
@@ -736,7 +1085,8 @@ impl ParameterStore {
         was_early: bool,
     ) -> Option<f64> {
         let base = self.target_trail_pct_for_strategy(strategy_name);
-        let fb = self.trail_feedback
+        let fb = self
+            .trail_feedback
             .entry((symbol.to_string(), strategy_name.to_string()))
             .or_default();
         fb.record_outcome(was_early, base)
@@ -755,8 +1105,14 @@ impl ParameterStore {
     /// parametreler; yoksa `StrategyParams::default()`. Canlı cycle bunu
     /// `generate_signal`'a verir → optimize edilmiş indikatör periyot/eşikleri
     /// canlıya ulaşır (eskiden her zaman default geçiliyordu — kaçak buradan kapanır).
-    pub fn resolve_strategy_params(&self, strategy_name: &str) -> crate::core::types::StrategyParams {
-        self.strategy_params.get(strategy_name).copied().unwrap_or_default()
+    pub fn resolve_strategy_params(
+        &self,
+        strategy_name: &str,
+    ) -> crate::core::types::StrategyParams {
+        self.strategy_params
+            .get(strategy_name)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// TF-farkında per-sembol param çözümleme (param_sweep entegrasyonu): sembolün izleri
@@ -764,16 +1120,193 @@ impl ParameterStore {
     /// / CCI eşiğini RSI'ya verme hatasını önler), yoksa global `resolve_strategy_params`.
     /// Boş map → global, sıfır regresyon. [[project_param_optimize_tool]].
     pub fn resolve_strategy_params_for(
-        &self, symbol: &str, interval: &str, strategy_name: &str,
+        &self,
+        symbol: &str,
+        interval: &str,
+        strategy_name: &str,
     ) -> crate::core::types::StrategyParams {
         if let Some(tracks) = self.symbol_strategy_params.get(symbol) {
-            if let Some((_, _, params)) = tracks.iter().find(|(iv, strat, _)| {
-                iv == interval && strat.eq_ignore_ascii_case(strategy_name)
-            }) {
+            if let Some((_, _, params)) = tracks
+                .iter()
+                .find(|(iv, strat, _)| iv == interval && strat.eq_ignore_ascii_case(strategy_name))
+            {
                 return *params;
             }
         }
         self.resolve_strategy_params(strategy_name)
+    }
+
+    /// 15m rolling fırsat hafızasına göre strateji parametrelerini adapte eder.
+    /// Base çözümleme değişmez; snapshot varsa yalnız ince override uygulanır.
+    pub fn resolve_strategy_params_for_opportunity(
+        &self,
+        symbol: &str,
+        interval: &str,
+        strategy_name: &str,
+        snapshot: Option<&crate::robot::data_pipeline::MemoryOpportunitySnapshot>,
+    ) -> crate::core::types::StrategyParams {
+        let base = self.resolve_strategy_params_for(symbol, interval, strategy_name);
+        if !self.opportunity_param_adapt {
+            return base;
+        }
+        snapshot
+            .map(|snap| self.apply_opportunity_policy(strategy_name, base, snap))
+            .unwrap_or(base)
+    }
+
+    fn apply_opportunity_policy(
+        &self,
+        strategy_name: &str,
+        base: crate::core::types::StrategyParams,
+        snap: &crate::robot::data_pipeline::MemoryOpportunitySnapshot,
+    ) -> crate::core::types::StrategyParams {
+        let phase = snap.phase.split(':').next().unwrap_or("neutral");
+        let strength = snap
+            .trend_bias
+            .abs()
+            .max(snap.scalp_bias.abs())
+            .max(snap.swing_bias.abs())
+            .clamp(0.0, 1.0);
+
+        let mut out = base;
+        let supported = |name: &str| base.get(name).is_some();
+
+        let mut period_scale = 1.0;
+        let mut fast_scale = 1.0;
+        let mut slow_scale = 1.0;
+        let mut signal_scale = 1.0;
+        let mut std_scale = 1.0;
+        let mut ob_shift = 0.0;
+        let mut os_shift = 0.0;
+
+        match phase {
+            "scalp-long" | "scalp-short" | "scalp-watch" => {
+                period_scale = 0.80 - (0.05 * strength);
+                fast_scale = 0.82 - (0.04 * strength);
+                slow_scale = 0.88 - (0.03 * strength);
+                signal_scale = 0.85 - (0.04 * strength);
+                std_scale = 0.90 - (0.05 * strength);
+                ob_shift = -4.0;
+                os_shift = 4.0;
+            }
+            "swing-long" | "swing-short" | "swing-watch" => {
+                period_scale = 1.18 + (0.06 * strength);
+                fast_scale = 1.12 + (0.05 * strength);
+                slow_scale = 1.18 + (0.06 * strength);
+                signal_scale = 1.10 + (0.05 * strength);
+                std_scale = 1.08 + (0.04 * strength);
+                ob_shift = 4.0;
+                os_shift = -4.0;
+            }
+            "trend-start-up" | "trend-start-down" => {
+                period_scale = 0.92;
+                fast_scale = 0.88;
+                slow_scale = 0.92;
+                signal_scale = 0.90;
+                std_scale = 0.95;
+                ob_shift = 2.0;
+                os_shift = -2.0;
+            }
+            _ => {}
+        }
+
+        if supported(keys::PERIOD) {
+            let current = out.usize_or(keys::PERIOD, 14).max(1) as f64;
+            out.set(
+                keys::PERIOD,
+                Self::clamp_usize_scale(current, period_scale, 2, 250) as f64,
+            );
+        }
+        if supported(keys::FAST) {
+            let current = out.usize_or(keys::FAST, 5).max(1) as f64;
+            out.set(
+                keys::FAST,
+                Self::clamp_usize_scale(current, fast_scale, 2, 250) as f64,
+            );
+        }
+        if supported(keys::SLOW) {
+            let current = out.usize_or(keys::SLOW, 20).max(1) as f64;
+            out.set(
+                keys::SLOW,
+                Self::clamp_usize_scale(current, slow_scale, 3, 400) as f64,
+            );
+        }
+        if supported(keys::SIGNAL_PERIOD) {
+            let current = out.usize_or(keys::SIGNAL_PERIOD, 9).max(1) as f64;
+            out.set(
+                keys::SIGNAL_PERIOD,
+                Self::clamp_usize_scale(current, signal_scale, 2, 100) as f64,
+            );
+        }
+        if supported(keys::STD_DEV) {
+            let current = out.f64_or(keys::STD_DEV, 2.0);
+            out.set(
+                keys::STD_DEV,
+                Self::clamp_f64_scale(current, std_scale, 0.8, 6.0),
+            );
+        }
+        if supported(keys::OVERBOUGHT) {
+            let current = out.f64_or(keys::OVERBOUGHT, 70.0);
+            out.set(keys::OVERBOUGHT, (current + ob_shift).clamp(-200.0, 200.0));
+        }
+        if supported(keys::OVERSOLD) {
+            let current = out.f64_or(keys::OVERSOLD, 30.0);
+            out.set(keys::OVERSOLD, (current + os_shift).clamp(-200.0, 200.0));
+        }
+        if supported(keys::HTF_FAST) {
+            let current = out.usize_or(keys::HTF_FAST, 10).max(1) as f64;
+            out.set(
+                keys::HTF_FAST,
+                Self::clamp_usize_scale(current, fast_scale, 2, 400) as f64,
+            );
+        }
+        if supported(keys::HTF_SLOW) {
+            let current = out.usize_or(keys::HTF_SLOW, 30).max(1) as f64;
+            out.set(
+                keys::HTF_SLOW,
+                Self::clamp_usize_scale(current, slow_scale, 3, 800) as f64,
+            );
+        }
+        if supported(keys::SMOOTH_K) {
+            let current = out.usize_or(keys::SMOOTH_K, 3).max(1) as f64;
+            out.set(
+                keys::SMOOTH_K,
+                Self::clamp_usize_scale(current, fast_scale, 2, 20) as f64,
+            );
+        }
+        if supported(keys::SMOOTH_D) {
+            let current = out.usize_or(keys::SMOOTH_D, 3).max(1) as f64;
+            out.set(
+                keys::SMOOTH_D,
+                Self::clamp_usize_scale(current, signal_scale, 2, 20) as f64,
+            );
+        }
+
+        if supported(keys::SLOW) && supported(keys::FAST) {
+            let fast = out.usize_or(keys::FAST, 5).max(1);
+            let slow = out.usize_or(keys::SLOW, 20).max(fast + 1);
+            out.set(keys::SLOW, slow as f64);
+        }
+
+        if strategy_name.eq_ignore_ascii_case("BOLLINGER_BANDS") && supported(keys::STD_DEV) {
+            let current = out.f64_or(keys::STD_DEV, 2.0);
+            let tighter = match phase {
+                "scalp-long" | "scalp-short" | "scalp-watch" => (current * 0.90).max(1.0),
+                "swing-long" | "swing-short" | "swing-watch" => (current * 1.08).min(6.0),
+                _ => current,
+            };
+            out.set(keys::STD_DEV, tighter);
+        }
+
+        out
+    }
+
+    fn clamp_usize_scale(value: f64, scale: f64, min: usize, max: usize) -> usize {
+        (value * scale).round().clamp(min as f64, max as f64) as usize
+    }
+
+    fn clamp_f64_scale(value: f64, scale: f64, min: f64, max: f64) -> f64 {
+        (value * scale).clamp(min, max)
     }
 
     /// Backtest job kazanan strateji için optimize ettiği yapısal parametreleri buraya yazar.
@@ -814,7 +1347,10 @@ impl ParameterStore {
         const MAX_MULT: f64 = 30.0;
         const MIN_SAMPLE: usize = 50;
 
-        if let Some(s) = self.symbol_stats.get(&(symbol.to_string(), interval.to_string())) {
+        if let Some(s) = self
+            .symbol_stats
+            .get(&(symbol.to_string(), interval.to_string()))
+        {
             if s.sample_size >= MIN_SAMPLE
                 && s.noise_floor_pct > 0.0
                 && super::symbol_stats::is_fresh(s, TTL_SECS)
@@ -844,15 +1380,18 @@ impl ParameterStore {
     ///
     /// Döner: tighten gerçekten uygulandı mı (true) / koşul oluşmadı (false).
     pub fn apply_trade_feedback(&mut self, regime: &str, pnl_pct: f64) -> bool {
-        let fb = self.regime_feedback.entry(regime.to_string())
-            .or_default();
+        let fb = self.regime_feedback.entry(regime.to_string()).or_default();
         fb.record(pnl_pct);
 
         // Sıkılaştırma için yeterli veri yoksa çık.
-        if fb.recent_pnl.len() < RegimeFeedback::WINDOW { return false; }
+        if fb.recent_pnl.len() < RegimeFeedback::WINDOW {
+            return false;
+        }
         let win_rate = fb.win_rate();
         let trigger_threshold = 0.40;
-        if win_rate >= trigger_threshold { return false; }
+        if win_rate >= trigger_threshold {
+            return false;
+        }
 
         self.tighten_regime_patch(regime);
         true
@@ -930,26 +1469,32 @@ impl ParameterStore {
     /// Mevcut patch varsa onun üstüne, yoksa base'in üstüne uygulanır.
     /// Katsayılar deneyimsel: edge *1.15, TP/SL *0.85, max_pos *0.70.
     fn tighten_regime_patch(&mut self, regime: &str) {
-        let existing = self.regime_overrides.get(regime).cloned().unwrap_or_default();
+        let existing = self
+            .regime_overrides
+            .get(regime)
+            .cloned()
+            .unwrap_or_default();
         let base_edge = existing.edge_thresholds.unwrap_or(self.edge_thresholds);
         let base_risk = existing.trade_risk.unwrap_or(self.trade_risk);
 
         let tightened_edge = EdgeThresholds {
             cold: (base_edge.cold * 1.15).min(0.95),
             warm: (base_edge.warm * 1.15).min(0.95),
-            hot:  (base_edge.hot  * 1.15).min(0.95),
+            hot: (base_edge.hot * 1.15).min(0.95),
             cold_until: base_edge.cold_until,
             warm_until: base_edge.warm_until,
         };
         let tightened_risk = TradeRiskParams {
-            take_profit_pct:   (base_risk.take_profit_pct * 0.85).max(0.5),
-            stop_loss_pct:     (base_risk.stop_loss_pct   * 0.85).max(0.3),
+            take_profit_pct: (base_risk.take_profit_pct * 0.85).max(0.5),
+            stop_loss_pct: (base_risk.stop_loss_pct * 0.85).max(0.3),
             max_position_size: (base_risk.max_position_size * 0.70).max(0.10),
         };
-        self.regime_overrides.insert(regime.to_string(),
+        self.regime_overrides.insert(
+            regime.to_string(),
             RegimePatch::empty()
                 .with_edge(tightened_edge)
-                .with_trade_risk(tightened_risk));
+                .with_trade_risk(tightened_risk),
+        );
     }
 }
 
@@ -962,25 +1507,60 @@ mod param_sweep_seed_tests {
     fn resolve_for_tf_ve_strateji_eslesince_yoksa_global() {
         let mut ps = ParameterStore::default();
         ps.set_strategy_params("RSI", StrategyParams::default().with("period", 9.0)); // global
-        // BTCUSDT izleri: 4h RSI period=21, 1d RSI period=30.
-        ps.symbol_strategy_params.insert("BTCUSDT".into(), vec![
-            ("4h".into(), "RSI".into(), StrategyParams::default().with("period", 21.0)),
-            ("1d".into(), "RSI".into(), StrategyParams::default().with("period", 30.0)),
-        ]);
+                                                                                      // BTCUSDT izleri: 4h RSI period=21, 1d RSI period=30.
+        ps.symbol_strategy_params.insert(
+            "BTCUSDT".into(),
+            vec![
+                (
+                    "4h".into(),
+                    "RSI".into(),
+                    StrategyParams::default().with("period", 21.0),
+                ),
+                (
+                    "1d".into(),
+                    "RSI".into(),
+                    StrategyParams::default().with("period", 30.0),
+                ),
+            ],
+        );
 
         // TF+strateji eşleşir → per-iz param (4h→21, 1d→30).
-        assert_eq!(ps.resolve_strategy_params_for("BTCUSDT", "4h", "RSI").usize_or("period", 0), 21);
-        assert_eq!(ps.resolve_strategy_params_for("BTCUSDT", "1d", "RSI").usize_or("period", 0), 30);
+        assert_eq!(
+            ps.resolve_strategy_params_for("BTCUSDT", "4h", "RSI")
+                .usize_or("period", 0),
+            21
+        );
+        assert_eq!(
+            ps.resolve_strategy_params_for("BTCUSDT", "1d", "RSI")
+                .usize_or("period", 0),
+            30
+        );
         // TF eşleşmiyor (1h izi yok) → global (9), 4h paramı 1h'ye SIZMAZ.
-        assert_eq!(ps.resolve_strategy_params_for("BTCUSDT", "1h", "RSI").usize_or("period", 0), 9);
+        assert_eq!(
+            ps.resolve_strategy_params_for("BTCUSDT", "1h", "RSI")
+                .usize_or("period", 0),
+            9
+        );
         // Strateji eşleşmiyor (4h MACD) → global/default, RSI paramı uygulanmaz.
-        assert_eq!(ps.resolve_strategy_params_for("BTCUSDT", "4h", "MACD").get("period"), None);
+        assert_eq!(
+            ps.resolve_strategy_params_for("BTCUSDT", "4h", "MACD")
+                .get("period"),
+            None
+        );
         // İzi olmayan sembol → global.
-        assert_eq!(ps.resolve_strategy_params_for("ETHUSDT", "4h", "RSI").usize_or("period", 0), 9);
+        assert_eq!(
+            ps.resolve_strategy_params_for("ETHUSDT", "4h", "RSI")
+                .usize_or("period", 0),
+            9
+        );
     }
 
     fn write_report(market: &str, body: &str) -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!("ps_test_{}_{}.json", std::process::id(), body.len()));
+        let p = std::env::temp_dir().join(format!(
+            "ps_test_{}_{}.json",
+            std::process::id(),
+            body.len()
+        ));
         std::fs::write(&p, format!(r#"{{"market":"{market}","rows":[{body}]}}"#)).unwrap();
         p
     }
@@ -999,7 +1579,14 @@ mod param_sweep_seed_tests {
         // require_wf=true → yalnız 4h RSI satırı.
         let loaded = load_param_sweep_rows(p, true, "futures", false);
         assert_eq!(loaded.len(), 1);
-        assert_eq!((loaded[0].0.as_str(), loaded[0].1.as_str(), loaded[0].2.as_str()), ("BTCUSDT", "4h", "RSI"));
+        assert_eq!(
+            (
+                loaded[0].0.as_str(),
+                loaded[0].1.as_str(),
+                loaded[0].2.as_str()
+            ),
+            ("BTCUSDT", "4h", "RSI")
+        );
         assert_eq!(loaded[0].4.usize_or("period", 0), 17);
         // require_wf=false → ikisi de; market uyumsuz → 0; ignore_market → ikisi de; bozuk yol → 0.
         assert_eq!(load_param_sweep_rows(p, false, "futures", false).len(), 2);
@@ -1007,5 +1594,56 @@ mod param_sweep_seed_tests {
         assert_eq!(load_param_sweep_rows(p, false, "spot", true).len(), 2);
         assert!(load_param_sweep_rows("/yok/dosya.json", true, "futures", false).is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn opportunity_policy_tightens_scalp_and_widens_swing() {
+        let mut ps = ParameterStore::default();
+        ps.set_strategy_params(
+            "RSI",
+            StrategyParams::default()
+                .with(keys::PERIOD, 14.0)
+                .with(keys::OVERBOUGHT, 70.0)
+                .with(keys::OVERSOLD, 30.0),
+        );
+
+        let now = chrono::Utc::now();
+        let scalp = crate::robot::data_pipeline::MemoryOpportunitySnapshot {
+            symbol: "BTCUSDT".into(),
+            interval: "15m".into(),
+            bars: 30,
+            span_minutes: 450,
+            first_ts: Some(now),
+            last_ts: Some(now),
+            rsi_14: 25.0,
+            sma_5: 100.0,
+            sma_20: 102.0,
+            momentum_pct: -1.2,
+            volatility_pct: 1.1,
+            trend_bias: -0.2,
+            scalp_bias: 0.82,
+            swing_bias: 0.12,
+            phase: "scalp-long:0.82".into(),
+        };
+        let swing = crate::robot::data_pipeline::MemoryOpportunitySnapshot {
+            phase: "swing-long:0.74".into(),
+            scalp_bias: 0.10,
+            swing_bias: 0.74,
+            trend_bias: 0.66,
+            ..scalp.clone()
+        };
+
+        let scalp_params =
+            ps.resolve_strategy_params_for_opportunity("BTCUSDT", "15m", "RSI", Some(&scalp));
+        let swing_params =
+            ps.resolve_strategy_params_for_opportunity("BTCUSDT", "15m", "RSI", Some(&swing));
+
+        assert!(scalp_params.usize_or(keys::PERIOD, 0) < 14);
+        assert!(scalp_params.f64_or(keys::OVERBOUGHT, 0.0) < 70.0);
+        assert!(scalp_params.f64_or(keys::OVERSOLD, 0.0) > 30.0);
+
+        assert!(swing_params.usize_or(keys::PERIOD, 0) > 14);
+        assert!(swing_params.f64_or(keys::OVERBOUGHT, 0.0) > 70.0);
+        assert!(swing_params.f64_or(keys::OVERSOLD, 0.0) < 30.0);
     }
 }

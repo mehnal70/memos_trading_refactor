@@ -1,0 +1,17 @@
+[package]
+name = "memos_venue_api"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# CONTRACT CRATE — kasten HAFİF tutulur.
+# rusqlite (bundled SQLite) ve reqwest BİLİNÇLİ olarak YOK: her piyasa crate'i bu
+# crate'e bağımlı olacak; ağır bağımlılık buraya girerse izolasyon hedefi çöker.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror = "1.0"
+async-trait = "0.1"

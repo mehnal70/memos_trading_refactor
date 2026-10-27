@@ -12,8 +12,8 @@
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
-use super::backtest_engine::{Backtester, BacktestConfig, DirectionMode, RegimeGate};
-use super::edge_scan::{EdgeRow, EdgeScanReport, SeedRobustness, passes_seed_bar};
+use super::backtest_engine::{BacktestConfig, Backtester, DirectionMode, RegimeGate};
+use super::edge_scan::{passes_seed_bar, EdgeRow, EdgeScanReport, SeedRobustness};
 
 /// Bir izin tek trade'i — arbitrasyon için zaman penceresi + getiri + iz önceliği.
 #[derive(Debug, Clone)]
@@ -59,17 +59,34 @@ pub fn arbitrate_single_position(mut slots: Vec<TradeSlot>) -> Vec<TradeSlot> {
 pub fn arm_metrics(slots: &[TradeSlot]) -> ArmMetrics {
     let trades = slots.len();
     let wins = slots.iter().filter(|s| s.pnl_pct > 0.0).count();
-    let gross_win: f64 = slots.iter().filter(|s| s.pnl_pct > 0.0).map(|s| s.pnl_pct).sum();
-    let gross_loss: f64 = slots.iter().filter(|s| s.pnl_pct < 0.0).map(|s| -s.pnl_pct).sum();
+    let gross_win: f64 = slots
+        .iter()
+        .filter(|s| s.pnl_pct > 0.0)
+        .map(|s| s.pnl_pct)
+        .sum();
+    let gross_loss: f64 = slots
+        .iter()
+        .filter(|s| s.pnl_pct < 0.0)
+        .map(|s| -s.pnl_pct)
+        .sum();
     let sum: f64 = slots.iter().map(|s| s.pnl_pct).sum();
     ArmMetrics {
         trades,
         wins,
-        win_rate: if trades > 0 { wins as f64 / trades as f64 } else { 0.0 },
+        win_rate: if trades > 0 {
+            wins as f64 / trades as f64
+        } else {
+            0.0
+        },
         sum_pnl_pct: sum,
         avg_pnl_pct: if trades > 0 { sum / trades as f64 } else { 0.0 },
-        profit_factor: if gross_loss > 0.0 { gross_win / gross_loss }
-            else if gross_win > 0.0 { f64::INFINITY } else { 0.0 },
+        profit_factor: if gross_loss > 0.0 {
+            gross_win / gross_loss
+        } else if gross_win > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        },
     }
 }
 
@@ -144,11 +161,24 @@ where
             Vec::new()
         } else {
             match Backtester::new(track_config(symbol, row, ab)).run(&candles) {
-                Ok(res) => res.trades.iter().filter_map(|t| {
-                    let entry = DateTime::parse_from_rfc3339(&t.entry_time).ok()?.with_timezone(&Utc);
-                    let exit = DateTime::parse_from_rfc3339(&t.exit_time).ok()?.with_timezone(&Utc);
-                    Some(TradeSlot { entry, exit, pnl_pct: t.pnl_pct, track_idx: idx })
-                }).collect(),
+                Ok(res) => res
+                    .trades
+                    .iter()
+                    .filter_map(|t| {
+                        let entry = DateTime::parse_from_rfc3339(&t.entry_time)
+                            .ok()?
+                            .with_timezone(&Utc);
+                        let exit = DateTime::parse_from_rfc3339(&t.exit_time)
+                            .ok()?
+                            .with_timezone(&Utc);
+                        Some(TradeSlot {
+                            entry,
+                            exit,
+                            pnl_pct: t.pnl_pct,
+                            track_idx: idx,
+                        })
+                    })
+                    .collect(),
                 Err(_) => Vec::new(),
             }
         };
@@ -161,7 +191,10 @@ where
     SymbolAb {
         symbol: symbol.to_string(),
         n_tracks: rows.len(),
-        tracks: rows.iter().map(|r| (r.interval.clone(), r.best_strategy.clone(), r.profit_factor)).collect(),
+        tracks: rows
+            .iter()
+            .map(|r| (r.interval.clone(), r.best_strategy.clone(), r.profit_factor))
+            .collect(),
         single: arm_metrics(&single_slots),
         multi: arm_metrics(&multi_slots),
     }
@@ -199,21 +232,35 @@ pub fn run_multi_tf_ab(
     // Sembol → barı geçen satırlar (PF azalan, max_tracks bounded).
     let mut by_symbol: HashMap<String, Vec<EdgeRow>> = HashMap::new();
     for row in &report.rows {
-        if !passes_seed_bar(row, &r) { continue; }
-        by_symbol.entry(row.symbol.clone()).or_default().push(row.clone());
+        if !passes_seed_bar(row, &r) {
+            continue;
+        }
+        by_symbol
+            .entry(row.symbol.clone())
+            .or_default()
+            .push(row.clone());
     }
     let limit = ab.candle_limit;
     let load = |sym: &str, iv: &str, mk: &str| -> Vec<crate::core::types::Candle> {
-        crate::persistence::reader::read_candles_market(db_path, sym, iv, mk, limit).unwrap_or_default()
+        crate::persistence::reader::read_candles_market(db_path, sym, iv, mk, limit)
+            .unwrap_or_default()
     };
 
     let mut per_symbol: Vec<SymbolAb> = Vec::new();
     for (sym, mut rows) in by_symbol {
-        rows.sort_by(|a, b| b.profit_factor.partial_cmp(&a.profit_factor).unwrap_or(std::cmp::Ordering::Equal));
+        rows.sort_by(|a, b| {
+            b.profit_factor
+                .partial_cmp(&a.profit_factor)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         // (market,interval,strategy) dedup — aynı izin birden çok serisi olmasın.
-        rows.dedup_by(|a, b| a.market == b.market && a.interval == b.interval && a.best_strategy == b.best_strategy);
+        rows.dedup_by(|a, b| {
+            a.market == b.market && a.interval == b.interval && a.best_strategy == b.best_strategy
+        });
         rows.truncate(max_tracks.max(1));
-        if rows.len() < 2 { continue; } // tek-iz → çoklu-TF düzeneğine katkısız
+        if rows.len() < 2 {
+            continue;
+        } // tek-iz → çoklu-TF düzeneğine katkısız
         per_symbol.push(run_symbol_ab(&sym, &rows, ab, &load));
     }
     per_symbol.sort_by(|a, b| a.symbol.cmp(&b.symbol));
@@ -221,7 +268,11 @@ pub fn run_multi_tf_ab(
     // Portföy toplamı = sembollerin metriklerinin (trade-ağırlıklı) toplamı.
     let single_total = sum_arms(per_symbol.iter().map(|s| &s.single));
     let multi_total = sum_arms(per_symbol.iter().map(|s| &s.multi));
-    AbReport { per_symbol, single_total, multi_total }
+    AbReport {
+        per_symbol,
+        single_total,
+        multi_total,
+    }
 }
 
 /// Kol-metriklerini toplar (trade sayıları + Σpnl ekle; oranları toplamdan yeniden hesapla).
@@ -241,7 +292,11 @@ fn sum_arms<'a>(arms: impl Iterator<Item = &'a ArmMetrics>) -> ArmMetrics {
     ArmMetrics {
         trades,
         wins,
-        win_rate: if trades > 0 { wins as f64 / trades as f64 } else { 0.0 },
+        win_rate: if trades > 0 {
+            wins as f64 / trades as f64
+        } else {
+            0.0
+        },
         sum_pnl_pct: sum,
         avg_pnl_pct: if trades > 0 { sum / trades as f64 } else { 0.0 },
         profit_factor: 0.0,
@@ -257,7 +312,8 @@ mod tests {
         TradeSlot {
             entry: Utc.timestamp_opt(e, 0).single().unwrap(),
             exit: Utc.timestamp_opt(x, 0).single().unwrap(),
-            pnl_pct: pnl, track_idx: track,
+            pnl_pct: pnl,
+            track_idx: track,
         }
     }
 
@@ -275,33 +331,40 @@ mod tests {
         // [0,100] kabul → [10,20] RED (çakışır) → [110,120] kabul → [125,130] kabul = 3 trade.
         assert_eq!(acc.len(), 3);
         let entries: Vec<i64> = acc.iter().map(|s| s.entry.timestamp()).collect();
-        assert_eq!(entries, vec![0, 110, 125], "çakışan elenir, çakışmayan hızlı izler eklenir");
+        assert_eq!(
+            entries,
+            vec![0, 110, 125],
+            "çakışan elenir, çakışmayan hızlı izler eklenir"
+        );
     }
 
     #[test]
     fn arbitrate_tie_prefers_higher_pf_track() {
         // Aynı girişte iki iz: düşük track_idx (yüksek PF) öncelik; diğeri çakışır → RED.
-        let acc = arbitrate_single_position(vec![
-            slot(1, 0, 50, 1.0),
-            slot(0, 0, 50, 9.0),
-        ]);
+        let acc = arbitrate_single_position(vec![slot(1, 0, 50, 1.0), slot(0, 0, 50, 9.0)]);
         assert_eq!(acc.len(), 1);
-        assert_eq!(acc[0].track_idx, 0, "eşit girişte yüksek-PF (track 0) kazanır");
+        assert_eq!(
+            acc[0].track_idx, 0,
+            "eşit girişte yüksek-PF (track 0) kazanır"
+        );
     }
 
     #[test]
     fn arm_metrics_pf_and_winrate() {
-        let m = arm_metrics(&[slot(0,0,1,3.0), slot(0,2,3,-1.0), slot(0,4,5,1.0)]);
+        let m = arm_metrics(&[slot(0, 0, 1, 3.0), slot(0, 2, 3, -1.0), slot(0, 4, 5, 1.0)]);
         assert_eq!(m.trades, 3);
         assert_eq!(m.wins, 2);
-        assert!((m.win_rate - 2.0/3.0).abs() < 1e-9);
+        assert!((m.win_rate - 2.0 / 3.0).abs() < 1e-9);
         assert!((m.sum_pnl_pct - 3.0).abs() < 1e-9);
-        assert!((m.profit_factor - 4.0).abs() < 1e-9, "kazanç 4 / kayıp 1 = 4");
+        assert!(
+            (m.profit_factor - 4.0).abs() < 1e-9,
+            "kazanç 4 / kayıp 1 = 4"
+        );
     }
 
     #[test]
     fn arm_metrics_no_loss_is_infinite_pf() {
-        let m = arm_metrics(&[slot(0,0,1,2.0)]);
+        let m = arm_metrics(&[slot(0, 0, 1, 2.0)]);
         assert!(m.profit_factor.is_infinite());
         let empty = arm_metrics(&[]);
         assert_eq!(empty.profit_factor, 0.0);

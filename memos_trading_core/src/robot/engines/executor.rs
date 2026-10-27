@@ -1,12 +1,12 @@
+use crate::core::types::{Signal, Trade};
 use crate::robot::execution::policy::{
     default_chain, evaluate_chain, ExecutionContext, ExecutionDecision, ExecutionPolicy,
     MarketHoursPolicy,
 };
 use crate::robot::infra::interfaces::TradeExecutor;
 use crate::robot::state::state_manager::StateManager;
-use crate::core::types::{Signal, Trade};
 use crate::Result;
-use chrono::{Utc, Timelike};
+use chrono::{Timelike, Utc};
 
 pub struct RoboticTradeExecutor<'a> {
     pub executor: &'a dyn TradeExecutor,
@@ -19,14 +19,34 @@ pub struct RoboticTradeExecutor<'a> {
 }
 
 impl<'a> RoboticTradeExecutor<'a> {
-    pub fn new(executor: &'a dyn TradeExecutor, basket: Vec<String>, market_hours: Option<(u32, u32)>) -> Self {
-        Self { executor, basket, market_hours, state: None, policies: default_chain() }
+    pub fn new(
+        executor: &'a dyn TradeExecutor,
+        basket: Vec<String>,
+        market_hours: Option<(u32, u32)>,
+    ) -> Self {
+        Self {
+            executor,
+            basket,
+            market_hours,
+            state: None,
+            policies: default_chain(),
+        }
     }
 
     /// StateManager ile otomatik basket ve balance yönetimi
-    pub fn with_state(executor: &'a dyn TradeExecutor, state: &'a dyn StateManager, market_hours: Option<(u32, u32)>) -> Self {
+    pub fn with_state(
+        executor: &'a dyn TradeExecutor,
+        state: &'a dyn StateManager,
+        market_hours: Option<(u32, u32)>,
+    ) -> Self {
         let basket = state.get_symbols().unwrap_or_default();
-        Self { executor, basket, market_hours, state: Some(state), policies: default_chain() }
+        Self {
+            executor,
+            basket,
+            market_hours,
+            state: Some(state),
+            policies: default_chain(),
+        }
     }
 
     /// Default zinciri yepyeni bir policy listesiyle değiştir (test/özel kullanım).
@@ -56,7 +76,13 @@ impl<'a> RoboticTradeExecutor<'a> {
         }
     }
 
-    fn policy_decision(&self, signal: &Signal, symbol: &str, amount: f64, basket_size: usize) -> ExecutionDecision {
+    fn policy_decision(
+        &self,
+        signal: &Signal,
+        symbol: &str,
+        amount: f64,
+        basket_size: usize,
+    ) -> ExecutionDecision {
         let ctx = ExecutionContext {
             signal,
             symbol,
@@ -80,12 +106,15 @@ impl<'a> RoboticTradeExecutor<'a> {
         let basket_size = symbols.len();
         symbols
             .iter()
-            .map(|sym| match self.policy_decision(&signal, sym, amount, basket_size) {
-                ExecutionDecision::Allow => self.executor.execute(signal, sym, amount),
-                ExecutionDecision::Skip { reason } => {
-                    Err(format!("ExecutionPolicy skip [{sym}]: {reason}").into())
-                }
-            })
+            .map(
+                |sym| match self.policy_decision(&signal, sym, amount, basket_size) {
+                    ExecutionDecision::Allow => self.executor.execute(signal, sym, amount),
+                    ExecutionDecision::Skip { reason } => {
+                        Err(format!("ExecutionPolicy skip [{sym}]: {reason}").into())
+                    }
+                },
+            )
+            .map(|r| r.map_err(Into::into))
             .collect()
     }
 

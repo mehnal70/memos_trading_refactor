@@ -1,11 +1,11 @@
 // auto_test_logging.rs
 // Otomatik performans/güvenlik testleri ve optimize edilmiş logging altyapısı
 
-use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use std::fs::{File, OpenOptions};
-use std::io::{Write, BufWriter};
+use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 /// Log seviyeleri için enum (Performanslı formatlama için)
 #[derive(Debug)]
@@ -34,18 +34,17 @@ pub struct AutoTestAndLoggingManager {
 
 impl std::fmt::Debug for AutoTestAndLoggingManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AutoTestAndLoggingManager").field("writer", &"BufWriter<File>").finish()
+        f.debug_struct("AutoTestAndLoggingManager")
+            .field("writer", &"BufWriter<File>")
+            .finish()
     }
 }
 
 impl AutoTestAndLoggingManager {
     /// Yeni bir yönetici oluşturur ve dosyayı bir kez açar.
     pub fn new<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+
         Ok(Self {
             writer: Arc::new(Mutex::new(BufWriter::new(file))),
         })
@@ -54,18 +53,18 @@ impl AutoTestAndLoggingManager {
     /// Ortak loglama mantığı (Dahili kullanım)
     fn log_internal(&self, level: LogLevel, symbol: &str, message: &str) {
         let now: DateTime<Utc> = Utc::now();
-        
+
         if let Ok(mut guard) = self.writer.lock() {
             // writeln! makrosu BufWriter ile birleşince çok daha hızlıdır.
             let _ = writeln!(
-                guard, 
-                "[{}] [{}] {} | {}", 
-                now.format("%Y-%m-%d %H:%M:%S%.3f"), 
-                level.as_str(), 
-                symbol, 
+                guard,
+                "[{}] [{}] {} | {}",
+                now.format("%Y-%m-%d %H:%M:%S%.3f"),
+                level.as_str(),
+                symbol,
                 message
             );
-            
+
             // Kritik hata veya güvenlik durumunda tamponu hemen diske boşaltıyoruz.
             if matches!(level, LogLevel::Error | LogLevel::Security) {
                 let _ = guard.flush();

@@ -1,0 +1,9 @@
+[Unit]
+Description=Memos BIST Google Sheets import and trend refresh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/memos/PycharmProjects/memos_trading_refactor
+ExecStart=/home/memos/PycharmProjects/memos_trading_refactor/scripts/bist/refresh_and_scan.sh

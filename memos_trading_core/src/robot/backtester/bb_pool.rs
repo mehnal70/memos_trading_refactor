@@ -11,9 +11,9 @@
 // (Newey-West HAC + WF binom + Sharpe), XsResult (rapor), WfCrossCheck. Burada YALNIZ BB-pool'a
 // özgü getiri üreteci (bb_pool_returns) ve WF-OOS sarmalı vardır. Saf çekirdek DB okumaz → testli.
 
-use crate::core::types::Candle;
 use super::walk_forward::WfCrossCheck;
 use super::xs_momentum::{align_closes, finalize_metrics_params, XsConfig, XsResult};
+use crate::core::types::Candle;
 
 /// BB-pool koşum parametreleri. Operatör/algoritmik ayrımı XS ile aynı felsefede.
 #[derive(Debug, Clone)]
@@ -88,24 +88,36 @@ fn bb_weights(closes: &[Vec<Option<f64>>], t: usize, cfg: &BbPoolConfig) -> Vec<
     let mut shorts: Vec<usize> = Vec::new();
     for j in 0..n_sym {
         // Trailing pencere closes[t-p+1 ..= t] — hepsi Some olmalı.
-        if t + 1 < p { continue; }
+        if t + 1 < p {
+            continue;
+        }
         let lo = t + 1 - p;
         let mut s = 0.0;
         let mut s2 = 0.0;
         let mut ok = true;
         for bar in closes.iter().take(t + 1).skip(lo) {
             match bar[j] {
-                Some(v) => { s += v; s2 += v * v; }
-                None => { ok = false; break; }
+                Some(v) => {
+                    s += v;
+                    s2 += v * v;
+                }
+                None => {
+                    ok = false;
+                    break;
+                }
             }
         }
-        if !ok { continue; }
+        if !ok {
+            continue;
+        }
         let Some(c_t) = closes[t][j] else { continue };
         let pf = p as f64;
         let mean = s / pf;
         let var = (s2 / pf - mean * mean).max(0.0);
         let std = var.sqrt();
-        if std <= 0.0 { continue; }
+        if std <= 0.0 {
+            continue;
+        }
         let lower = mean - cfg.bb_k * std;
         let upper = mean + cfg.bb_k * std;
         if c_t < lower {
@@ -117,11 +129,15 @@ fn bb_weights(closes: &[Vec<Option<f64>>], t: usize, cfg: &BbPoolConfig) -> Vec<
     let mut w = vec![0.0_f64; n_sym];
     if !longs.is_empty() {
         let lw = 1.0 / longs.len() as f64;
-        for j in longs { w[j] = lw; }
+        for j in longs {
+            w[j] = lw;
+        }
     }
     if !shorts.is_empty() {
         let sw = -1.0 / shorts.len() as f64;
-        for j in shorts { w[j] = sw; }
+        for j in shorts {
+            w[j] = sw;
+        }
     }
     w
 }
@@ -153,9 +169,13 @@ pub fn bb_pool_returns(closes: &[Vec<Option<f64>>], cfg: &BbPoolConfig) -> (Vec<
         // Portföyün SONRAKİ-bar getirisi: Σ w_j · (close[t+1]/close[t] − 1).
         let mut gross = 0.0;
         for (j, &wj) in w.iter().enumerate() {
-            if wj == 0.0 { continue; }
+            if wj == 0.0 {
+                continue;
+            }
             if let (Some(c0), Some(c1)) = (closes[t][j], closes[t + 1][j]) {
-                if c0 > 0.0 { gross += wj * (c1 / c0 - 1.0); }
+                if c0 > 0.0 {
+                    gross += wj * (c1 / c0 - 1.0);
+                }
             }
         }
         let net = gross - turn * cfg.fee_rate;
@@ -167,11 +187,25 @@ pub fn bb_pool_returns(closes: &[Vec<Option<f64>>], cfg: &BbPoolConfig) -> (Vec<
 
 /// Tam-örneklem değerlendirme: getiri serisi → XS ile AYNI metrik dili (Newey-West + WF binom).
 pub fn evaluate_bb_pool(closes: &[Vec<Option<f64>>], cfg: &BbPoolConfig) -> XsResult {
-    let n_sym = if closes.is_empty() { 0 } else { closes[0].len() };
-    let mut res = XsResult { symbols_used: n_sym, ..Default::default() };
+    let n_sym = if closes.is_empty() {
+        0
+    } else {
+        closes[0].len()
+    };
+    let mut res = XsResult {
+        symbols_used: n_sym,
+        ..Default::default()
+    };
     let (rets, turns) = bb_pool_returns(closes, cfg);
-    finalize_metrics_params(&mut res, &rets, &turns, cfg.leverage, cfg.bars_per_year,
-        cfg.rebalance_every, cfg.wf_window);
+    finalize_metrics_params(
+        &mut res,
+        &rets,
+        &turns,
+        cfg.leverage,
+        cfg.bars_per_year,
+        cfg.rebalance_every,
+        cfg.wf_window,
+    );
     res
 }
 
@@ -203,7 +237,9 @@ pub struct BbWfResult {
 
 /// SAF WF çekirdeği (hizalanmış matris üzerinde, DB'siz testlenir).
 pub fn evaluate_bb_pool_walkforward(
-    closes: &[Vec<Option<f64>>], base: &BbPoolConfig, wf: &BbWfConfig,
+    closes: &[Vec<Option<f64>>],
+    base: &BbPoolConfig,
+    wf: &BbWfConfig,
 ) -> BbWfResult {
     let n = closes.len();
     let n_sym = if n > 0 { closes[0].len() } else { 0 };
@@ -218,19 +254,34 @@ pub fn evaluate_bb_pool_walkforward(
         // 1) IS'te en iyi adayı seç (IS Sharpe).
         let mut best: Option<((usize, f64), f64)> = None;
         for &(period, k) in &wf.candidates {
-            let cfg = BbPoolConfig { bb_period: period, bb_k: k, ..base.clone() };
+            let cfg = BbPoolConfig {
+                bb_period: period,
+                bb_k: k,
+                ..base.clone()
+            };
             let is_res = evaluate_bb_pool(&closes[is_lo..oos_start], &cfg);
             if is_res.bars > 0 && best.is_none_or(|(_, s)| is_res.ann_sharpe > s) {
                 best = Some(((period, k), is_res.ann_sharpe));
             }
         }
-        let Some((sel, is_sharpe)) = best else { oos_start += wf.oos_bars; continue; };
+        let Some((sel, is_sharpe)) = best else {
+            oos_start += wf.oos_bars;
+            continue;
+        };
         // 2) seçileni OOS'a UYGULA (period lead-in dahil dilim, getiri yalnız OOS bölgesinde).
         let lead = sel.0.min(oos_start);
         let seg_hi = (oos_start + wf.oos_bars).min(n);
-        let cfg = BbPoolConfig { bb_period: sel.0, bb_k: sel.1, ..base.clone() };
+        let cfg = BbPoolConfig {
+            bb_period: sel.0,
+            bb_k: sel.1,
+            ..base.clone()
+        };
         let (rets, turns) = bb_pool_returns(&closes[oos_start - lead..seg_hi], &cfg);
-        let oos_mean = if rets.is_empty() { 0.0 } else { rets.iter().sum::<f64>() / rets.len() as f64 };
+        let oos_mean = if rets.is_empty() {
+            0.0
+        } else {
+            rets.iter().sum::<f64>() / rets.len() as f64
+        };
         oos_rets.extend(rets);
         oos_turn.extend(turns);
         selections.push(sel);
@@ -238,10 +289,25 @@ pub fn evaluate_bb_pool_walkforward(
         oos_start += wf.oos_bars;
     }
 
-    let mut oos = XsResult { symbols_used: n_sym, ..Default::default() };
-    finalize_metrics_params(&mut oos, &oos_rets, &oos_turn, base.leverage, base.bars_per_year,
-        base.rebalance_every, base.wf_window);
-    BbWfResult { oos, windows: selections.len(), selections, is_oos_pairs }
+    let mut oos = XsResult {
+        symbols_used: n_sym,
+        ..Default::default()
+    };
+    finalize_metrics_params(
+        &mut oos,
+        &oos_rets,
+        &oos_turn,
+        base.leverage,
+        base.bars_per_year,
+        base.rebalance_every,
+        base.wf_window,
+    );
+    BbWfResult {
+        oos,
+        windows: selections.len(),
+        selections,
+        is_oos_pairs,
+    }
 }
 
 /// DB-YÜKLEYEN WF sürümü.
@@ -251,7 +317,9 @@ pub fn run_bb_pool_walkforward(base: &BbPoolConfig, wf: &BbWfConfig) -> BbWfResu
 }
 
 /// WfCrossCheck'i (binom kapısı) dışarı taşıyan ufak yardımcı (rapor için tek-nokta).
-pub fn oos_binom_pvalue(wf: &WfCrossCheck) -> f64 { wf.window_significance() }
+pub fn oos_binom_pvalue(wf: &WfCrossCheck) -> f64 {
+    wf.window_significance()
+}
 
 #[cfg(test)]
 mod tests {
@@ -260,12 +328,21 @@ mod tests {
     /// closes matrisi kur: her sembol için verilen fiyat serisi (hepsi Some, eşit uzunluk).
     fn matrix(series: &[Vec<f64>]) -> Vec<Vec<Option<f64>>> {
         let n_bars = series[0].len();
-        (0..n_bars).map(|t| series.iter().map(|s| Some(s[t])).collect()).collect()
+        (0..n_bars)
+            .map(|t| series.iter().map(|s| Some(s[t])).collect())
+            .collect()
     }
 
     fn cfg(period: usize, long_short: bool) -> BbPoolConfig {
-        BbPoolConfig { bb_period: period, bb_k: 1.0, fee_rate: 0.0, long_short,
-            rebalance_every: 1, wf_window: 5, ..Default::default() }
+        BbPoolConfig {
+            bb_period: period,
+            bb_k: 1.0,
+            fee_rate: 0.0,
+            long_short,
+            rebalance_every: 1,
+            wf_window: 5,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -273,14 +350,22 @@ mod tests {
         // Zikzak (ortalama-dönüşlü) seri: alt-banda değince yukarı, üst-banda değince aşağı döner.
         // BB long-short mean-reversion POZİTİF ortalama getiri vermeli.
         let mut a = Vec::new();
-        for i in 0..120 { a.push(100.0 + 6.0 * ((i as f64) * 0.6).sin()); }
+        for i in 0..120 {
+            a.push(100.0 + 6.0 * ((i as f64) * 0.6).sin());
+        }
         // İkinci sembol faz-kaymalı → her bar kitap dengeli dolsun.
         let mut b = Vec::new();
-        for i in 0..120 { b.push(100.0 + 6.0 * ((i as f64) * 0.6 + 1.6).sin()); }
+        for i in 0..120 {
+            b.push(100.0 + 6.0 * ((i as f64) * 0.6 + 1.6).sin());
+        }
         let m = matrix(&[a, b]);
         let r = evaluate_bb_pool(&m, &cfg(10, true));
         assert!(r.bars > 50, "yeterli bar");
-        assert!(r.mean_ret > 0.0, "ortalama-dönüşlü sepette BB-pool pozitif olmalı, mean={}", r.mean_ret);
+        assert!(
+            r.mean_ret > 0.0,
+            "ortalama-dönüşlü sepette BB-pool pozitif olmalı, mean={}",
+            r.mean_ret
+        );
     }
 
     #[test]
@@ -292,7 +377,11 @@ mod tests {
         let m = matrix(&[up, up2]);
         let r = evaluate_bb_pool(&m, &cfg(10, true));
         assert!(r.bars > 50);
-        assert!(r.mean_ret <= 0.0, "trendde mean-reversion short'ları kaybetmeli, mean={}", r.mean_ret);
+        assert!(
+            r.mean_ret <= 0.0,
+            "trendde mean-reversion short'ları kaybetmeli, mean={}",
+            r.mean_ret
+        );
     }
 
     #[test]
@@ -307,11 +396,19 @@ mod tests {
     #[test]
     fn walkforward_runs_and_pools_oos() {
         // Zikzak sepet + aday ızgara → WF OOS pencereleri birleşir, pozitif OOS.
-        let a: Vec<f64> = (0..400).map(|i| 100.0 + 6.0 * ((i as f64) * 0.6).sin()).collect();
-        let b: Vec<f64> = (0..400).map(|i| 100.0 + 6.0 * ((i as f64) * 0.6 + 1.6).sin()).collect();
+        let a: Vec<f64> = (0..400)
+            .map(|i| 100.0 + 6.0 * ((i as f64) * 0.6).sin())
+            .collect();
+        let b: Vec<f64> = (0..400)
+            .map(|i| 100.0 + 6.0 * ((i as f64) * 0.6 + 1.6).sin())
+            .collect();
         let m = matrix(&[a, b]);
         let base = cfg(10, true);
-        let wf = BbWfConfig { is_bars: 120, oos_bars: 60, candidates: vec![(8, 1.0), (10, 1.0), (14, 2.0)] };
+        let wf = BbWfConfig {
+            is_bars: 120,
+            oos_bars: 60,
+            candidates: vec![(8, 1.0), (10, 1.0), (14, 2.0)],
+        };
         let r = evaluate_bb_pool_walkforward(&m, &base, &wf);
         assert!(r.windows >= 2, "en az birkaç OOS penceresi");
         assert!(r.oos.bars > 0, "birleştirilmiş OOS getirisi var");

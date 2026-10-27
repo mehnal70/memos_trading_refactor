@@ -37,32 +37,85 @@ cd "$REPO_DIR" || exit 1
 # shellcheck source=scripts/lib_launchconf.sh
 . "$REPO_DIR/scripts/lib_launchconf.sh" 2>/dev/null \
     && load_launch_conf "$REPO_DIR/scripts/.launch.conf" 2>/dev/null || true
+if [ -n "${RTC_LAUNCH_CONF:-}" ] && [ -f "$RTC_LAUNCH_CONF" ]; then
+    load_launch_conf "$RTC_LAUNCH_CONF" 2>/dev/null || true
+fi
 
-PID_FILE="logs/.engine.pid"
+PID_FILE="${ENGINE_PID_PATH:-logs/.engine.pid}"
 HEARTBEAT_LOG="${HEARTBEAT_PATH:-logs/heartbeat.jsonl}"
-PAUSE_FILE="logs/.watchdog.pause"
+PAUSE_FILE="${WATCHDOG_PAUSE_FILE:-logs/.watchdog.pause}"
+LOCK_DIR="${WATCHDOG_LOCK_DIR:-logs/.watchdog.lock}"
+WATCHDOG_LOG="${WATCHDOG_LOG_PATH:-logs/watchdog.log}"
 ENGINE="./scripts/engine.sh"
 TUI_DAEMON="./scripts/tui_daemon.sh"
 TUI_SESSION="${MEMOS_TUI_SESSION:-memos}"
 TARGET="${WATCHDOG_TARGET:-headless}"   # headless | tui
+VENUE_NAME="${VENUE_NAME:-}"
 
 MODE_FLAG=""
 for a in "$@"; do [ "$a" = "--release" ] && MODE_FLAG="--release"; done
 
+acquire_watchdog_lock() {
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        printf '%s\n' "$$" >"$LOCK_DIR/pid"
+        trap 'rm -rf "$LOCK_DIR"; log "durduruldu (sinyal)"; exit 0' INT TERM
+        return 0
+    fi
+    local owner=""
+    local owner_cmd=""
+    [ -f "$LOCK_DIR/pid" ] && owner="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+        owner_cmd="$(ps -p "$owner" -o args= 2>/dev/null || true)"
+    fi
+    # PID canlı olsa bile başka bir servis yeniden kullanmış olabilir.
+    if [ -z "$owner" ] || ! kill -0 "$owner" 2>/dev/null || [[ "$owner_cmd" != *watchdog.sh* ]]; then
+        rm -rf "$LOCK_DIR"
+        mkdir "$LOCK_DIR" 2>/dev/null || return 1
+        printf '%s\n' "$$" >"$LOCK_DIR/pid"
+        trap 'rm -rf "$LOCK_DIR"; log "durduruldu (sinyal)"; exit 0' INT TERM
+        return 0
+    fi
+    echo "watchdog zaten çalışıyor (lock=$LOCK_DIR owner=${owner:-unknown})" >&2
+    return 1
+}
+
 # Hedefe-göre canlılık + restart soyutlaması (heartbeat-bayatlık kontrolü ikisinde de ortak).
+# engine_alive: önce süreç/tmux kontrol, süreç yoksa heartbeat gençse de "alive" say.
+# Bu sayede systemd watchdog restart sırasında (tmux/rtc_tui süreci UID kayması veya
+# yeni socket ile görünmüyorsa) heartbeat taze ise motoru yanlışlıkla öldürmez.
 engine_alive() {
+    # 1) Süreç/tmux canlı mı?
+    local proc_alive=false
     if [ "$TARGET" = "tui" ]; then
-        tmux has-session -t "$TUI_SESSION" 2>/dev/null
+        tmux has-session -t "$TUI_SESSION" 2>/dev/null && proc_alive=true
+        # pgrep fallback: tmux socket UID kayması durumunda bile rtc_tui çalışıyorsa yakala
+        pgrep -x rtc_tui >/dev/null 2>&1 && proc_alive=true
     else
         local p=""; [ -f "$PID_FILE" ] && p="$(cat "$PID_FILE" 2>/dev/null)"
-        [ -n "$p" ] && kill -0 "$p" 2>/dev/null
+        [ -n "$p" ] && kill -0 "$p" 2>/dev/null && proc_alive=true
     fi
+    $proc_alive && return 0
+
+    # 2) PID dosyası varsa motor yeni başlarken süreç görünümü geçici olarak kaçabilir;
+    # yalnız bu durumda genç heartbeat'i boot-grace kanıtı say. PID dosyası yoksa
+    # heartbeat eski bir çalıştırmadan kalmış olabilir ve engine yeniden başlatılmalı.
+    local pid_file_present=false
+    [ -s "$PID_FILE" ] && pid_file_present=true
+    local hb_seconds; hb_seconds="$(hb_age)"
+    if $pid_file_present && [ "$hb_seconds" -lt "$BOOT_GRACE_SECS" ]; then
+        return 0  # heartbeat taze → motor yaşıyor, süreç tespiti geçici başarısız
+    fi
+    return 1
 }
 engine_restart() {
+    if [ -n "$VENUE_NAME" ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl --user restart "memos-venue-engine@${VENUE_NAME}.service"
+        return
+    fi
     if [ "$TARGET" = "tui" ]; then
-        "$TUI_DAEMON" restart $MODE_FLAG >>logs/watchdog.log 2>&1
+        "$TUI_DAEMON" restart $MODE_FLAG >>"$WATCHDOG_LOG" 2>&1
     else
-        "$ENGINE" restart $MODE_FLAG >>logs/watchdog.log 2>&1
+        "$ENGINE" restart $MODE_FLAG >>"$WATCHDOG_LOG" 2>&1
     fi
 }
 
@@ -72,7 +125,8 @@ BOOT_GRACE_SECS="${WATCHDOG_BOOT_GRACE_SECS:-600}"
 MAX_RESTARTS="${WATCHDOG_MAX_RESTARTS:-5}"
 WINDOW_SECS="${WATCHDOG_WINDOW_SECS:-900}"
 
-mkdir -p logs
+mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$PAUSE_FILE")" \
+    "$(dirname "$LOCK_DIR")" "$(dirname "$WATCHDOG_LOG")"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] watchdog: $*"; }
 
 pid_alive() { local p="$1"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
@@ -121,8 +175,10 @@ do_restart() { # neden → hedefe-göre restart; crash-loop ise duraklat
     fi
 }
 
+if ! acquire_watchdog_lock; then
+    exit 0
+fi
 log "başladı (target=${TARGET} check=${CHECK_SECS}s stale=${STALE_SECS}s boot_grace=${BOOT_GRACE_SECS}s max_restarts=${MAX_RESTARTS}/${WINDOW_SECS}s hb=${HEARTBEAT_LOG} mode=${MODE_FLAG:-debug})"
-trap 'log "durduruldu (sinyal)"; exit 0' INT TERM
 
 while true; do
     if [ -f "$PAUSE_FILE" ]; then

@@ -1,13 +1,13 @@
 // robot/logger.rs - Trade logging sistemi (dosya + JSON)
 
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::path::Path;
-use chrono::Utc;
-use serde::{Serialize, Deserialize};
 use crate::core::types::{Signal, Trade};
 use crate::robot::infra::throttle::Throttle;
 use crate::MemosTradingError;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 
 /// SIGNAL throttle: aynı (symbol, signal) için bu süre içinde gelen tekrar
 /// log'ları yutulur. Varsayılan 60 sn, env: MEMOS_SIGNAL_THROTTLE_SECS.
@@ -164,6 +164,109 @@ impl TradeEvent {
             message: format!("ERROR: {}", error),
         }
     }
+
+    /// Emir yaşam döngüsü status eventi (REJECTED/EXPIRED vb.).
+    pub fn order_status(
+        symbol: &str,
+        status: &str,
+        side: &str,
+        order_id: &str,
+        qty: f64,
+        reason: &str,
+    ) -> Self {
+        let side_part = if side.trim().is_empty() {
+            "-"
+        } else {
+            side.trim()
+        };
+        let reason_part = if reason.trim().is_empty() || reason == "NONE" {
+            "-"
+        } else {
+            reason.trim()
+        };
+        Self {
+            timestamp: Utc::now().to_rfc3339(),
+            event_type: "ORDER_STATUS".to_string(),
+            symbol: symbol.to_string(),
+            signal: status.to_string(),
+            strategy: String::new(),
+            price: 0.0,
+            quantity: qty,
+            pnl: 0.0,
+            equity: 0.0,
+            message: format!(
+                "ORDER_STATUS {} {} side={} qty={:.6} order_id={} reason={}",
+                status,
+                symbol,
+                side_part,
+                qty,
+                if order_id.trim().is_empty() {
+                    "-"
+                } else {
+                    order_id.trim()
+                },
+                reason_part,
+            ),
+        }
+    }
+
+    /// Kısmi dolum eventi. `pnl` alanında filled yüzdesi taşınır.
+    pub fn order_partial(
+        symbol: &str,
+        side: &str,
+        last_price: f64,
+        last_qty: f64,
+        cum_qty: f64,
+        orig_qty: f64,
+        fill_pct: f64,
+        equity: f64,
+    ) -> Self {
+        Self {
+            timestamp: Utc::now().to_rfc3339(),
+            event_type: "ORDER_PARTIAL".to_string(),
+            symbol: symbol.to_string(),
+            signal: side.to_string(),
+            strategy: String::new(),
+            price: last_price,
+            quantity: last_qty,
+            pnl: fill_pct,
+            equity,
+            message: format!(
+                "ORDER_PARTIAL {} side={} last_qty={:.6} cum={:.6}/{:.6} fill_pct={:.2}% @ {:.6}",
+                symbol, side, last_qty, cum_qty, orig_qty, fill_pct, last_price,
+            ),
+        }
+    }
+
+    /// FILLED olayı yakalandığında (koruma emri eşleşmesi dahil) audit eventi.
+    pub fn order_filled(symbol: &str, order_id: &str, is_protection_fill: bool) -> Self {
+        Self {
+            timestamp: Utc::now().to_rfc3339(),
+            event_type: "ORDER_FILLED".to_string(),
+            symbol: symbol.to_string(),
+            signal: if is_protection_fill {
+                "PROTECTION"
+            } else {
+                "ENTRY_OR_UNKNOWN"
+            }
+            .to_string(),
+            strategy: String::new(),
+            price: 0.0,
+            quantity: 0.0,
+            pnl: 0.0,
+            equity: 0.0,
+            message: format!(
+                "ORDER_FILLED {} order_id={} protection_match={}",
+                symbol,
+                if order_id.trim().is_empty() {
+                    "-"
+                } else {
+                    order_id.trim()
+                },
+                is_protection_fill,
+            ),
+        }
+    }
 }
 
 /// Trading logger - hem human-readable log hem JSON history yazar
@@ -197,12 +300,10 @@ impl TradingLogger {
         throttle_secs: u64,
     ) -> Result<Self, MemosTradingError> {
         if let Some(parent) = Path::new(log_file).parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(MemosTradingError::Io)?;
+            std::fs::create_dir_all(parent).map_err(MemosTradingError::Io)?;
         }
         if let Some(parent) = Path::new(json_file).parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(MemosTradingError::Io)?;
+            std::fs::create_dir_all(parent).map_err(MemosTradingError::Io)?;
         }
 
         Ok(Self {
@@ -229,9 +330,7 @@ impl TradingLogger {
         // Throttle: SIGNAL + RISK_BLOCK aynı koşullarda her cycle'da tekrarlanabilir,
         // 60sn pencerede tekilleştir → 12 MB trades.jsonl spam'i çözülür.
         let throttled = matches!(event.event_type.as_str(), "SIGNAL" | "RISK_BLOCK");
-        if throttled
-            && self.should_throttle(&event.event_type, &event.symbol, &event.signal)
-        {
+        if throttled && self.should_throttle(&event.event_type, &event.symbol, &event.signal) {
             return Ok(());
         }
 
@@ -254,11 +353,7 @@ impl TradingLogger {
 
         let log_line = format!(
             "[{}] {:10} {:8} {} - {}\n",
-            event.timestamp,
-            event.event_type,
-            event.symbol,
-            event.signal,
-            event.message
+            event.timestamp, event.event_type, event.symbol, event.signal, event.message
         );
 
         file.write_all(log_line.as_bytes())
@@ -275,11 +370,9 @@ impl TradingLogger {
             .open(&self.json_file)
             .map_err(MemosTradingError::Io)?;
 
-        let json_line = serde_json::to_string(event)
-            .map_err(MemosTradingError::Serde)?;
+        let json_line = serde_json::to_string(event).map_err(MemosTradingError::Serde)?;
 
-        writeln!(file, "{}", json_line)
-            .map_err(MemosTradingError::Io)?;
+        writeln!(file, "{}", json_line).map_err(MemosTradingError::Io)?;
 
         Ok(())
     }
@@ -288,21 +381,17 @@ impl TradingLogger {
     pub fn clear_logs(&self) -> Result<(), MemosTradingError> {
         // Log dosyasını sil
         if Path::new(&self.log_file).exists() {
-            std::fs::remove_file(&self.log_file)
-                .map_err(MemosTradingError::Io)?;
+            std::fs::remove_file(&self.log_file).map_err(MemosTradingError::Io)?;
         }
 
         // JSON dosyasını sil
         if Path::new(&self.json_file).exists() {
-            std::fs::remove_file(&self.json_file)
-                .map_err(MemosTradingError::Io)?;
+            std::fs::remove_file(&self.json_file).map_err(MemosTradingError::Io)?;
         }
 
         // Boş dosyaları yeniden oluştur ki monitoring script'i dosya bulunamadı demesin
-        File::create(&self.log_file)
-            .map_err(MemosTradingError::Io)?;
-        File::create(&self.json_file)
-            .map_err(MemosTradingError::Io)?;
+        File::create(&self.log_file).map_err(MemosTradingError::Io)?;
+        File::create(&self.json_file).map_err(MemosTradingError::Io)?;
 
         Ok(())
     }
@@ -323,10 +412,7 @@ mod tests {
 
     #[test]
     fn test_logger_writes() {
-        let logger = TradingLogger::new(
-            "logs/test_robotic.log",
-            "logs/test_trades.jsonl"
-        ).unwrap();
+        let logger = TradingLogger::new("logs/test_robotic.log", "logs/test_trades.jsonl").unwrap();
 
         // Clear önce
         logger.clear_logs().ok();
@@ -352,7 +438,13 @@ mod tests {
     #[test]
     fn test_trade_open_event_long() {
         let ev = TradeEvent::trade_open(
-            "BTCUSDT", "MA_CROSSOVER", true, 50_000.0, 0.01, 10_000.0, 3.0,
+            "BTCUSDT",
+            "MA_CROSSOVER",
+            true,
+            50_000.0,
+            0.01,
+            10_000.0,
+            3.0,
         );
         assert_eq!(ev.event_type, "TRADE_OPEN");
         assert_eq!(ev.signal, "LONG");
@@ -368,28 +460,41 @@ mod tests {
     #[test]
     fn test_trade_open_normalizes_auto_strategy() {
         // "AUTO" sentinel → "Otonom (rejime göre)" olarak yansımalı.
-        let ev = TradeEvent::trade_open(
-            "BTCUSDT", "AUTO", true, 50_000.0, 0.01, 10_000.0, 1.0,
+        let ev = TradeEvent::trade_open("BTCUSDT", "AUTO", true, 50_000.0, 0.01, 10_000.0, 1.0);
+        assert!(
+            ev.message.contains("Strat=Otonom (rejime göre)"),
+            "AUTO normalize edilmedi: {}",
+            ev.message
         );
-        assert!(ev.message.contains("Strat=Otonom (rejime göre)"),
-            "AUTO normalize edilmedi: {}", ev.message);
-        assert!(!ev.message.contains("Strat=AUTO"),
-            "raw AUTO görünüyor: {}", ev.message);
+        assert!(
+            !ev.message.contains("Strat=AUTO"),
+            "raw AUTO görünüyor: {}",
+            ev.message
+        );
 
         // "Default" da aynı normalize edilmeli.
-        let ev2 = TradeEvent::trade_open(
-            "ETHUSDT", "Default", false, 3_000.0, 0.5, 9_500.0, 1.0,
-        );
+        let ev2 = TradeEvent::trade_open("ETHUSDT", "Default", false, 3_000.0, 0.5, 9_500.0, 1.0);
         assert!(ev2.message.contains("Strat=Otonom (rejime göre)"));
     }
 
     #[test]
     fn test_trade_close_normalizes_auto_strategy() {
         let ev = TradeEvent::trade_close(
-            "BTCUSDT", "AUTO", true, 51_000.0, 0.01, 10.0, 10_010.0, "TAKE_PROFIT", 1.0,
+            "BTCUSDT",
+            "AUTO",
+            true,
+            51_000.0,
+            0.01,
+            10.0,
+            10_010.0,
+            "TAKE_PROFIT",
+            1.0,
         );
-        assert!(ev.message.contains("Strat=Otonom (rejime göre)"),
-            "AUTO normalize edilmedi: {}", ev.message);
+        assert!(
+            ev.message.contains("Strat=Otonom (rejime göre)"),
+            "AUTO normalize edilmedi: {}",
+            ev.message
+        );
         // Birinci-sınıf strategy alanı da normalize edilmeli (JSONL makine-toplaması için).
         assert_eq!(ev.strategy, "Otonom (rejime göre)");
     }
@@ -399,20 +504,30 @@ mod tests {
         // XS kitabı uzun paper koşusunda ScalpSwing/Regular'dan ayrılabilmeli: strategy alanı
         // pozisyonun gerçek mührünü (ham, normalize-pas) taşır → jq ile filtrelenebilir.
         let ev = TradeEvent::trade_close(
-            "AVAXUSDT", "XS_MOMENTUM", false, 30.0, 1.0, 2.5, 10_002.5, "STRATEGY_SIGNAL", 1.0,
+            "AVAXUSDT",
+            "XS_MOMENTUM",
+            false,
+            30.0,
+            1.0,
+            2.5,
+            10_002.5,
+            "STRATEGY_SIGNAL",
+            1.0,
         );
-        assert_eq!(ev.strategy, "XS_MOMENTUM", "XS etiketi strategy alanında korunmalı");
+        assert_eq!(
+            ev.strategy, "XS_MOMENTUM",
+            "XS etiketi strategy alanında korunmalı"
+        );
         assert_eq!(ev.event_type, "TRADE_CLOSE");
         // Açılış tarafı da aynı etiketi taşır → open/close eşleşmesi tutarlı.
-        let open = TradeEvent::trade_open("AVAXUSDT", "XS_MOMENTUM", false, 31.0, 1.0, 10_000.0, 1.0);
+        let open =
+            TradeEvent::trade_open("AVAXUSDT", "XS_MOMENTUM", false, 31.0, 1.0, 10_000.0, 1.0);
         assert_eq!(open.strategy, "XS_MOMENTUM");
     }
 
     #[test]
     fn test_trade_open_event_short() {
-        let ev = TradeEvent::trade_open(
-            "ETHUSDT", "BOLLINGER", false, 3_000.0, 0.5, 9_500.0, 1.0,
-        );
+        let ev = TradeEvent::trade_open("ETHUSDT", "BOLLINGER", false, 3_000.0, 0.5, 9_500.0, 1.0);
         assert_eq!(ev.event_type, "TRADE_OPEN");
         assert_eq!(ev.signal, "SHORT");
         assert!(ev.message.contains("OPEN SHORT ETHUSDT"));
@@ -421,7 +536,15 @@ mod tests {
     #[test]
     fn test_trade_close_event_profit() {
         let ev = TradeEvent::trade_close(
-            "BTCUSDT", "MA_CROSSOVER", true, 51_500.0, 0.01, 15.0, 10_015.0, "TAKE_PROFIT", 3.0,
+            "BTCUSDT",
+            "MA_CROSSOVER",
+            true,
+            51_500.0,
+            0.01,
+            15.0,
+            10_015.0,
+            "TAKE_PROFIT",
+            3.0,
         );
         assert_eq!(ev.event_type, "TRADE_CLOSE");
         assert_eq!(ev.signal, "LONG");
@@ -437,7 +560,15 @@ mod tests {
     #[test]
     fn test_trade_close_event_loss() {
         let ev = TradeEvent::trade_close(
-            "ETHUSDT", "BOLLINGER", false, 3_050.0, 0.5, -25.0, 9_475.0, "STOP_LOSS", 1.0,
+            "ETHUSDT",
+            "BOLLINGER",
+            false,
+            3_050.0,
+            0.5,
+            -25.0,
+            9_475.0,
+            "STOP_LOSS",
+            1.0,
         );
         assert_eq!(ev.event_type, "TRADE_CLOSE");
         assert_eq!(ev.signal, "SHORT");
@@ -453,10 +584,8 @@ mod tests {
 
     #[test]
     fn test_signal_throttle_dedup_same_symbol_signal() {
-        let dir = std::env::temp_dir().join(format!(
-            "memos_logger_throttle_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("memos_logger_throttle_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let log = dir.join("a.log");
         let json = dir.join("a.jsonl");
@@ -477,10 +606,8 @@ mod tests {
 
     #[test]
     fn test_signal_throttle_distinct_keys_pass() {
-        let dir = std::env::temp_dir().join(format!(
-            "memos_logger_distinct_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("memos_logger_distinct_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let log = dir.join("b.log");
         let json = dir.join("b.jsonl");
@@ -489,9 +616,15 @@ mod tests {
         let logger = TradingLogger::new_with_throttle(&log_s, &json_s, 60).unwrap();
         logger.clear_logs().ok();
 
-        logger.log_event(&TradeEvent::signal("ADGYO", Signal::Buy, 44.86)).unwrap();
-        logger.log_event(&TradeEvent::signal("ADGYO", Signal::Sell, 44.86)).unwrap(); // farklı sinyal
-        logger.log_event(&TradeEvent::signal("THYAO", Signal::Buy, 100.0)).unwrap();   // farklı sembol
+        logger
+            .log_event(&TradeEvent::signal("ADGYO", Signal::Buy, 44.86))
+            .unwrap();
+        logger
+            .log_event(&TradeEvent::signal("ADGYO", Signal::Sell, 44.86))
+            .unwrap(); // farklı sinyal
+        logger
+            .log_event(&TradeEvent::signal("THYAO", Signal::Buy, 100.0))
+            .unwrap(); // farklı sembol
 
         assert_eq!(count_lines(&json_s), 3, "farklı anahtarlar yutuldu");
         logger.clear_logs().ok();
@@ -499,10 +632,7 @@ mod tests {
 
     #[test]
     fn test_signal_throttle_zero_disables() {
-        let dir = std::env::temp_dir().join(format!(
-            "memos_logger_zero_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("memos_logger_zero_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let log = dir.join("c.log");
         let json = dir.join("c.jsonl");
@@ -515,16 +645,17 @@ mod tests {
         for _ in 0..5 {
             logger.log_event(&ev).unwrap();
         }
-        assert_eq!(count_lines(&json_s), 5, "throttle=0 olduğunda tümü yazılmalı");
+        assert_eq!(
+            count_lines(&json_s),
+            5,
+            "throttle=0 olduğunda tümü yazılmalı"
+        );
         logger.clear_logs().ok();
     }
 
     #[test]
     fn test_throttle_only_signal_and_risk_block() {
-        let dir = std::env::temp_dir().join(format!(
-            "memos_logger_other_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("memos_logger_other_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let log = dir.join("d.log");
         let json = dir.join("d.jsonl");
@@ -534,13 +665,29 @@ mod tests {
         logger.clear_logs().ok();
 
         // SIGNAL ve RISK_BLOCK throttle hedefi → ikinci çağrı yutulur.
-        logger.log_event(&TradeEvent::signal("BTC", Signal::Buy, 50_000.0)).unwrap();
-        logger.log_event(&TradeEvent::signal("BTC", Signal::Buy, 50_000.0)).unwrap();    // yutulur
-        logger.log_event(&TradeEvent::risk_block("test", "BTC")).unwrap();
-        logger.log_event(&TradeEvent::risk_block("test", "BTC")).unwrap();               // yutulur
-        // TRADE_OPEN / TRADE_CLOSE / ERROR throttle dışı.
-        logger.log_event(&TradeEvent::trade_open("BTC", "S", true, 50_000.0, 0.01, 10_000.0, 1.0)).unwrap();
-        logger.log_event(&TradeEvent::trade_close("BTC", "S", true, 51_000.0, 0.01, 10.0, 10_010.0, "TP", 1.0)).unwrap();
+        logger
+            .log_event(&TradeEvent::signal("BTC", Signal::Buy, 50_000.0))
+            .unwrap();
+        logger
+            .log_event(&TradeEvent::signal("BTC", Signal::Buy, 50_000.0))
+            .unwrap(); // yutulur
+        logger
+            .log_event(&TradeEvent::risk_block("test", "BTC"))
+            .unwrap();
+        logger
+            .log_event(&TradeEvent::risk_block("test", "BTC"))
+            .unwrap(); // yutulur
+                       // TRADE_OPEN / TRADE_CLOSE / ERROR throttle dışı.
+        logger
+            .log_event(&TradeEvent::trade_open(
+                "BTC", "S", true, 50_000.0, 0.01, 10_000.0, 1.0,
+            ))
+            .unwrap();
+        logger
+            .log_event(&TradeEvent::trade_close(
+                "BTC", "S", true, 51_000.0, 0.01, 10.0, 10_010.0, "TP", 1.0,
+            ))
+            .unwrap();
         logger.log_event(&TradeEvent::error("e")).unwrap();
 
         // 1 SIGNAL + 1 RISK_BLOCK + 1 OPEN + 1 CLOSE + 1 ERROR = 5
@@ -550,10 +697,7 @@ mod tests {
 
     #[test]
     fn test_risk_block_throttle_dedup() {
-        let dir = std::env::temp_dir().join(format!(
-            "memos_logger_rb_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("memos_logger_rb_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let log = dir.join("e.log");
         let json = dir.join("e.jsonl");
@@ -564,10 +708,14 @@ mod tests {
 
         // Aynı sembolde art arda 3 RISK_BLOCK → sadece 1 yazılmalı.
         for _ in 0..3 {
-            logger.log_event(&TradeEvent::risk_block("guardrails", "BTCUSDT")).unwrap();
+            logger
+                .log_event(&TradeEvent::risk_block("guardrails", "BTCUSDT"))
+                .unwrap();
         }
         // Farklı sembol throttle'dan bağımsız geçer.
-        logger.log_event(&TradeEvent::risk_block("guardrails", "ETHUSDT")).unwrap();
+        logger
+            .log_event(&TradeEvent::risk_block("guardrails", "ETHUSDT"))
+            .unwrap();
 
         assert_eq!(count_lines(&json_s), 2);
         logger.clear_logs().ok();

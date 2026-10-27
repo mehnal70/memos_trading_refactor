@@ -1,3 +1,4 @@
+pub mod mode_selector;
 /// Scalp & Swing Trade Engine
 ///
 /// Mevcut robotic loop'a dokunmadan çakışmasız çalışan kısa-vade fırsat motoru.
@@ -6,38 +7,36 @@
 /// - SwingEngine  : 4h mumlar + EMA(21/55) + MACD + ADX; SL ~%2.5, TP ~%5.0
 /// - SlotGuard    : sembol başına max 1 scalp + 1 swing pozisyon; çakışma engeli
 /// - ModeSelector : ADX + volatiliteye göre otomatik mod seçimi
-
 // robot/scalp_swing/mod.rs - Kısa Vade Fırsat Motoru ve Otonom Konfigürasyon
 
-
 // robot/scalp_swing/mod.rs - Çok Kanallı Taktik İnfaz Merkezi (Srivastava ATP)
-
 pub mod scalp_engine;
-pub mod swing_engine;
 pub mod slot_guard;
-pub mod mode_selector;
+pub mod swing_engine;
 
+pub use mode_selector::{ModeSelector, TradeMode};
 pub use scalp_engine::ScalpEngine;
+pub use slot_guard::{OpenSlot, SlotGuard};
 pub use swing_engine::SwingEngine;
-pub use slot_guard::{SlotGuard, OpenSlot};
-pub use mode_selector::{TradeMode, ModeSelector};
 
 use serde::{Deserialize, Serialize};
 
 // --- 1. TEMEL TİPLER VE ENUMLAR ---
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
-pub enum TradeType { #[default]
-Regular, Scalp, Swing }
-
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum TradeType {
+    #[default]
+    Regular,
+    Scalp,
+    Swing,
+}
 
 impl TradeType {
     pub fn label(&self) -> &'static str {
         match self {
             TradeType::Regular => "REG",
-            TradeType::Scalp   => "SCP",
-            TradeType::Swing   => "SWG",
+            TradeType::Scalp => "SCP",
+            TradeType::Swing => "SWG",
         }
     }
 }
@@ -52,38 +51,74 @@ pub struct ParamBounds {
 }
 
 impl ParamBounds {
-    pub fn clamp(&self, v: f64) -> f64 { v.clamp(self.min, self.max) }
-    pub fn enabled(&self) -> bool { self.adjust_every_n > 0 }
+    pub fn clamp(&self, v: f64) -> f64 {
+        v.clamp(self.min, self.max)
+    }
+    pub fn enabled(&self) -> bool {
+        self.adjust_every_n > 0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScalpSwingConfig {
-    pub scalp_enabled: bool, pub swing_enabled: bool,
-    pub scalp_interval: String, pub swing_interval: String,
-    pub scalp_sl_pct: f64, pub scalp_tp_pct: f64,
-    pub swing_sl_pct: f64, pub swing_tp_pct: f64,
-    pub scalp_leverage: f64, pub swing_leverage: f64,
-    pub scalp_budget_pct: Option<f64>, pub swing_budget_pct: Option<f64>,
-    pub commission_pct: Option<f64>, pub spread_pct: Option<f64>,
-    pub slippage_pct: Option<f64>, pub max_daily_loss_pct: f64,
-    pub max_notional_usd: Option<f64>, pub scalp_min_score: f64,
-    pub swing_min_adx: f64, pub swing_min_score: f64,
-    pub max_scalp_per_symbol: usize, pub max_swing_per_symbol: usize,
-    pub scalp_active_hours: [u32; 2], pub autonomous_tuning: bool,
-    pub scalp_sl_bounds: ParamBounds, pub scalp_tp_bounds: ParamBounds,
-    pub swing_sl_bounds: ParamBounds, pub swing_tp_bounds: ParamBounds,
-    pub scalp_lev_bounds: ParamBounds, pub swing_lev_bounds: ParamBounds,
-    pub scalp_score_bounds: ParamBounds, pub swing_score_bounds: ParamBounds,
+    pub scalp_enabled: bool,
+    pub swing_enabled: bool,
+    pub scalp_interval: String,
+    pub swing_interval: String,
+    pub scalp_sl_pct: f64,
+    pub scalp_tp_pct: f64,
+    pub swing_sl_pct: f64,
+    pub swing_tp_pct: f64,
+    pub scalp_leverage: f64,
+    pub swing_leverage: f64,
+    pub scalp_budget_pct: Option<f64>,
+    pub swing_budget_pct: Option<f64>,
+    pub commission_pct: Option<f64>,
+    pub spread_pct: Option<f64>,
+    pub slippage_pct: Option<f64>,
+    pub max_daily_loss_pct: f64,
+    pub max_notional_usd: Option<f64>,
+    pub scalp_min_score: f64,
+    pub swing_min_adx: f64,
+    pub swing_min_score: f64,
+    pub max_scalp_per_symbol: usize,
+    pub max_swing_per_symbol: usize,
+    pub scalp_active_hours: [u32; 2],
+    pub autonomous_tuning: bool,
+    pub scalp_sl_bounds: ParamBounds,
+    pub scalp_tp_bounds: ParamBounds,
+    pub swing_sl_bounds: ParamBounds,
+    pub swing_tp_bounds: ParamBounds,
+    pub scalp_lev_bounds: ParamBounds,
+    pub swing_lev_bounds: ParamBounds,
+    pub scalp_score_bounds: ParamBounds,
+    pub swing_score_bounds: ParamBounds,
 }
 
 impl Default for ScalpSwingConfig {
     fn default() -> Self {
         // Pratik bir başlangıç seti — env override mevcut değilse devreye girer.
         // adjust_every_n>0 → bounds gerçekten otonom ayar yapar.
-        let sl_b   = ParamBounds { min: 0.10, max: 3.0,  adjust_every_n: 5  };
-        let tp_b   = ParamBounds { min: 0.20, max: 8.0,  adjust_every_n: 5  };
-        let lev_b  = ParamBounds { min: 1.0,  max: 10.0, adjust_every_n: 5  };
-        let sc_b   = ParamBounds { min: 0.30, max: 0.95, adjust_every_n: 0  };
+        let sl_b = ParamBounds {
+            min: 0.10,
+            max: 3.0,
+            adjust_every_n: 5,
+        };
+        let tp_b = ParamBounds {
+            min: 0.20,
+            max: 8.0,
+            adjust_every_n: 5,
+        };
+        let lev_b = ParamBounds {
+            min: 1.0,
+            max: 10.0,
+            adjust_every_n: 5,
+        };
+        let sc_b = ParamBounds {
+            min: 0.30,
+            max: 0.95,
+            adjust_every_n: 0,
+        };
         Self {
             // A6: default true → otonom davranış. Cycle içindeki rejim auto-gate
             // (try_open_scalp_swing) HighVolatility'de skip eder; tuner ise
@@ -91,21 +126,36 @@ impl Default for ScalpSwingConfig {
             // istiyorsa SCALP_SWING_ENABLE=0 set ederek tamamen pasifleştirir.
             scalp_enabled: true,
             swing_enabled: true,
-            scalp_interval: "3m".into(),
-            swing_interval: "4h".into(),
-            scalp_sl_pct: 0.40, scalp_tp_pct: 0.80,
-            swing_sl_pct: 2.50, swing_tp_pct: 5.00,
-            scalp_leverage: 2.0, swing_leverage: 2.0,
-            scalp_budget_pct: Some(0.10), swing_budget_pct: Some(0.20),
-            commission_pct: Some(0.04), spread_pct: Some(0.02), slippage_pct: Some(0.05),
-            max_daily_loss_pct: 5.0, max_notional_usd: Some(100.0),
-            scalp_min_score: 0.55, swing_min_adx: 25.0, swing_min_score: 0.55,
-            max_scalp_per_symbol: 1, max_swing_per_symbol: 1,
-            scalp_active_hours: [0, 23], autonomous_tuning: true,
-            scalp_sl_bounds: sl_b.clone(), scalp_tp_bounds: tp_b.clone(),
-            swing_sl_bounds: sl_b.clone(), swing_tp_bounds: tp_b.clone(),
-            scalp_lev_bounds: lev_b.clone(), swing_lev_bounds: lev_b,
-            scalp_score_bounds: sc_b.clone(), swing_score_bounds: sc_b,
+            scalp_interval: "5m".into(),
+            swing_interval: "15m".into(),
+            scalp_sl_pct: 0.40,
+            scalp_tp_pct: 0.80,
+            swing_sl_pct: 2.50,
+            swing_tp_pct: 5.00,
+            scalp_leverage: 2.0,
+            swing_leverage: 2.0,
+            scalp_budget_pct: Some(0.10),
+            swing_budget_pct: Some(0.20),
+            commission_pct: Some(0.04),
+            spread_pct: Some(0.02),
+            slippage_pct: Some(0.05),
+            max_daily_loss_pct: 5.0,
+            max_notional_usd: Some(100.0),
+            scalp_min_score: 0.55,
+            swing_min_adx: 25.0,
+            swing_min_score: 0.55,
+            max_scalp_per_symbol: 1,
+            max_swing_per_symbol: 1,
+            scalp_active_hours: [0, 23],
+            autonomous_tuning: true,
+            scalp_sl_bounds: sl_b.clone(),
+            scalp_tp_bounds: tp_b.clone(),
+            swing_sl_bounds: sl_b.clone(),
+            swing_tp_bounds: tp_b.clone(),
+            scalp_lev_bounds: lev_b.clone(),
+            swing_lev_bounds: lev_b,
+            scalp_score_bounds: sc_b.clone(),
+            swing_score_bounds: sc_b,
         }
     }
 }
@@ -114,16 +164,31 @@ impl Default for ScalpSwingConfig {
 
 #[derive(Debug, Clone, Default)]
 pub struct ScalpSwingStats {
-    pub total_closed: usize, pub wins: usize,
-    pub total_pnl: f64, pub total_win_pnl: f64, pub total_loss_pnl: f64,
-    pub loss_streak: usize, pub max_loss_streak: usize, pub last_tune_at: usize,
+    pub total_closed: usize,
+    pub wins: usize,
+    pub total_pnl: f64,
+    pub total_win_pnl: f64,
+    pub total_loss_pnl: f64,
+    pub loss_streak: usize,
+    pub max_loss_streak: usize,
+    pub last_tune_at: usize,
 }
 
 impl ScalpSwingStats {
-    pub fn win_rate(&self) -> f64 { if self.total_closed == 0 { 0.5 } else { self.wins as f64 / self.total_closed as f64 } }
+    pub fn win_rate(&self) -> f64 {
+        if self.total_closed == 0 {
+            0.5
+        } else {
+            self.wins as f64 / self.total_closed as f64
+        }
+    }
     pub fn profit_factor(&self) -> f64 {
         let loss = self.total_loss_pnl.abs();
-        if loss < f64::EPSILON { 3.0 } else { self.total_win_pnl / loss }
+        if loss < f64::EPSILON {
+            3.0
+        } else {
+            self.total_win_pnl / loss
+        }
     }
 
     /// Bir kapanışı tabloya işler — pnl pozitifse win, negatifse loss kanal'ına;
@@ -179,14 +244,18 @@ impl ScalpSwingStatsTable {
 ///
 /// Tüm değişiklikler `clamp(bounds)` ile sınırlı; pratik değişim < 0.01
 /// veya < 1e-3 ise log kaydı eklenmez (gereksiz spam).
-pub fn auto_tune(stats: &ScalpSwingStats, trade_type: TradeType, cfg: &mut ScalpSwingConfig) -> Vec<String> {
+pub fn auto_tune(
+    stats: &ScalpSwingStats,
+    trade_type: TradeType,
+    cfg: &mut ScalpSwingConfig,
+) -> Vec<String> {
     let mut changes = Vec::new();
     let wr = stats.win_rate();
     let pf = stats.profit_factor();
     match trade_type {
         TradeType::Scalp => {
-            let b_sl  = cfg.scalp_sl_bounds.clone();
-            let b_tp  = cfg.scalp_tp_bounds.clone();
+            let b_sl = cfg.scalp_sl_bounds.clone();
+            let b_tp = cfg.scalp_tp_bounds.clone();
             let b_lev = cfg.scalp_lev_bounds.clone();
             if wr < 0.40 {
                 let new_sl = b_sl.clamp(cfg.scalp_sl_pct * 0.90);
@@ -221,8 +290,8 @@ pub fn auto_tune(stats: &ScalpSwingStats, trade_type: TradeType, cfg: &mut Scalp
             }
         }
         TradeType::Swing => {
-            let b_sl  = cfg.swing_sl_bounds.clone();
-            let b_tp  = cfg.swing_tp_bounds.clone();
+            let b_sl = cfg.swing_sl_bounds.clone();
+            let b_tp = cfg.swing_tp_bounds.clone();
             let b_lev = cfg.swing_lev_bounds.clone();
             if wr < 0.40 {
                 let new_sl = b_sl.clamp(cfg.swing_sl_pct * 0.90);
@@ -264,8 +333,12 @@ pub fn auto_tune(stats: &ScalpSwingStats, trade_type: TradeType, cfg: &mut Scalp
 
 #[derive(Debug, Clone)]
 pub struct TradeOpportunity {
-    pub trade_type: TradeType, pub is_long: bool, pub score: f64,
-    pub sl_pct: f64, pub tp_pct: f64, pub reason: String,
+    pub trade_type: TradeType,
+    pub is_long: bool,
+    pub score: f64,
+    pub sl_pct: f64,
+    pub tp_pct: f64,
+    pub reason: String,
 }
 
 #[cfg(test)]
@@ -274,33 +347,68 @@ mod tests {
 
     /// Test fixture: 2.0 leverage, geniş bounds [1.0, 10.0] ile başlangıç config.
     fn make_cfg() -> ScalpSwingConfig {
-        let bounds = ParamBounds { min: 0.1, max: 10.0, adjust_every_n: 1 };
-        let lev_bounds = ParamBounds { min: 1.0, max: 10.0, adjust_every_n: 1 };
+        let bounds = ParamBounds {
+            min: 0.1,
+            max: 10.0,
+            adjust_every_n: 1,
+        };
+        let lev_bounds = ParamBounds {
+            min: 1.0,
+            max: 10.0,
+            adjust_every_n: 1,
+        };
         ScalpSwingConfig {
-            scalp_enabled: true, swing_enabled: true,
-            scalp_interval: "3m".into(), swing_interval: "4h".into(),
-            scalp_sl_pct: 0.40, scalp_tp_pct: 0.80,
-            swing_sl_pct: 2.50, swing_tp_pct: 5.00,
-            scalp_leverage: 2.0, swing_leverage: 2.0,
-            scalp_budget_pct: None, swing_budget_pct: None,
-            commission_pct: None, spread_pct: None, slippage_pct: None,
-            max_daily_loss_pct: 5.0, max_notional_usd: None,
-            scalp_min_score: 0.5, swing_min_adx: 25.0, swing_min_score: 0.5,
-            max_scalp_per_symbol: 1, max_swing_per_symbol: 1,
-            scalp_active_hours: [0, 23], autonomous_tuning: true,
-            scalp_sl_bounds: bounds.clone(), scalp_tp_bounds: bounds.clone(),
-            swing_sl_bounds: bounds.clone(), swing_tp_bounds: bounds.clone(),
-            scalp_lev_bounds: lev_bounds.clone(), swing_lev_bounds: lev_bounds.clone(),
-            scalp_score_bounds: bounds.clone(), swing_score_bounds: bounds,
+            scalp_enabled: true,
+            swing_enabled: true,
+            scalp_interval: "5m".into(),
+            swing_interval: "15m".into(),
+            scalp_sl_pct: 0.40,
+            scalp_tp_pct: 0.80,
+            swing_sl_pct: 2.50,
+            swing_tp_pct: 5.00,
+            scalp_leverage: 2.0,
+            swing_leverage: 2.0,
+            scalp_budget_pct: None,
+            swing_budget_pct: None,
+            commission_pct: None,
+            spread_pct: None,
+            slippage_pct: None,
+            max_daily_loss_pct: 5.0,
+            max_notional_usd: None,
+            scalp_min_score: 0.5,
+            swing_min_adx: 25.0,
+            swing_min_score: 0.5,
+            max_scalp_per_symbol: 1,
+            max_swing_per_symbol: 1,
+            scalp_active_hours: [0, 23],
+            autonomous_tuning: true,
+            scalp_sl_bounds: bounds.clone(),
+            scalp_tp_bounds: bounds.clone(),
+            swing_sl_bounds: bounds.clone(),
+            swing_tp_bounds: bounds.clone(),
+            scalp_lev_bounds: lev_bounds.clone(),
+            swing_lev_bounds: lev_bounds.clone(),
+            scalp_score_bounds: bounds.clone(),
+            swing_score_bounds: bounds,
         }
     }
 
-    fn stats(wins: usize, losses: usize, total_win_pnl: f64, total_loss_pnl: f64, streak: usize) -> ScalpSwingStats {
+    fn stats(
+        wins: usize,
+        losses: usize,
+        total_win_pnl: f64,
+        total_loss_pnl: f64,
+        streak: usize,
+    ) -> ScalpSwingStats {
         ScalpSwingStats {
-            total_closed: wins + losses, wins,
+            total_closed: wins + losses,
+            wins,
             total_pnl: total_win_pnl - total_loss_pnl,
-            total_win_pnl, total_loss_pnl,
-            loss_streak: streak, max_loss_streak: streak, last_tune_at: 0,
+            total_win_pnl,
+            total_loss_pnl,
+            loss_streak: streak,
+            max_loss_streak: streak,
+            last_tune_at: 0,
         }
     }
 
@@ -321,8 +429,16 @@ mod tests {
         // wr=0.70, pf=2.0 → boost path
         let s = stats(7, 3, 8.0, 4.0, 0);
         let changes = auto_tune(&s, TradeType::Scalp, &mut cfg);
-        assert!(cfg.scalp_tp_pct > 0.80, "TP genişlemeli, got {}", cfg.scalp_tp_pct);
-        assert!(cfg.scalp_leverage > 2.0, "Lev artmalı, got {}", cfg.scalp_leverage);
+        assert!(
+            cfg.scalp_tp_pct > 0.80,
+            "TP genişlemeli, got {}",
+            cfg.scalp_tp_pct
+        );
+        assert!(
+            cfg.scalp_leverage > 2.0,
+            "Lev artmalı, got {}",
+            cfg.scalp_leverage
+        );
         assert!(changes.iter().any(|c| c.contains("TP Widened")));
         assert!(changes.iter().any(|c| c.contains("Leverage Raised")));
     }
@@ -333,7 +449,11 @@ mod tests {
         // wr=0.50 (nötr), pf=1.0, ama streak=3 → agresif kesinti
         let s = stats(5, 5, 5.0, 5.0, 3);
         let changes = auto_tune(&s, TradeType::Swing, &mut cfg);
-        assert!(cfg.swing_leverage < 2.0, "Streak ile lev kesilmeli, got {}", cfg.swing_leverage);
+        assert!(
+            cfg.swing_leverage < 2.0,
+            "Streak ile lev kesilmeli, got {}",
+            cfg.swing_leverage
+        );
         assert!(changes.iter().any(|c| c.contains("Leverage Cut")));
     }
 
@@ -344,7 +464,11 @@ mod tests {
         // Boost path: 9.5 × 1.10 = 10.45 → clamp 10.0
         let s = stats(7, 3, 8.0, 4.0, 0);
         auto_tune(&s, TradeType::Scalp, &mut cfg);
-        assert!((cfg.scalp_leverage - 10.0).abs() < 1e-9, "max clamp, got {}", cfg.scalp_leverage);
+        assert!(
+            (cfg.scalp_leverage - 10.0).abs() < 1e-9,
+            "max clamp, got {}",
+            cfg.scalp_leverage
+        );
     }
 
     #[test]
@@ -354,7 +478,11 @@ mod tests {
         // Cut: 1.2 × 0.70 = 0.84 → clamp 1.0
         let s = stats(2, 8, 2.0, 8.0, 4);
         auto_tune(&s, TradeType::Swing, &mut cfg);
-        assert!((cfg.swing_leverage - 1.0).abs() < 1e-9, "min clamp, got {}", cfg.swing_leverage);
+        assert!(
+            (cfg.swing_leverage - 1.0).abs() < 1e-9,
+            "min clamp, got {}",
+            cfg.swing_leverage
+        );
     }
 
     #[test]
@@ -363,12 +491,12 @@ mod tests {
         // wr=0.50, pf=1.0, streak=0 → herhangi bir kural tetiklenmemeli
         let s = stats(5, 5, 5.0, 5.0, 0);
         let before_lev = cfg.scalp_leverage;
-        let before_sl  = cfg.scalp_sl_pct;
-        let before_tp  = cfg.scalp_tp_pct;
+        let before_sl = cfg.scalp_sl_pct;
+        let before_tp = cfg.scalp_tp_pct;
         let changes = auto_tune(&s, TradeType::Scalp, &mut cfg);
         assert!((cfg.scalp_leverage - before_lev).abs() < 1e-9);
-        assert!((cfg.scalp_sl_pct - before_sl).abs()   < 1e-9);
-        assert!((cfg.scalp_tp_pct - before_tp).abs()   < 1e-9);
+        assert!((cfg.scalp_sl_pct - before_sl).abs() < 1e-9);
+        assert!((cfg.scalp_tp_pct - before_tp).abs() < 1e-9);
         assert!(changes.is_empty());
     }
 
@@ -425,15 +553,23 @@ mod tests {
         // final loss_streak=0 (win'ler streak'i sıfırlar). Aksi sırada `pf<0.80
         // || streak>=3` ekstra ×0.70 lev cut tetiklenir ve TP/Lev boost'u ezer.
         let mut tbl = ScalpSwingStatsTable::default();
-        for _ in 0..3 { tbl.record_close(TradeType::Scalp, -1.0); }
-        for _ in 0..7 { tbl.record_close(TradeType::Scalp,  2.0); }
+        for _ in 0..3 {
+            tbl.record_close(TradeType::Scalp, -1.0);
+        }
+        for _ in 0..7 {
+            tbl.record_close(TradeType::Scalp, 2.0);
+        }
         // wr = 7/10 = 0.70, pf = 14/3 ≈ 4.67, loss_streak=0
         let mut cfg = make_cfg();
         let before_lev = cfg.scalp_leverage;
-        let before_tp  = cfg.scalp_tp_pct;
+        let before_tp = cfg.scalp_tp_pct;
         let changes = auto_tune(&tbl.scalp, TradeType::Scalp, &mut cfg);
-        assert!(cfg.scalp_leverage > before_lev,
-            "Lev artmalı, before={} after={}", before_lev, cfg.scalp_leverage);
+        assert!(
+            cfg.scalp_leverage > before_lev,
+            "Lev artmalı, before={} after={}",
+            before_lev,
+            cfg.scalp_leverage
+        );
         assert!(cfg.scalp_tp_pct > before_tp);
         assert!(changes.iter().any(|c| c.contains("TP Widened")));
         assert!(changes.iter().any(|c| c.contains("Leverage Raised")));

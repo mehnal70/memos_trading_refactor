@@ -8,14 +8,13 @@ pub mod failover;
 pub mod recovery_state;
 
 pub use circuit_breaker::{
-    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerState, CircuitBreakerError,
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError, CircuitBreakerState,
 };
-pub use failover::{FailoverManager, FailoverStrategy, ExecutorType};
-pub use recovery_state::{RecoveryState, RecoveryStateMachine, RecoveryAction};
+pub use failover::{ExecutorType, FailoverManager, FailoverStrategy};
+pub use recovery_state::{RecoveryAction, RecoveryState, RecoveryStateMachine};
 
 #[cfg(test)]
 mod tests {
-    
 
     #[test]
     fn test_error_recovery_module_loads() {

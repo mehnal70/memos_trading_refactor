@@ -1,10 +1,10 @@
 // batch_backtest.rs - Gelişmiş Toplu Backtest Altyapısı
 
 use crate::core::types::{Candle, Signal, StrategyParams};
-use crate::robot::strategies::Strategy;
 use crate::robot::logic::portfolio::Portfolio;
-use std::collections::HashMap;
-use rayon::prelude::*; // Paralel işleme için
+use crate::robot::strategies::Strategy;
+use rayon::prelude::*;
+use std::collections::HashMap; // Paralel işleme için
 
 pub struct BacktestConfig {
     pub strategies: Vec<Box<dyn Strategy + Sync + Send>>, // Thread-safe hale getirildi
@@ -28,52 +28,69 @@ pub struct BacktestResult {
 
 pub async fn run_batch_backtest(cfg: BacktestConfig) -> Vec<BacktestResult> {
     // Pipeline Optimizasyonu: Her sembolü ayrı bir thread'de paralel koşturuyoruz
-    let results: Vec<Vec<BacktestResult>> = cfg.symbols.par_iter().map(|symbol| {
-        let mut symbol_results = Vec::new();
+    let results: Vec<Vec<BacktestResult>> = cfg
+        .symbols
+        .par_iter()
+        .map(|symbol| {
+            let mut symbol_results = Vec::new();
 
-        if let Some(candles) = cfg.candles.get(symbol) {
-            for strat in &cfg.strategies {
-                for params in &cfg.param_grid {
-                    let mut portfolio = Portfolio::default();
+            if let Some(candles) = cfg.candles.get(symbol) {
+                for strat in &cfg.strategies {
+                    for params in &cfg.param_grid {
+                        let mut portfolio = Portfolio::default();
 
-                    for c in candles {
-                        // Unnecessary clone'u kaldırdık, referans üzerinden gidiyoruz
-                        let signal = strat.generate_signal(&[c.clone()], params, None, None)
-                            .unwrap_or(Signal::Hold);
+                        for c in candles {
+                            // Unnecessary clone'u kaldırdık, referans üzerinden gidiyoruz
+                            let signal = strat
+                                .generate_signal(&[c.clone()], params, None, None)
+                                .unwrap_or(Signal::Hold);
 
-                        if matches!(signal, Signal::Buy | Signal::Sell) {
-                            // Gerçekçi Simülasyon: Slippage ve Komisyon
-                            let slip = if signal == Signal::Buy { 1.0 + (cfg.slippage_pct / 100.0) } else { 1.0 - (cfg.slippage_pct / 100.0) };
-                            let exec_price = c.close * slip;
-                            let commission = exec_price * (cfg.commission_pct / 100.0);
+                            if matches!(signal, Signal::Buy | Signal::Sell) {
+                                // Gerçekçi Simülasyon: Slippage ve Komisyon
+                                let slip = if signal == Signal::Buy {
+                                    1.0 + (cfg.slippage_pct / 100.0)
+                                } else {
+                                    1.0 - (cfg.slippage_pct / 100.0)
+                                };
+                                let exec_price = c.close * slip;
+                                let commission = exec_price * (cfg.commission_pct / 100.0);
 
-                            // Latency Modellemesi: 
-                            // Loop içinde sleep yapmak yerine, execute zamanını simüle eden bir counter tutulmalı.
-                            // Backtest'te gerçek sleep sistemi yavaşlatır.
+                                // Latency Modellemesi:
+                                // Loop içinde sleep yapmak yerine, execute zamanını simüle eden bir counter tutulmalı.
+                                // Backtest'te gerçek sleep sistemi yavaşlatır.
 
-                            match signal {
-                                Signal::Buy => portfolio.open_position(symbol, exec_price, 1.0, Signal::Buy, strat.name()),
-                                Signal::Sell => { portfolio.close_position(symbol, exec_price); },
-                                _ => {}
+                                match signal {
+                                    Signal::Buy => portfolio.open_position(
+                                        symbol,
+                                        exec_price,
+                                        1.0,
+                                        Signal::Buy,
+                                        strat.name(),
+                                    ),
+                                    Signal::Sell => {
+                                        portfolio.close_position(symbol, exec_price);
+                                    }
+                                    _ => {}
+                                }
+                                portfolio.balance -= commission;
                             }
-                            portfolio.balance -= commission;
                         }
-                    }
 
-                    let metrics = portfolio.update_metrics();
-                    symbol_results.push(BacktestResult {
-                        symbol: symbol.clone(),
-                        strategy: strat.name().to_string(),
-                        params: *params,
-                        total_pnl: metrics.total_pnl,
-                        win_rate: metrics.win_rate,
-                        trade_count: metrics.trade_count,
-                    });
+                        let metrics = portfolio.update_metrics();
+                        symbol_results.push(BacktestResult {
+                            symbol: symbol.clone(),
+                            strategy: strat.name().to_string(),
+                            params: *params,
+                            total_pnl: metrics.total_pnl,
+                            win_rate: metrics.win_rate,
+                            trade_count: metrics.trade_count,
+                        });
+                    }
                 }
             }
-        }
-        symbol_results
-    }).collect();
+            symbol_results
+        })
+        .collect();
 
     // Nested vektörü tek bir düz listeye indiriyoruz (flatten)
     results.into_iter().flatten().collect()

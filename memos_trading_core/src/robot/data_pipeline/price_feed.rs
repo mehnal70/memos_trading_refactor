@@ -11,7 +11,7 @@
 //! veri akışını dondurur ve ardından bağlantıyı kapar. Bu nedenle `stream_once`
 //! WebSocketStream'i **split etmez** — tek akış üzerinden hem okur hem Pong yazar.
 
-// robot/data_pipeline/price_feed.rs - Srivastava ATP Gerçek Zamanlı Fiyat Akış Ünitesi
+// robot/data_pipeline/price_feed.rs - Gerçek Zamanlı Fiyat Akış Ünitesi
 
 use crate::robot::state::SharedTradingState;
 use crate::types::Market;

@@ -74,9 +74,14 @@ impl NotificationLogger for SimpleNotificationLogger {
     fn log_event(&mut self, log: NotificationLog) {
         // Log seviyesine göre terminale anında çıktı verilebilir
         if log.level >= LogLevel::Error {
-            eprintln!("[{}] {} | {}", log.timestamp.format("%H:%M:%S"), log.level, log.message);
+            eprintln!(
+                "[{}] {} | {}",
+                log.timestamp.format("%H:%M:%S"),
+                log.level,
+                log.message
+            );
         }
-        
+
         self.logs.insert(log.log_id.clone(), log);
     }
 

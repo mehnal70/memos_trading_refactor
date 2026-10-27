@@ -60,14 +60,18 @@ mod tests {
 
     #[test]
     fn env_or_returns_default_when_unset() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .expect("ENV_LOCK poisoned in env_or_returns_default_when_unset");
         std::env::remove_var("CORE_ENV_TEST_X");
         assert_eq!(env_or("CORE_ENV_TEST_X", "def"), "def");
     }
 
     #[test]
     fn env_or_and_parse_read_set_value() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .expect("ENV_LOCK poisoned in env_or_and_parse_read_set_value");
         std::env::set_var("CORE_ENV_TEST_Y", "42");
         assert_eq!(env_or("CORE_ENV_TEST_Y", "def"), "42");
         assert_eq!(env_parse::<i64>("CORE_ENV_TEST_Y"), Some(42));
@@ -77,7 +81,9 @@ mod tests {
 
     #[test]
     fn env_parse_none_on_garbage() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .expect("ENV_LOCK poisoned in env_parse_none_on_garbage");
         std::env::set_var("CORE_ENV_TEST_Z", "not-a-number");
         assert_eq!(env_parse::<f64>("CORE_ENV_TEST_Z"), None);
         std::env::remove_var("CORE_ENV_TEST_Z");
@@ -85,7 +91,9 @@ mod tests {
 
     #[test]
     fn env_parse_or_falls_back_on_unset_and_garbage() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .expect("ENV_LOCK poisoned in env_parse_or_falls_back_on_unset_and_garbage");
         std::env::remove_var("CORE_ENV_TEST_P");
         assert_eq!(env_parse_or::<u64>("CORE_ENV_TEST_P", 7), 7);
         std::env::set_var("CORE_ENV_TEST_P", "bad");
@@ -97,7 +105,9 @@ mod tests {
 
     #[test]
     fn env_truthy_only_accepts_one_and_true() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .expect("ENV_LOCK poisoned in env_truthy_only_accepts_one_and_true");
         std::env::remove_var("CORE_ENV_TEST_T");
         assert!(!env_truthy("CORE_ENV_TEST_T"));
         for v in ["1", "true", "TRUE", "True"] {
@@ -113,7 +123,9 @@ mod tests {
 
     #[test]
     fn env_bool_accepts_extended_set() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .expect("ENV_LOCK poisoned in env_bool_accepts_extended_set");
         std::env::remove_var("CORE_ENV_TEST_B");
         assert_eq!(env_bool("CORE_ENV_TEST_B"), None);
         for v in ["1", "true", "yes", "on", " ON "] {

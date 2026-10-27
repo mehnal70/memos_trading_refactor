@@ -1,21 +1,26 @@
 // src/persistence/writer.rs - Srivastava ATP Adli Mühürleme Merkezi
 
-use rusqlite::{params, Connection};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
-use std::fs;
-use std::path::Path;
-use serde::Serialize;
+use crate::core::model::VenueSymbolSnapshot;
 use crate::prelude::*; // Elit ve agnostik veri tipleri tek satırda bağlandı (Candle, PositionModel, MissionControl)
 use crate::Result;
 use chrono::{DateTime, Utc};
+use rusqlite::{params, Connection};
+use serde::Serialize;
+use std::fs;
+use std::path::Path;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 
 // =============================================================================
 // 1. ASENKRON YAZICI (GELİŞTİRİLMİŞ WORKER FLIGHT-DECK)
 // =============================================================================
 
 pub enum DBWriteMsg {
-    Candle { exchange: String, market: String, candle: Candle },
+    Candle {
+        exchange: String,
+        market: String,
+        candle: Candle,
+    },
     /// Pozisyonları SQLite snapshot tablosuna mühürler
     PositionSnapshot(Vec<PositionModel>),
     /// Tüm zihni (MissionControl) JSON olarak diske mühürler
@@ -56,7 +61,11 @@ impl DBWriter {
     fn worker_loop(conn: Connection, rx: Receiver<DBWriteMsg>) {
         for msg in rx {
             match msg {
-                DBWriteMsg::Candle { exchange, market, candle } => {
+                DBWriteMsg::Candle {
+                    exchange,
+                    market,
+                    candle,
+                } => {
                     if let Err(e) = save_candle(&conn, &exchange, &market, &candle) {
                         eprintln!("🚀 Srivastava Mum Hatası: {}", e);
                     }
@@ -86,7 +95,7 @@ pub fn seal_config_to_disk<T: Serialize>(path: &str, data: &T) -> Result<()> {
 
     let json = serde_json::to_string_pretty(data)
         .map_err(|e| crate::MemosTradingError::Unknown(format!("Serialization hatası: {}", e)))?;
-    
+
     // Atomik Yazma: Önce geçici dosya sonra rename (Data corruption ve elektrik kesintisi koruması)
     let temp_path = format!("{}.tmp", path);
     fs::write(&temp_path, json)?;
@@ -99,21 +108,161 @@ pub fn seal_config_to_disk<T: Serialize>(path: &str, data: &T) -> Result<()> {
 // =============================================================================
 
 pub fn save_open_positions_snapshot(conn: &Connection, positions: &[PositionModel]) -> Result<()> {
+    save_open_positions_snapshot_for_profile(conn, "default", positions)
+}
+
+pub fn save_venue_symbol_snapshots(
+    conn: &Connection,
+    profile: &str,
+    symbols: &[VenueSymbolSnapshot],
+) -> Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS venue_symbol_catalog (
+            profile TEXT NOT NULL,
+            venue TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            market TEXT NOT NULL,
+            status TEXT NOT NULL,
+            tradeable INTEGER NOT NULL,
+            current_price REAL NOT NULL,
+            change_24h REAL NOT NULL,
+            last_candle_at TEXT,
+            candle_status TEXT NOT NULL,
+            filters_status TEXT NOT NULL,
+            source TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (profile, venue, symbol)
+        )",
+        [],
+    )?;
+    let tx = conn.unchecked_transaction()?;
+    for item in symbols {
+        tx.execute(
+            "INSERT INTO venue_symbol_catalog
+                (profile, venue, symbol, market, status, tradeable, current_price,
+                 change_24h, last_candle_at, candle_status, filters_status, source, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(profile, venue, symbol) DO UPDATE SET
+                market=excluded.market,
+                status=excluded.status,
+                tradeable=excluded.tradeable,
+                current_price=excluded.current_price,
+                change_24h=excluded.change_24h,
+                last_candle_at=excluded.last_candle_at,
+                candle_status=excluded.candle_status,
+                filters_status=excluded.filters_status,
+                source=excluded.source,
+                updated_at=excluded.updated_at",
+            params![
+                profile,
+                item.venue,
+                item.symbol,
+                item.market,
+                item.status,
+                item.tradeable,
+                item.current_price,
+                item.change_24h,
+                item.last_candle_at.map(|value| value.to_rfc3339()),
+                item.candle_status,
+                item.filters_status,
+                item.source,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn save_open_positions_snapshot_for_profile(
+    conn: &Connection,
+    profile: &str,
+    positions: &[PositionModel],
+) -> Result<()> {
     // Tablonun varlığından emin ol (Hata yönetimli)
     let _ = conn.execute(
-        "CREATE TABLE IF NOT EXISTS open_positions_snapshot (id INTEGER PRIMARY KEY CHECK (id = 1), positions TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS open_positions_snapshot (profile TEXT PRIMARY KEY, positions TEXT NOT NULL, updated_at TEXT NOT NULL)",
         [],
     );
+    if !column_exists(conn, "open_positions_snapshot", "profile")? {
+        conn.execute(
+            "ALTER TABLE open_positions_snapshot ADD COLUMN profile TEXT",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE open_positions_snapshot SET profile='default' WHERE profile IS NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_open_positions_profile ON open_positions_snapshot(profile)",
+            [],
+        )?;
+    }
 
-    let positions_json = serde_json::to_string(positions)
-        .map_err(|e| crate::MemosTradingError::Unknown(format!("Snapshot serialization hatası: {}", e)))?;
+    let positions_json = serde_json::to_string(positions).map_err(|e| {
+        crate::MemosTradingError::Unknown(format!("Snapshot serialization hatası: {}", e))
+    })?;
 
     conn.execute(
-        "INSERT INTO open_positions_snapshot (id, positions, updated_at)
-         VALUES (1, ?1, ?2)
-         ON CONFLICT(id) DO UPDATE SET positions=excluded.positions, updated_at=excluded.updated_at",
-        params![positions_json, Utc::now().to_rfc3339()]
+        "INSERT INTO open_positions_snapshot (profile, positions, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(profile) DO UPDATE SET positions=excluded.positions, updated_at=excluded.updated_at",
+        params![profile, positions_json, Utc::now().to_rfc3339()]
     )?;
+    Ok(())
+}
+
+pub fn ensure_pending_closes_table(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS pending_closes (
+            profile TEXT NOT NULL,
+            position_key TEXT NOT NULL,
+            broker_order_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (profile, position_key)
+        )",
+        [],
+    )
+    .map(|_| ())
+    .map_err(|e| crate::MemosTradingError::Database(format!("pending_closes tablo hatası: {}", e)))
+}
+
+pub fn save_pending_close_for_profile(
+    conn: &Connection,
+    profile: &str,
+    key: &memos_venue_api::CanonicalPositionKey,
+    broker_order_id: &str,
+) -> Result<()> {
+    ensure_pending_closes_table(conn)?;
+    let position_key = serde_json::to_string(key).map_err(|e| {
+        crate::MemosTradingError::Unknown(format!("pending close key serialization hatası: {}", e))
+    })?;
+    conn.execute(
+        "INSERT INTO pending_closes (profile, position_key, broker_order_id, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(profile, position_key) DO UPDATE SET
+            broker_order_id=excluded.broker_order_id,
+            updated_at=excluded.updated_at",
+        params![profile, position_key, broker_order_id, Utc::now().to_rfc3339()],
+    )
+    .map_err(|e| crate::MemosTradingError::Database(format!("pending close yazma hatası: {}", e)))?;
+    Ok(())
+}
+
+pub fn remove_pending_close_for_profile(
+    conn: &Connection,
+    profile: &str,
+    key: &memos_venue_api::CanonicalPositionKey,
+) -> Result<()> {
+    ensure_pending_closes_table(conn)?;
+    let position_key = serde_json::to_string(key).map_err(|e| {
+        crate::MemosTradingError::Unknown(format!("pending close key serialization hatası: {}", e))
+    })?;
+    conn.execute(
+        "DELETE FROM pending_closes WHERE profile=?1 AND position_key=?2",
+        params![profile, position_key],
+    )
+    .map_err(|e| crate::MemosTradingError::Database(format!("pending close silme hatası: {}", e)))?;
     Ok(())
 }
 
@@ -121,7 +270,7 @@ pub fn save_open_positions_snapshot(conn: &Connection, positions: &[PositionMode
 pub fn ensure_account_state_table(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS account_state (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
+            profile TEXT PRIMARY KEY,
             equity REAL NOT NULL,
             peak_equity REAL NOT NULL,
             starting_capital REAL NOT NULL,
@@ -129,7 +278,64 @@ pub fn ensure_account_state_table(conn: &Connection) -> Result<()> {
             updated_at TEXT NOT NULL
         )",
         [],
-    ).map_err(|e| crate::MemosTradingError::Database(format!("account_state tablo hatası: {}", e)))?;
+    )
+    .map_err(|e| {
+        crate::MemosTradingError::Database(format!("account_state tablo hatası: {}", e))
+    })?;
+    if !column_exists(conn, "account_state", "profile")? {
+        conn.execute("ALTER TABLE account_state ADD COLUMN profile TEXT", [])?;
+        conn.execute(
+            "UPDATE account_state SET profile='default' WHERE profile IS NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_account_state_profile ON account_state(profile)",
+            [],
+        )?;
+    }
+
+    Ok(())
+}
+
+pub fn ensure_closed_trades_snapshot_table(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS closed_trades_snapshot (
+            profile TEXT PRIMARY KEY,
+            trades TEXT NOT NULL,
+            equity_history TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+        [],
+    )
+    .map_err(|e| {
+        crate::MemosTradingError::Database(format!("closed_trades_snapshot tablo hatası: {}", e))
+    })?;
+    Ok(())
+}
+
+pub fn save_closed_trades_snapshot_for_profile(
+    conn: &Connection,
+    profile: &str,
+    trades: &[crate::core::model::ClosedTradeModel],
+    equity_history: &[f64],
+) -> Result<()> {
+    ensure_closed_trades_snapshot_table(conn)?;
+    let trades_json = serde_json::to_string(trades).map_err(|e| {
+        crate::MemosTradingError::Unknown(format!("Kapalı işlem serialization hatası: {}", e))
+    })?;
+    let equity_json = serde_json::to_string(equity_history).map_err(|e| {
+        crate::MemosTradingError::Unknown(format!("Equity history serialization hatası: {}", e))
+    })?;
+    conn.execute(
+        "INSERT INTO closed_trades_snapshot
+            (profile, trades, equity_history, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(profile) DO UPDATE SET
+            trades=excluded.trades,
+            equity_history=excluded.equity_history,
+            updated_at=excluded.updated_at",
+        params![profile, trades_json, equity_json, Utc::now().to_rfc3339()],
+    )?;
     Ok(())
 }
 
@@ -143,18 +349,148 @@ pub fn save_account_state(
     starting_capital: f64,
     closed_trades_count: usize,
 ) -> Result<()> {
+    save_account_state_for_profile(
+        conn,
+        "default",
+        equity,
+        peak_equity,
+        starting_capital,
+        closed_trades_count,
+    )
+}
+
+pub fn save_account_state_for_profile(
+    conn: &Connection,
+    profile: &str,
+    equity: f64,
+    peak_equity: f64,
+    starting_capital: f64,
+    closed_trades_count: usize,
+) -> Result<()> {
     ensure_account_state_table(conn)?;
     conn.execute(
-        "INSERT INTO account_state (id, equity, peak_equity, starting_capital, closed_trades_count, updated_at)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(id) DO UPDATE SET
+        "INSERT INTO account_state (profile, equity, peak_equity, starting_capital, closed_trades_count, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(profile) DO UPDATE SET
             equity=excluded.equity,
             peak_equity=excluded.peak_equity,
             starting_capital=excluded.starting_capital,
             closed_trades_count=excluded.closed_trades_count,
             updated_at=excluded.updated_at",
-        params![equity, peak_equity, starting_capital, closed_trades_count as i64, Utc::now().to_rfc3339()],
+        params![profile, equity, peak_equity, starting_capital, closed_trades_count as i64, Utc::now().to_rfc3339()],
     ).map_err(|e| crate::MemosTradingError::Database(format!("account_state yazma hatası: {}", e)))?;
+    Ok(())
+}
+
+pub fn ensure_uncertain_orders_table(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS uncertain_orders (
+            profile TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            requested_quantity REAL NOT NULL,
+            filled_quantity REAL NOT NULL,
+            broker_order_id TEXT,
+            status TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_checked_at TEXT NOT NULL,
+            resolved_at TEXT,
+            healthy_reconcile_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (profile, symbol)
+        )",
+        [],
+    )
+    .map_err(|e| {
+        crate::MemosTradingError::Database(format!("uncertain_orders tablo hatası: {}", e))
+    })?;
+    let _ = conn.execute(
+        "ALTER TABLE uncertain_orders ADD COLUMN healthy_reconcile_count INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    Ok(())
+}
+
+pub fn save_uncertain_order_for_profile(
+    conn: &Connection,
+    profile: &str,
+    order: &crate::core::model::UncertainOrderState,
+) -> Result<()> {
+    ensure_uncertain_orders_table(conn)?;
+    conn.execute(
+        "INSERT INTO uncertain_orders
+            (profile, symbol, side, requested_quantity, filled_quantity, broker_order_id,
+             status, reason, created_at, last_checked_at, resolved_at, healthy_reconcile_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT(profile, symbol) DO UPDATE SET
+            side=excluded.side,
+            requested_quantity=excluded.requested_quantity,
+            filled_quantity=excluded.filled_quantity,
+            broker_order_id=excluded.broker_order_id,
+            status=excluded.status,
+            reason=excluded.reason,
+            last_checked_at=excluded.last_checked_at,
+            resolved_at=excluded.resolved_at",
+        params![
+            profile,
+            order.symbol,
+            order.side,
+            order.requested_quantity,
+            order.filled_quantity,
+            order.broker_order_id,
+            order.status,
+            order.reason,
+            order.created_at,
+            order.last_checked_at,
+            order.resolved_at,
+            order.healthy_reconcile_count,
+        ],
+    )
+    .map_err(|e| {
+        crate::MemosTradingError::Database(format!("uncertain_orders yazma hatası: {}", e))
+    })?;
+    Ok(())
+}
+
+pub fn update_uncertain_order_health(
+    conn: &Connection,
+    profile: &str,
+    symbol: &str,
+    healthy_reconcile_count: u32,
+    checked_at: &str,
+) -> Result<()> {
+    ensure_uncertain_orders_table(conn)?;
+    conn.execute(
+        "UPDATE uncertain_orders
+         SET healthy_reconcile_count=?3, last_checked_at=?4
+         WHERE profile=?1 AND symbol=?2 AND resolved_at IS NULL",
+        params![profile, symbol, healthy_reconcile_count, checked_at],
+    )
+    .map_err(|e| {
+        crate::MemosTradingError::Database(format!(
+            "uncertain_orders health güncelleme hatası: {}",
+            e
+        ))
+    })?;
+    Ok(())
+}
+
+pub fn resolve_uncertain_order(
+    conn: &Connection,
+    profile: &str,
+    symbol: &str,
+    resolved_at: &str,
+) -> Result<()> {
+    ensure_uncertain_orders_table(conn)?;
+    conn.execute(
+        "UPDATE uncertain_orders
+         SET status='RESOLVED', resolved_at=?3, last_checked_at=?3
+         WHERE profile=?1 AND symbol=?2",
+        params![profile, symbol, resolved_at],
+    )
+    .map_err(|e| {
+        crate::MemosTradingError::Database(format!("uncertain_orders çözümleme hatası: {}", e))
+    })?;
     Ok(())
 }
 
@@ -168,11 +504,13 @@ pub fn save_symbol_statuses(conn: &Connection, entries: &[(String, String)]) -> 
             symbol TEXT PRIMARY KEY,
             status TEXT NOT NULL,
             updated_at TEXT NOT NULL
-        );"
-    ).map_err(|e| crate::MemosTradingError::Database(format!("symbol_status tablo: {}", e)))?;
+        );",
+    )
+    .map_err(|e| crate::MemosTradingError::Database(format!("symbol_status tablo: {}", e)))?;
 
     let now = Utc::now().to_rfc3339();
-    let tx = conn.unchecked_transaction()
+    let tx = conn
+        .unchecked_transaction()
         .map_err(|e| crate::MemosTradingError::Database(format!("symbol_status tx: {}", e)))?;
     for (sym, status) in entries {
         tx.execute(
@@ -181,7 +519,8 @@ pub fn save_symbol_statuses(conn: &Connection, entries: &[(String, String)]) -> 
             params![sym, status, now],
         ).map_err(|e| crate::MemosTradingError::Database(format!("symbol_status upsert: {}", e)))?;
     }
-    tx.commit().map_err(|e| crate::MemosTradingError::Database(format!("symbol_status commit: {}", e)))?;
+    tx.commit()
+        .map_err(|e| crate::MemosTradingError::Database(format!("symbol_status commit: {}", e)))?;
     Ok(())
 }
 
@@ -199,8 +538,13 @@ pub fn save_symbol_statuses(conn: &Connection, entries: &[(String, String)]) -> 
 /// tablosunda her yazım "no such column: created_at" ile sessizce patlıyordu (download
 /// `let _ = save_candle` ile yutuyordu → veri donuyordu). Artık mevcut kolonlara göre uyumlu
 /// yazım yapılır (4M satırlık tabloyu migrate etmeden iki şemada da çalışır).
-pub fn save_candle(
+pub fn save_candle(conn: &Connection, exchange: &str, market: &str, candle: &Candle) -> Result<()> {
+    save_candle_for_profile(conn, "default", exchange, market, candle)
+}
+
+pub fn save_candle_for_profile(
     conn: &Connection,
+    profile: &str,
     exchange: &str,
     market: &str,
     candle: &Candle,
@@ -208,6 +552,9 @@ pub fn save_candle(
     // CandleRepository::new yoluyla gelmemiş bir bağlantı olabilir (örn. download job
     // doğrudan rusqlite::Connection::open ile açıyor). Defensive olarak tabloyu yarat.
     ensure_candles_table(conn)?;
+    if column_exists(conn, "candles", "exchange")? && !column_exists(conn, "candles", "profile")? {
+        migrate_candle_schema(conn)?;
+    }
 
     let raw_ms = candle.timestamp.timestamp_millis();
 
@@ -215,13 +562,13 @@ pub fn save_candle(
     // exchange/market parametreleri burada gerçekten kullanılır (eskiden yok sayılıyordu).
     if column_exists(conn, "candles", "exchange")? {
         conn.execute(
-            "INSERT INTO candles (exchange, market, symbol, interval, timestamp, open, high, low, close, volume) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
-             ON CONFLICT(exchange, market, symbol, interval, timestamp) DO UPDATE SET \
+            "INSERT INTO candles (profile, exchange, market, symbol, interval, timestamp, open, high, low, close, volume) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+             ON CONFLICT(profile, exchange, market, symbol, interval, timestamp) DO UPDATE SET \
                open=excluded.open, high=excluded.high, low=excluded.low, \
                close=excluded.close, volume=excluded.volume",
             params![
-                exchange, market, &candle.symbol, &candle.interval, raw_ms,
+               profile, exchange, market, &candle.symbol, &candle.interval, raw_ms,
                 candle.open, candle.high, candle.low, candle.close, candle.volume,
             ],
         ).map_err(|e| crate::MemosTradingError::Database(format!("Mum upsert hatası: {}", e)))?;
@@ -229,14 +576,22 @@ pub fn save_candle(
     }
 
     // Fresh/kod-üretimi şema (created_at var, exchange/market yok): UPDATE→INSERT.
-    let updated = conn.execute(
-        "UPDATE candles SET open=?1, high=?2, low=?3, close=?4, volume=?5 \
+    let updated = conn
+        .execute(
+            "UPDATE candles SET open=?1, high=?2, low=?3, close=?4, volume=?5 \
          WHERE symbol=?6 AND interval=?7 AND timestamp=?8",
-        params![
-            candle.open, candle.high, candle.low, candle.close, candle.volume,
-            &candle.symbol, &candle.interval, raw_ms,
-        ],
-    ).map_err(|e| crate::MemosTradingError::Database(format!("Mum update hatası: {}", e)))?;
+            params![
+                candle.open,
+                candle.high,
+                candle.low,
+                candle.close,
+                candle.volume,
+                &candle.symbol,
+                &candle.interval,
+                raw_ms,
+            ],
+        )
+        .map_err(|e| crate::MemosTradingError::Database(format!("Mum update hatası: {}", e)))?;
 
     if updated == 0 {
         conn.execute(
@@ -265,13 +620,19 @@ pub fn ensure_funding_table(conn: &Connection) -> Result<()> {
             rate REAL NOT NULL, \
             PRIMARY KEY (exchange, market, symbol, funding_time) \
         );",
-    ).map_err(|e| crate::MemosTradingError::Database(format!("funding tablo yaratma: {}", e)))?;
+    )
+    .map_err(|e| crate::MemosTradingError::Database(format!("funding tablo yaratma: {}", e)))?;
     Ok(())
 }
 
 /// 💰 Tek funding kaydını upsert eder (save_candle ile aynı kalıp; tekrar-güvenli).
 pub fn save_funding(
-    conn: &Connection, exchange: &str, market: &str, symbol: &str, funding_time_ms: i64, rate: f64,
+    conn: &Connection,
+    exchange: &str,
+    market: &str,
+    symbol: &str,
+    funding_time_ms: i64,
+    rate: f64,
 ) -> Result<()> {
     ensure_funding_table(conn)?;
     conn.execute(
@@ -279,15 +640,18 @@ pub fn save_funding(
          VALUES (?1, ?2, ?3, ?4, ?5) \
          ON CONFLICT(exchange, market, symbol, funding_time) DO UPDATE SET rate=excluded.rate",
         params![exchange, market, symbol, funding_time_ms, rate],
-    ).map_err(|e| crate::MemosTradingError::Database(format!("funding upsert: {}", e)))?;
+    )
+    .map_err(|e| crate::MemosTradingError::Database(format!("funding upsert: {}", e)))?;
     Ok(())
 }
 
 /// Tabloda belirtilen kolon var mı — şema-uyarlı yazım için (PRAGMA table_info).
 fn column_exists(conn: &Connection, table: &str, col: &str) -> Result<bool> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({})", table))
         .map_err(|e| crate::MemosTradingError::Database(format!("table_info hazırlık: {}", e)))?;
-    let found = stmt.query_map([], |row| row.get::<_, String>(1))
+    let found = stmt
+        .query_map([], |row| row.get::<_, String>(1))
         .map_err(|e| crate::MemosTradingError::Database(format!("table_info sorgu: {}", e)))?
         .filter_map(|r| r.ok())
         .any(|name| name == col);
@@ -307,6 +671,7 @@ pub fn ensure_candles_table(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS candles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile TEXT NOT NULL DEFAULT 'default',
             exchange TEXT NOT NULL,
             market TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -318,16 +683,27 @@ pub fn ensure_candles_table(conn: &Connection) -> Result<()> {
             close REAL NOT NULL,
             volume REAL NOT NULL
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_candles_pk ON candles(exchange, market, symbol, interval, timestamp);
         CREATE INDEX IF NOT EXISTS idx_candles_smi ON candles(symbol, interval, timestamp);
-        CREATE INDEX IF NOT EXISTS idx_timestamp ON candles(timestamp);"
-    ).map_err(|e| crate::MemosTradingError::Database(format!("candles tablo init hatası: {}", e)))?;
+        CREATE INDEX IF NOT EXISTS idx_timestamp ON candles(timestamp);",
+    )
+    .map_err(|e| crate::MemosTradingError::Database(format!("candles tablo init hatası: {}", e)))?;
+    if column_exists(conn, "candles", "profile")? {
+        conn.execute(
+           "CREATE UNIQUE INDEX IF NOT EXISTS idx_candles_pk ON candles(profile, exchange, market, symbol, interval, timestamp)",
+           [],
+        )?;
+    } else {
+        conn.execute(
+           "CREATE UNIQUE INDEX IF NOT EXISTS idx_candles_pk ON candles(exchange, market, symbol, interval, timestamp)",
+           [],
+        )?;
+    }
     Ok(())
 }
 
 /// Kanonik candle şema sürümü (PRAGMA user_version ile izlenir).
 /// v2 = market-farkında geniş unique key (Faz 0). v3 = ölü/legacy tablo temizliği (Faz 4).
-pub const CANDLE_SCHEMA_VERSION: i64 = 3;
+pub const CANDLE_SCHEMA_VERSION: i64 = 4;
 
 /// 🧹 Faz 4: koddan ARTIK OKUNMAYAN/YAZILMAYAN legacy candle tabloları. Canlı kaynak
 /// tek-nokta `candles` (kanonik, market-ayrık). Bunlar ya bayat snapshot ya da bozuk/
@@ -350,10 +726,13 @@ const LEGACY_DEAD_TABLES: &[&str] = &[
 
 /// Verilen tablonun DB'de var olup olmadığını döndürür (sqlite_master sorgusu).
 fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-        params![table], |r| r.get(0),
-    ).map_err(|e| crate::MemosTradingError::Database(format!("sqlite_master sorgu: {}", e)))?;
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            params![table],
+            |r| r.get(0),
+        )
+        .map_err(|e| crate::MemosTradingError::Database(format!("sqlite_master sorgu: {}", e)))?;
     Ok(n > 0)
 }
 
@@ -365,8 +744,11 @@ fn prune_legacy_tables(conn: &Connection) -> Result<usize> {
         if table_exists(conn, t)? {
             // İsim sabit-liste (kullanıcı girdisi değil) → format! güvenli.
             conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{t}\";"))
-                .map_err(|e| crate::MemosTradingError::Database(
-                    format!("ölü tablo düşürme ({t}) hatası: {e}")))?;
+                .map_err(|e| {
+                    crate::MemosTradingError::Database(format!(
+                        "ölü tablo düşürme ({t}) hatası: {e}"
+                    ))
+                })?;
             dropped += 1;
         }
     }
@@ -383,8 +765,12 @@ fn prune_legacy_tables(conn: &Connection) -> Result<usize> {
 /// Idempotent: `user_version >= CANDLE_SCHEMA_VERSION` ise no-op. `exchange` kolonu
 /// yoksa (kod-üretimi taze şema zaten kanonik) yalnız sürüm damgalanır.
 pub fn migrate_candle_schema(conn: &Connection) -> Result<()> {
-    let uv: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
-    if uv >= CANDLE_SCHEMA_VERSION { return Ok(()); }
+    let uv: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap_or(0);
+    if uv >= CANDLE_SCHEMA_VERSION {
+        return Ok(());
+    }
 
     // Tablo yoksa kanonik yarat (taze DB). Varsa ve exchange kolonluysa index swap.
     ensure_candles_table(conn)?;
@@ -402,14 +788,44 @@ pub fn migrate_candle_schema(conn: &Connection) -> Result<()> {
         log::info!("🔧 candle şema migration: market-farkında unique key kuruldu (v2)");
     }
 
+    // ── v4: profile'i candle namespace'ine ekle. Eski kayıtlar default profile'dır. ──
+    if !column_exists(conn, "candles", "profile")? && column_exists(conn, "candles", "exchange")? {
+        conn.execute(
+            "ALTER TABLE candles ADD COLUMN profile TEXT NOT NULL DEFAULT 'default'",
+            [],
+        )
+        .map_err(|e| {
+            crate::MemosTradingError::Database(format!("candle profile kolonu eklenemedi: {}", e))
+        })?;
+    }
+    if column_exists(conn, "candles", "profile")? && column_exists(conn, "candles", "exchange")? {
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_candles_pk;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_candles_pk
+               ON candles(profile, exchange, market, symbol, interval, timestamp);",
+        )
+        .map_err(|e| {
+            crate::MemosTradingError::Database(format!(
+                "candle profile unique index migration hatası: {}",
+                e
+            ))
+        })?;
+    }
+
     // ── v3: ölü/legacy candle tablolarını düşür + alanı geri kazan (Faz 4). ──
-    let pruned = if uv < 3 { prune_legacy_tables(conn)? } else { 0 };
+    let pruned = if uv < 3 {
+        prune_legacy_tables(conn)?
+    } else {
+        0
+    };
 
     // Sürüm damgası VACUUM'dan ÖNCE: DROP'lar zaten commit'li; VACUUM yarıda kesilse
     // bile tablolar düşürülmüş kalır (correctness korunur), yalnız alan geri kazanılmaz
     // → sonraki boot uv>=3 görüp tekrar denemez (idempotent, gereksiz iş yok).
     conn.pragma_update(None, "user_version", CANDLE_SCHEMA_VERSION)
-        .map_err(|e| crate::MemosTradingError::Database(format!("user_version damga hatası: {}", e)))?;
+        .map_err(|e| {
+            crate::MemosTradingError::Database(format!("user_version damga hatası: {}", e))
+        })?;
 
     // VACUUM transaction-dışı koşmalı (rusqlite execute_batch tek-statement → açık tx yok).
     // Yalnız gerçekten tablo düşürdüysek çalıştır (taze DB'de boşa I/O yok). Best-effort:
@@ -435,11 +851,15 @@ pub fn build_export_report(snap: &MissionControl) -> String {
     r.push_str(&format!("Net PnL: {:.2} USDT\n", snap.finance.net_pnl()));
     r.push_str("----------------------------------------\n");
     for p in &snap.positions {
-        r.push_str(&format!("Sembol: {} | Giriş: {:.4} | ROE: {:.1}%\n", p.symbol, p.entry_price, p.roe()));
+        r.push_str(&format!(
+            "Sembol: {} | Giriş: {:.4} | ROE: {:.1}%\n",
+            p.symbol,
+            p.entry_price,
+            p.roe()
+        ));
     }
     r
 }
-
 
 /// 📊 ADLİ TERCÜME: Binance WebSocket veya REST API'den gelen ham kline (mum) dizisini
 /// robotun Chrono DateTime<Utc> ve symbol/interval kalkanı taşıyan yeni Candle yapısına dönüştürür.
@@ -449,17 +869,18 @@ pub fn parse_binance_kline(
     interval: &str,
 ) -> Option<crate::core::types::Candle> {
     // Binance kline formatı en az 6 temel parametre barındırmak zorundadır (OpenTime, O, H, L, C, V)
-    if raw_kline.len() < 6 { return None; }
+    if raw_kline.len() < 6 {
+        return None;
+    }
 
     // 1. Ham milisaniye zaman damgasını oku ve Chrono nesnesine matrisle
     let raw_ms = raw_kline[0].as_i64()?;
-    let dt = chrono::DateTime::<Utc>::from_timestamp_millis(raw_ms)
-        .unwrap_or_else(Utc::now);
+    let dt = chrono::DateTime::<Utc>::from_timestamp_millis(raw_ms).unwrap_or_else(Utc::now);
 
     // 2. String tabanlı finansal verileri f64 rasyolarına güvenle dönüştür (Fail-Safe)
-    let open: f64  = raw_kline[1].as_str()?.parse().ok()?;
-    let high: f64  = raw_kline[2].as_str()?.parse().ok()?;
-    let low: f64   = raw_kline[3].as_str()?.parse().ok()?;
+    let open: f64 = raw_kline[1].as_str()?.parse().ok()?;
+    let high: f64 = raw_kline[2].as_str()?.parse().ok()?;
+    let low: f64 = raw_kline[3].as_str()?.parse().ok()?;
     let close: f64 = raw_kline[4].as_str()?.parse().ok()?;
     let volume: f64 = raw_kline[5].as_str()?.parse().ok()?;
 
@@ -484,15 +905,49 @@ mod funding_tests {
     fn funding_upsert_roundtrip_and_dedup() {
         let conn = Connection::open_in_memory().unwrap();
         // Yeni kayıtlar.
-        save_funding(&conn, "binance", "futures", "BTCUSDT", 1_700_000_000_000, 0.0001).unwrap();
-        save_funding(&conn, "binance", "futures", "BTCUSDT", 1_700_028_800_000, -0.00005).unwrap();
+        save_funding(
+            &conn,
+            "binance",
+            "futures",
+            "BTCUSDT",
+            1_700_000_000_000,
+            0.0001,
+        )
+        .unwrap();
+        save_funding(
+            &conn,
+            "binance",
+            "futures",
+            "BTCUSDT",
+            1_700_028_800_000,
+            -0.00005,
+        )
+        .unwrap();
         // Aynı funding_time → upsert (kopya değil, rate güncellenir).
-        save_funding(&conn, "binance", "futures", "BTCUSDT", 1_700_000_000_000, 0.0002).unwrap();
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM funding_rates WHERE symbol='BTCUSDT'", [], |r| r.get(0)).unwrap();
+        save_funding(
+            &conn,
+            "binance",
+            "futures",
+            "BTCUSDT",
+            1_700_000_000_000,
+            0.0002,
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM funding_rates WHERE symbol='BTCUSDT'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(n, 2, "upsert kopya üretmez");
-        let r: f64 = conn.query_row(
-            "SELECT rate FROM funding_rates WHERE funding_time=1700000000000", [], |r| r.get(0)).unwrap();
+        let r: f64 = conn
+            .query_row(
+                "SELECT rate FROM funding_rates WHERE funding_time=1700000000000",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!((r - 0.0002).abs() < 1e-12, "rate güncellendi");
     }
 }
@@ -524,7 +979,7 @@ mod migration_tests {
         conn.execute(
             "INSERT INTO candles (exchange, market, symbol, interval, timestamp, open, high, low, close, volume) \
              VALUES ('binance', ?1, 'BTCUSDT', '1h', ?2, ?3, ?3, ?3, ?3, 1.0) \
-             ON CONFLICT(exchange, market, symbol, interval, timestamp) DO UPDATE SET close=excluded.close",
+             ON CONFLICT(profile, exchange, market, symbol, interval, timestamp) DO UPDATE SET close=excluded.close",
             params![market, ts, close],
         )
     }
@@ -543,18 +998,33 @@ mod migration_tests {
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM candles WHERE symbol='BTCUSDT' AND interval='1h' AND timestamp=1000",
             [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 2, "spot+futures aynı ts'de ayrı satır olmalı (market key'de)");
+        assert_eq!(
+            n, 2,
+            "spot+futures aynı ts'de ayrı satır olmalı (market key'de)"
+        );
 
         // Market-saf okuma doğru fiyatı verir.
-        let spot_close: f64 = conn.query_row(
-            "SELECT close FROM candles WHERE market='spot' AND timestamp=1000", [], |r| r.get(0)).unwrap();
-        let fut_close: f64 = conn.query_row(
-            "SELECT close FROM candles WHERE market='futures' AND timestamp=1000", [], |r| r.get(0)).unwrap();
+        let spot_close: f64 = conn
+            .query_row(
+                "SELECT close FROM candles WHERE market='spot' AND timestamp=1000",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let fut_close: f64 = conn
+            .query_row(
+                "SELECT close FROM candles WHERE market='futures' AND timestamp=1000",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(spot_close, 100.0);
         assert_eq!(fut_close, 101.0);
 
         // user_version damgalandı.
-        let uv: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let uv: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(uv, CANDLE_SCHEMA_VERSION);
     }
 
@@ -564,7 +1034,9 @@ mod migration_tests {
         super::migrate_candle_schema(&conn).unwrap();
         // İkinci çağrı no-op (uv>=2) — panik/hata yok.
         super::migrate_candle_schema(&conn).unwrap();
-        let uv: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let uv: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(uv, CANDLE_SCHEMA_VERSION);
     }
 
@@ -572,14 +1044,18 @@ mod migration_tests {
     fn migration_preserves_existing_rows() {
         let conn = setup_old_schema();
         // Migrasyon ÖNCESİ düz INSERT (geniş-key ON CONFLICT index'i henüz yok).
-        let ins_plain = |ts: i64, close: f64| conn.execute(
+        let ins_plain = |ts: i64, close: f64| {
+            conn.execute(
             "INSERT INTO candles (exchange, market, symbol, interval, timestamp, open, high, low, close, volume) \
              VALUES ('binance','spot','BTCUSDT','1h', ?1, ?2, ?2, ?2, ?2, 1.0)",
-            params![ts, close]).unwrap();
+            params![ts, close]).unwrap()
+        };
         ins_plain(2000, 50.0);
         ins_plain(3000, 51.0);
         super::migrate_candle_schema(&conn).unwrap();
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM candles", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM candles", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 2, "mevcut satırlar korunmalı (index swap kayıpsız)");
     }
 
@@ -600,15 +1076,29 @@ mod migration_tests {
         super::migrate_candle_schema(&conn).unwrap();
 
         // Ölü tablolar gitti.
-        for t in ["candles_backup", "candles_binance_spot", "candles_btcusdt_1m"] {
-            assert!(!super::table_exists(&conn, t).unwrap(), "{t} düşürülmeliydi");
+        for t in [
+            "candles_backup",
+            "candles_binance_spot",
+            "candles_btcusdt_1m",
+        ] {
+            assert!(
+                !super::table_exists(&conn, t).unwrap(),
+                "{t} düşürülmeliydi"
+            );
         }
         // Kanonik veri + listede olmayan tablo korundu.
-        assert!(super::table_exists(&conn, "keep_me").unwrap(), "listede olmayan tablo korunmalı");
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM candles", [], |r| r.get(0)).unwrap();
+        assert!(
+            super::table_exists(&conn, "keep_me").unwrap(),
+            "listede olmayan tablo korunmalı"
+        );
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM candles", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1, "kanonik candles satırı korunmalı");
-        let uv: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(uv, 3, "v3 damgalanmalı");
+        let uv: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv, CANDLE_SCHEMA_VERSION, "kanonik sürüme damgalanmalı");
     }
 
     #[test]
@@ -617,8 +1107,10 @@ mod migration_tests {
         let conn = setup_old_schema();
         conn.pragma_update(None, "user_version", 2i64).unwrap();
         super::migrate_candle_schema(&conn).unwrap();
-        let uv: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(uv, 3);
+        let uv: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv, CANDLE_SCHEMA_VERSION);
         // İkinci çağrı tam no-op.
         super::migrate_candle_schema(&conn).unwrap();
     }

@@ -1,5 +1,10 @@
 [workspace]
 members = [
+    "memos_quant",
+    "memos_venue_api",
+    "memos_market_ibkr",
+    "memos_market_mt5",
+    "memos_market_binance",
     "memos_trading_core",
     "interfaces/rtc_tui",
     "interfaces/rtc_headless",
@@ -19,5 +24,16 @@ tokio = { version = "1.36", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 anyhow = "1.0"
 memos_trading_core = { path = "./memos_trading_core" }
+memos_venue_api = { path = "./memos_venue_api" }
+memos_quant = { path = "./memos_quant" }
+memos_market_ibkr = { path = "./memos_market_ibkr" }
+memos_market_mt5 = { path = "./memos_market_mt5" }
+memos_market_binance = { path = "./memos_market_binance" }
+pyo3 = { version = "0.29.1", features = ["auto-initialize"] }
+jsonwebtoken = "9"
+
+#prost = "0.12"          # Google Protobuf çözücü kütüphane
+#tomlrumqttc = "0.24"         # Rust için en popüler, asenkron MQTT istemcisi

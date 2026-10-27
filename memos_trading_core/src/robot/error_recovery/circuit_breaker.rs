@@ -4,7 +4,7 @@
 // ve belirli bir süre sonra kurtarmaya çalış (halfopen state)
 
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -28,14 +28,9 @@ pub enum CircuitBreakerError {
         retry_after_secs: u64,
     },
     /// Threshold aşıldı
-    ThresholdExceeded {
-        error_rate: f64,
-        threshold: f64,
-    },
+    ThresholdExceeded { error_rate: f64, threshold: f64 },
     /// HalfOpen durumunda başarısız deneme
-    TestFailed {
-        message: String,
-    },
+    TestFailed { message: String },
 }
 
 /// Circuit Breaker Konfigürasyonu
@@ -43,16 +38,16 @@ pub enum CircuitBreakerError {
 pub struct CircuitBreakerConfig {
     /// Hata oranı threshold'u (0.0 - 1.0, örnek: 0.5 = %50)
     pub failure_threshold: f64,
-    
+
     /// Threshold'u kontrol etmek için minimum istekler
     pub failure_count_threshold: u32,
-    
+
     /// Open durumda kalmış olunacak süre (saniye)
     pub timeout_secs: u64,
-    
+
     /// HalfOpen durumunda başarılı olması gereken test sayısı
     pub success_count_to_close: u32,
-    
+
     /// Gözlem penceresi (saniye) - bu sürede ki hataları saymak
     pub sliding_window_secs: u64,
 }
@@ -60,11 +55,11 @@ pub struct CircuitBreakerConfig {
 impl Default for CircuitBreakerConfig {
     fn default() -> Self {
         Self {
-            failure_threshold: 0.5,      // %50 hata oranında aç
-            failure_count_threshold: 5,  // En az 5 hata gerekli
-            timeout_secs: 60,            // 1 dakika sonra test et
-            success_count_to_close: 3,   // 3 başarılı test sonra kapat
-            sliding_window_secs: 300,    // 5 dakikalık window
+            failure_threshold: 0.5,     // %50 hata oranında aç
+            failure_count_threshold: 5, // En az 5 hata gerekli
+            timeout_secs: 60,           // 1 dakika sonra test et
+            success_count_to_close: 3,  // 3 başarılı test sonra kapat
+            sliding_window_secs: 300,   // 5 dakikalık window
         }
     }
 }
@@ -73,15 +68,15 @@ impl Default for CircuitBreakerConfig {
 pub struct CircuitBreaker {
     state: CircuitBreakerState,
     config: CircuitBreakerConfig,
-    
+
     // Hata sayaçları
     total_requests: Arc<AtomicU32>,
     failed_requests: Arc<AtomicU32>,
-    
+
     // Zaman takibi
     last_open_time: Option<DateTime<Utc>>,
     last_state_change: DateTime<Utc>,
-    
+
     // HalfOpen durumunda test sayaçları
     half_open_success_count: u32,
 }
@@ -133,7 +128,7 @@ impl CircuitBreaker {
                     } else {
                         Err(CircuitBreakerError::CircuitOpen {
                             message: "Circuit breaker is open".to_string(),
-                            retry_after_secs: self.config.timeout_secs 
+                            retry_after_secs: self.config.timeout_secs
                                 - elapsed.num_seconds() as u64,
                         })
                     }
@@ -144,7 +139,7 @@ impl CircuitBreaker {
             CircuitBreakerState::HalfOpen => {
                 // Test başarılı, sayaç arttır
                 self.half_open_success_count += 1;
-                
+
                 if self.half_open_success_count >= self.config.success_count_to_close {
                     // Circuit kapat
                     self.state = CircuitBreakerState::Closed;
@@ -180,7 +175,7 @@ impl CircuitBreaker {
                 self.last_open_time = Some(Utc::now());
                 self.last_state_change = Utc::now();
                 self.half_open_success_count = 0;
-                
+
                 Err(CircuitBreakerError::TestFailed {
                     message: "Test failed in half-open state".to_string(),
                 })
@@ -290,7 +285,7 @@ mod tests {
         let config = CircuitBreakerConfig {
             failure_threshold: 0.5,
             failure_count_threshold: 2,
-            timeout_secs: 0,  // Hemen timeout
+            timeout_secs: 0, // Hemen timeout
             success_count_to_close: 2,
             sliding_window_secs: 300,
         };
@@ -305,7 +300,7 @@ mod tests {
         // Simülasyon: timeout'u başarı kaydederek geç
         std::thread::sleep(std::time::Duration::from_millis(10));
         let _ = breaker.record_success();
-        
+
         // HalfOpen veya Closed olmalı
         assert!(breaker.state() != CircuitBreakerState::Open);
     }

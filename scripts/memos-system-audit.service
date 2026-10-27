@@ -1,0 +1,9 @@
+[Unit]
+Description=Memos consolidated system audit
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/memos/PycharmProjects/memos_trading_refactor
+ExecStart=/usr/bin/python3 /home/memos/PycharmProjects/memos_trading_refactor/scripts/system_audit.py --notify --output /home/memos/PycharmProjects/memos_trading_refactor/data/system_audit.json

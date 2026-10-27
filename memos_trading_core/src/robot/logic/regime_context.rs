@@ -14,10 +14,12 @@
 // Böylece regime üretimi cycle'dan ayrışır; ileride ONNX eklemek = yeni bir
 // RegimeDetector kolu (Engine'e ya da hot-path'e dokunmadan).
 
-use std::collections::HashMap;
 use crate::core::types::Candle;
 use crate::evolution::MarketRegime;
-use crate::robot::logic::market_regime::{classify_market_regime, compute_adx_from_candles, compute_atr_pct};
+use crate::robot::logic::market_regime::{
+    classify_market_regime, compute_adx_from_candles, compute_atr_pct,
+};
+use std::collections::HashMap;
 
 /// Bir sembol için üretilmiş rejim bağlamı (cache değeri).
 #[derive(Debug, Clone)]
@@ -60,7 +62,9 @@ impl RegimeDetector for MathRegimeDetector {
     fn detect(&self, candles: &[Candle]) -> MarketRegime {
         classify_market_regime(candles)
     }
-    fn name(&self) -> &'static str { "math" }
+    fn name(&self) -> &'static str {
+        "math"
+    }
 }
 
 /// Aktif rejim dedektörünü döndürür. `default_registry()` deseninin rejim karşılığı:
@@ -97,11 +101,20 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     fn candles(closes: &[f64]) -> Vec<Candle> {
-        closes.iter().enumerate().map(|(i, &c)| Candle {
-            timestamp: Utc.timestamp_opt(1_700_000_000 + i as i64 * 60, 0).unwrap(),
-            open: c, high: c * 1.01, low: c * 0.99, close: c,
-            volume: 1.0, symbol: "T".into(), interval: "1m".into(),
-        }).collect()
+        closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| Candle {
+                timestamp: Utc.timestamp_opt(1_700_000_000 + i as i64 * 60, 0).unwrap(),
+                open: c,
+                high: c * 1.01,
+                low: c * 0.99,
+                close: c,
+                volume: 1.0,
+                symbol: "T".into(),
+                interval: "1m".into(),
+            })
+            .collect()
     }
 
     #[test]
@@ -116,12 +129,19 @@ mod tests {
     #[test]
     fn is_fresh_respects_ttl() {
         let ctx = RegimeContext {
-            regime: MarketRegime::Ranging, adx: 20.0, atr_pct: 1.0,
-            source_interval: "4h".into(), computed_at_ms: 1_000, detector: "math",
+            regime: MarketRegime::Ranging,
+            adx: 20.0,
+            atr_pct: 1.0,
+            source_interval: "4h".into(),
+            computed_at_ms: 1_000,
+            detector: "math",
         };
         assert!(ctx.is_fresh(1_500, 1_000), "Δ500 < ttl1000 → taze");
         assert!(!ctx.is_fresh(2_500, 1_000), "Δ1500 ≥ ttl1000 → bayat");
-        assert!(!ctx.is_fresh(1_000, 0), "ttl=0 → asla taze (legacy per-cycle)");
+        assert!(
+            !ctx.is_fresh(1_000, 0),
+            "ttl=0 → asla taze (legacy per-cycle)"
+        );
     }
 
     #[test]

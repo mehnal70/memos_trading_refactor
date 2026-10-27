@@ -1,0 +1,16 @@
+[package]
+name = "memos_quant"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# PAYLAŞILAN ALGORİTMA KATMANI — piyasa-agnostik, hiç kopyalanmaz.
+# Katman kuralı: memos_venue_api'ye bağımlıdır; memos_trading_core'a ASLA.
+[dependencies]
+memos_venue_api.workspace = true
+serde.workspace = true
+chrono.workspace = true
+log = "0.4.29"
+itertools = "0.12"

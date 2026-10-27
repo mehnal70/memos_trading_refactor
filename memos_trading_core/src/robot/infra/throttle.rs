@@ -57,7 +57,10 @@ mod tests {
     fn ilk_emit_gecer_tekrar_yutulur() {
         let t = Throttle::new();
         assert!(t.should_emit("a|b", 60), "ilk geçiş emit etmeli");
-        assert!(!t.should_emit("a|b", 60), "cooldown içinde tekrar yutulmalı");
+        assert!(
+            !t.should_emit("a|b", 60),
+            "cooldown içinde tekrar yutulmalı"
+        );
     }
 
     #[test]

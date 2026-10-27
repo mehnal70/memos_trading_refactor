@@ -30,16 +30,16 @@ cd "$REPO_DIR"
 # (watchdog.sh ile aynı tek-kaynak desen). [[project_profiles]]
 # shellcheck source=scripts/lib_launchconf.sh
 . "$REPO_DIR/scripts/lib_launchconf.sh" 2>/dev/null \
-    && load_launch_conf "$REPO_DIR/scripts/.launch.conf" 2>/dev/null || true
+    && load_launch_conf "${RTC_LAUNCH_CONF:-$REPO_DIR/scripts/.launch.conf}" 2>/dev/null || true
 
-PID_FILE="logs/.engine.pid"
-STDOUT_LOG="logs/engine_stdout.log"
-STDERR_LOG="logs/engine_stderr.log"
+PID_FILE="${ENGINE_PID_PATH:-logs/.engine.pid}"
+STDOUT_LOG="${ENGINE_STDOUT_PATH:-logs/engine_stdout.log}"
+STDERR_LOG="${ENGINE_STDERR_PATH:-logs/engine_stderr.log}"
 HEARTBEAT_LOG="${HEARTBEAT_PATH:-logs/heartbeat.jsonl}"
 TRADES_LOG="${TRADES_LOG_PATH:-logs/trades.jsonl}"
 ROBOTIC_LOG="${TRADING_LOG_PATH:-logs/robotic_trading.log}"
 
-mkdir -p logs
+mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$STDOUT_LOG")" "$(dirname "$STDERR_LOG")"
 
 # ─── yardımcılar ─────────────────────────────────────────────────────────────
 

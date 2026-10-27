@@ -1,11 +1,11 @@
 // src/robot/state/types.rs - Sistem Durum Sözleşmeleri
 // Srivastava ATP - Saf Veri Yapıları Katmanı
 
-use serde::{Serialize, Deserialize};
-use chrono::{DateTime, Utc};
-use std::collections::HashMap;
-use crate::core::types::Market;
 use crate::core::model::PositionModel;
+use crate::core::types::Market;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Sembol → açık pozisyon eşleme (SymbolOrchestrator ile FinanceVault paylaşır).
 pub type LivePositionMap = HashMap<String, PositionModel>;
@@ -13,8 +13,8 @@ pub type LivePositionMap = HashMap<String, PositionModel>;
 /// Tek sembol için canlı fiyat snapshot'ı (worker'ların ortak yazdığı).
 #[derive(Debug, Clone, Default)]
 pub struct LivePriceData {
-    pub symbol:     String,
-    pub close:      f64,
+    pub symbol: String,
+    pub close: f64,
     pub change_pct: f64,
 }
 
@@ -32,15 +32,20 @@ pub struct SystemStatistics {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SystemStatus { Initializing, Running, Paused, Halted }
+pub enum SystemStatus {
+    Initializing,
+    Running,
+    Paused,
+    Halted,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PositionStatus {
-    Open,               
-    Closed,             
-    Pending,            
-    LiquidationWarning, 
-    ManualExitRequired, 
+    Open,
+    Closed,
+    Pending,
+    LiquidationWarning,
+    ManualExitRequired,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

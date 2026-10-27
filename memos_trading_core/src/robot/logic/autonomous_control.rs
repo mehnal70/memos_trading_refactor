@@ -1,6 +1,8 @@
-use std::fmt;
-use crate::evolution::{AdaptiveBrain, PopulationManager, GeneticParams, StrategyGenome, MarketRegime};
 use crate::evolution::strategy_genome::SelectionMethod;
+use crate::evolution::{
+    AdaptiveBrain, GeneticParams, MarketRegime, PopulationManager, StrategyGenome,
+};
+use std::fmt;
 
 /// AutonomousControllerConfig: Otonom kontrolcünün çalışma kuralları.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -19,7 +21,7 @@ impl Default for AutonomousControllerConfig {
     fn default() -> Self {
         Self {
             evolution_enabled: true,
-            evolve_every_n_cycles: 24, 
+            evolve_every_n_cycles: 24,
             failure_threshold: 5,
             initial_state: AutonomousState::Observe,
         }
@@ -86,7 +88,7 @@ pub struct AutonomousController {
     pub consecutive_failures: usize,
     pub config: AutonomousConfig,
     safe_mode_until_cycle: Option<u64>,
-    
+
     // 🧬 Evrimsel AI Bileşenleri
     pub adaptive_brain: Option<AdaptiveBrain>,
     pub population_manager: Option<PopulationManager>,
@@ -110,11 +112,11 @@ impl AutonomousController {
             evolve_every_n_cycles: 50, // Her 50 cycle'da bir evrimleşir
         }
     }
-    
+
     /// Evrimsel AI'yi aktifleştir
     pub fn enable_evolution(&mut self, strategy_type: String) {
         self.adaptive_brain = Some(AdaptiveBrain::new());
-        
+
         let genetic_params = GeneticParams {
             population_size: 15,
             mutation_rate: 0.2,
@@ -124,116 +126,146 @@ impl AutonomousController {
             elitism_count: 3,
             crossover_rate: 0.7,
         };
-        
+
         self.population_manager = Some(PopulationManager::new(strategy_type, genetic_params));
         self.evolution_enabled = true;
-        
+
         // İlk stratejiyi seç
         if let Some(pm) = &self.population_manager {
             self.current_strategy_genome = pm.get_best_strategy().cloned();
         }
     }
-    
+
     /// Piyasa rejimini tespit et ve strateji seç
-    pub fn detect_and_select_strategy(&mut self, closes: &[f64], volumes: &[f64]) -> Option<String> {
+    pub fn detect_and_select_strategy(
+        &mut self,
+        closes: &[f64],
+        volumes: &[f64],
+    ) -> Option<String> {
         if !self.evolution_enabled {
             return None;
         }
-        
+
         // Adaptive brain ile piyasa rejimini tespit et
         if let Some(brain) = &mut self.adaptive_brain {
             let _regime = brain.detect_market_regime(closes, volumes);
-            
+
             // Mevcut popülasyondan stratejileri al
             if let Some(pm) = &self.population_manager {
-                let strategies: Vec<String> = pm.current_population
+                let strategies: Vec<String> = pm
+                    .current_population
                     .iter()
                     .map(|g| g.strategy_type.clone())
                     .collect();
-                
+
                 if !strategies.is_empty() {
                     let selected = brain.select_strategy(&strategies);
                     return Some(selected);
                 }
             }
         }
-        
+
         None
     }
-    
+
     /// Trade sonucundan öğren
     pub fn learn_from_trade(&mut self, pnl_pct: f64, regime: &MarketRegime, strategy_used: &str) {
         if !self.evolution_enabled {
             return;
         }
-        
+
         // Adaptive brain öğrensin
         if let Some(brain) = &mut self.adaptive_brain {
             brain.learn_from_trade(*regime, strategy_used, pnl_pct);
         }
-        
+
         // Mevcut genomun performansını güncelle
         if let Some(genome) = &mut self.current_strategy_genome {
             genome.trade_count += 1;
             genome.total_pnl_pct += pnl_pct;
-            
+
             if pnl_pct > 0.0 {
-                genome.win_rate = ((genome.win_rate * (genome.trade_count - 1) as f64) + 100.0) / genome.trade_count as f64;
+                genome.win_rate = ((genome.win_rate * (genome.trade_count - 1) as f64) + 100.0)
+                    / genome.trade_count as f64;
             } else {
-                genome.win_rate = (genome.win_rate * (genome.trade_count - 1) as f64) / genome.trade_count as f64;
+                genome.win_rate =
+                    (genome.win_rate * (genome.trade_count - 1) as f64) / genome.trade_count as f64;
             }
-            
+
             genome.survival_cycles = self.cycle_id as u32;
             genome.calculate_fitness();
         }
     }
-    
+
     /// Evrimleşme zamanı geldi mi kontrol et.
     ///
     /// Ek şart: mevcut genomun en az `MIN_GENOME_TRADES` işlem görmüş olması gerekir.
     /// Daha az işlemle hesaplanan fitness istatistiksel olarak güvenilmez.
     pub fn should_evolve(&self) -> bool {
         const MIN_GENOME_TRADES: usize = 10;
-        if !self.evolution_enabled { return false; }
-        if self.cycle_id == 0 || !self.cycle_id.is_multiple_of(self.evolve_every_n_cycles) { return false; }
+        if !self.evolution_enabled {
+            return false;
+        }
+        if self.cycle_id == 0 || !self.cycle_id.is_multiple_of(self.evolve_every_n_cycles) {
+            return false;
+        }
         // Yeterli işlem görülmeden evrimleşme — fitness güvenilir değil
-        let genome_trades = self.current_strategy_genome.as_ref()
+        let genome_trades = self
+            .current_strategy_genome
+            .as_ref()
             .map(|g| g.trade_count)
             .unwrap_or(0);
         genome_trades >= MIN_GENOME_TRADES
     }
-    
+
     /// Yeni nesil oluştur (evrim adımı)
     pub fn evolve_population(&mut self) {
         if let Some(pm) = &mut self.population_manager {
             pm.evolve_next_generation();
-            
+
             // Yeni neslin en iyisini seç
             self.current_strategy_genome = pm.get_best_strategy().cloned();
-            
+
             // TUI modunda stdout'a yazma — logger üzerinden geliyor
-            let _ = (pm.get_summary(), self.adaptive_brain.as_ref().map(|b| b.get_summary()).unwrap_or_default());
+            let _ = (
+                pm.get_summary(),
+                self.adaptive_brain
+                    .as_ref()
+                    .map(|b| b.get_summary())
+                    .unwrap_or_default(),
+            );
         }
     }
-    
+
     /// Evrimsel AI durumu özeti
     pub fn get_evolution_summary(&self) -> String {
         if !self.evolution_enabled {
             return "Evolution: Disabled".to_string();
         }
-        
-        let brain_status = self.adaptive_brain.as_ref()
+
+        let brain_status = self
+            .adaptive_brain
+            .as_ref()
             .map(|b| format!("Brain: {}", b.get_summary()))
             .unwrap_or_else(|| "Brain: N/A".to_string());
-        
-        let pop_status = self.population_manager.as_ref()
+
+        let pop_status = self
+            .population_manager
+            .as_ref()
             .map(|pm| format!("Pop: {}", pm.get_summary()))
             .unwrap_or_else(|| "Pop: N/A".to_string());
-        
-        let genome_status = self.current_strategy_genome.as_ref()
-            .map(|g| format!("Current: {} (fitness={:.1}, trades={})", g.id, g.fitness, g.trade_count))
+
+        let genome_status = self
+            .current_strategy_genome
+            .as_ref()
+            .map(|g| {
+                format!(
+                    "Current: {} (fitness={:.1}, trades={})",
+                    g.id, g.fitness, g.trade_count
+                )
+            })
             .unwrap_or_else(|| "Current: None".to_string());
-        
+
         format!("{} | {} | {}", brain_status, pop_status, genome_status)
     }
 
@@ -289,7 +321,8 @@ impl AutonomousController {
 
         if self.consecutive_failures >= self.config.max_failures_before_safe_mode {
             self.state = AutonomousState::SafeMode;
-            self.safe_mode_until_cycle = Some(self.cycle_id + self.config.safe_mode_cooldown_cycles);
+            self.safe_mode_until_cycle =
+                Some(self.cycle_id + self.config.safe_mode_cooldown_cycles);
             return AutonomousTransition {
                 from,
                 to: AutonomousState::SafeMode,

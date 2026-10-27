@@ -6,6 +6,8 @@
 # nokta — aksi halde daemon binary'i çıplak koşar ve XS/graded/rejim ayarları sessizce kapanırdı
 # ([[project_daemon_env_pending]] kökü). BUILD_MODE/TARGET build-meta'dır → runtime env değil, atlanır.
 # Satır-satır okunur (keyfi bash eval YOK) → conf değerleri güvenle export edilir.
+# .launch.conf içindeki boş değerler, önceki profilin aynı değişkenini temizler;
+# böylece profil değişiminde AUTO_* gibi ayarlar eski ortamdan sızmaz.
 #
 # Kullanım:  . scripts/lib_launchconf.sh ; load_launch_conf [conf_yolu]
 load_launch_conf() {
@@ -18,6 +20,10 @@ load_launch_conf() {
       \#*) continue ;;                # yorum satırı
       BUILD_MODE|TARGET) continue ;;  # build-meta, runtime env değil
     esac
-    [ -n "${v:-}" ] && export "$k=$v"
+    if [ -n "${v:-}" ]; then
+      export "$k=$v"
+    elif [[ "$conf" == "scripts/.launch.conf" || "$conf" == */scripts/.launch.conf ]]; then
+      unset "$k"
+    fi
   done < "$conf"
 }

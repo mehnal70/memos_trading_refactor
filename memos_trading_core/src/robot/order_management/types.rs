@@ -1,19 +1,23 @@
 // Order Management System - Tip Tanımları
-// 
+//
 // Srivastava mimarisi: OMS katmanında standardize tip tanımları
 // Forex/Crypto/Stocks hepsi aynı interface'i kullanacak
 
-
 // robot/order_management/types.rs - Otonom Emir ve İnfaz Veri Modeli
 
-use serde::{Serialize, Deserialize};
-use crate::core::model::{OrderId};
+use crate::core::model::OrderId;
+use serde::{Deserialize, Serialize};
 //use crate::core::model::Order;
 
 // --- 4. SLIPPAGE VE RETRY POLİTİKALARI ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SlippageLevel { Low, Medium, High, Critical }
+pub enum SlippageLevel {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlippageInfo {
@@ -33,13 +37,19 @@ pub struct RetryPolicy {
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        Self { max_retries: 3, initial_delay_ms: 100, backoff_multiplier: 2.0, max_delay_ms: 5000 }
+        Self {
+            max_retries: 3,
+            initial_delay_ms: 100,
+            backoff_multiplier: 2.0,
+            max_delay_ms: 5000,
+        }
     }
 }
 
 impl RetryPolicy {
     pub fn get_delay_for_attempt(&self, attempt: u32) -> u64 {
-        let delay = (self.initial_delay_ms as f64 * self.backoff_multiplier.powi(attempt as i32)) as u64;
+        let delay =
+            (self.initial_delay_ms as f64 * self.backoff_multiplier.powi(attempt as i32)) as u64;
         delay.min(self.max_delay_ms)
     }
 }
@@ -68,4 +78,3 @@ impl PartialFillInfo {
         self.filled_quantity * self.fill_price
     }
 }
-

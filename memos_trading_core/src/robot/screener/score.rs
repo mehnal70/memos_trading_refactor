@@ -13,7 +13,7 @@
 
 use crate::core::indicators::CoreIndicatorEngine;
 use crate::core::types::Candle;
-use crate::robot::backtester::{Backtester, BacktestConfig};
+use crate::robot::backtester::{BacktestConfig, Backtester};
 
 /// Screener HTF trend tanımı — sinyal yolundaki `htf_trend_filter` ile aynı
 /// SMA(10)/SMA(30). Tek kaynak: değişirse seçim ve sinyal yolları birlikte
@@ -70,16 +70,16 @@ pub fn htf_bias_adjustment(bias: HtfBias, delta: f64) -> f64 {
 /// likitite/volatilite alanları diagnostik amaçlı tutulur.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScreenerScore {
-    pub avg_volume:  f64, // son N mumun ortalama volume'u
-    pub atr_pct:     f64, // ATR% (volatilite proxy)
-    pub sharpe:      f64, // backtest sharpe (skor bileşeni)
-    pub win_rate:    f64, // backtest win rate (%)
-    pub max_dd_pct:  f64, // backtest max drawdown (%)
-    pub trades:      usize,
-    pub htf_bias:    HtfBias, // seçim anındaki üst-TF hizası (telemetri + sıralama izi)
-    pub edge_bonus:  f64, // WF-onaylı edge bonusu (symbol_strategy üyesi → composite'e additif)
+    pub avg_volume: f64, // son N mumun ortalama volume'u
+    pub atr_pct: f64,    // ATR% (volatilite proxy)
+    pub sharpe: f64,     // backtest sharpe (skor bileşeni)
+    pub win_rate: f64,   // backtest win rate (%)
+    pub max_dd_pct: f64, // backtest max drawdown (%)
+    pub trades: usize,
+    pub htf_bias: HtfBias, // seçim anındaki üst-TF hizası (telemetri + sıralama izi)
+    pub edge_bonus: f64,   // WF-onaylı edge bonusu (symbol_strategy üyesi → composite'e additif)
     pub base_composite: f64, // HTF/edge bonusu ÖNCESİ saf backtest kalitesi (edge tabanı buna bakar)
-    pub composite:   f64, // sıralama anahtarı (HTF + edge ayarlı); yüksek = iyi
+    pub composite: f64,      // sıralama anahtarı (HTF + edge ayarlı); yüksek = iyi
 }
 
 impl ScreenerScore {
@@ -89,10 +89,16 @@ impl ScreenerScore {
     /// (0 işlemli bir sembol HTF boğa diye seçime itilmemeli).
     pub fn empty(avg_volume: f64, atr_pct: f64) -> Self {
         Self {
-            avg_volume, atr_pct,
-            sharpe: 0.0, win_rate: 0.0, max_dd_pct: 0.0,
-            trades: 0, htf_bias: HtfBias::Neutral, edge_bonus: 0.0,
-            base_composite: 0.0, composite: 0.0,
+            avg_volume,
+            atr_pct,
+            sharpe: 0.0,
+            win_rate: 0.0,
+            max_dd_pct: 0.0,
+            trades: 0,
+            htf_bias: HtfBias::Neutral,
+            edge_bonus: 0.0,
+            base_composite: 0.0,
+            composite: 0.0,
         }
     }
 }
@@ -157,7 +163,8 @@ pub fn score_symbol(
     let bias = htf_bias(htf, HTF_BIAS_FAST, HTF_BIAS_SLOW);
     let composite = base + htf_bias_adjustment(bias, htf_bias_delta) + edge_bonus;
     ScreenerScore {
-        avg_volume, atr_pct,
+        avg_volume,
+        atr_pct,
         sharpe: res.sharpe_ratio,
         win_rate: res.win_rate,
         max_dd_pct: res.max_drawdown_pct,
@@ -179,19 +186,25 @@ fn composite_score(sharpe: f64, win_rate_pct: f64, dd_pct: f64) -> f64 {
 
 fn compute_atr_pct(candles: &[Candle]) -> f64 {
     let n = candles.len();
-    if n < 15 { return 0.0; }
+    if n < 15 {
+        return 0.0;
+    }
     let last = &candles[n.saturating_sub(14)..];
     let mut sum_tr = 0.0;
     for w in last.windows(2) {
         let (prev, cur) = (&w[0], &w[1]);
         let h_l = cur.high - cur.low;
         let h_pc = (cur.high - prev.close).abs();
-        let l_pc = (cur.low  - prev.close).abs();
+        let l_pc = (cur.low - prev.close).abs();
         sum_tr += h_l.max(h_pc).max(l_pc);
     }
     let atr = sum_tr / (last.len() - 1).max(1) as f64;
     let last_close = candles.last().map(|c| c.close).unwrap_or(0.0);
-    if last_close <= 0.0 { 0.0 } else { atr / last_close * 100.0 }
+    if last_close <= 0.0 {
+        0.0
+    } else {
+        atr / last_close * 100.0
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -202,9 +215,9 @@ fn compute_atr_pct(candles: &[Candle]) -> f64 {
 /// `to_add` register edilecek, `to_remove` stop_symbol ile düşürülecek.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectionDiff {
-    pub to_add:    Vec<String>,
+    pub to_add: Vec<String>,
     pub to_remove: Vec<String>,
-    pub selected:  Vec<String>, // Diff sonrası nihai liste (telemetri için).
+    pub selected: Vec<String>, // Diff sonrası nihai liste (telemetri için).
 }
 
 /// Skorlu aday listesinden orchestrator'a uygulanacak delta hesapla.
@@ -236,7 +249,9 @@ pub fn select_top_n_diff(
 
     // 1) Pinned'i öne koy (max_workers'ı aşmadan; edge tabanından MUAF).
     for p in pinned {
-        if selected.len() >= cap { break; }
+        if selected.len() >= cap {
+            break;
+        }
         if !selected.iter().any(|s| s == p) {
             selected.push(p.clone());
         }
@@ -246,24 +261,34 @@ pub fn select_top_n_diff(
     //    (base_composite) tabanı geçmeli VE sharpe>0 olmalı — yoksa atla. pinned ile dup atla.
     let gate = min_score > 0.0; // 0 → kapalı (sıfır regresyon)
     for (name, sc) in scored {
-        if selected.len() >= cap { break; }
-        if gate && (sc.sharpe <= 0.0 || sc.base_composite < min_score) { continue; }
+        if selected.len() >= cap {
+            break;
+        }
+        if gate && (sc.sharpe <= 0.0 || sc.base_composite < min_score) {
+            continue;
+        }
         if !selected.iter().any(|s| s == name) {
             selected.push(name.clone());
         }
     }
 
-    let to_add: Vec<String> = selected.iter()
+    let to_add: Vec<String> = selected
+        .iter()
         .filter(|s| !current_workers.iter().any(|c| c == *s))
         .cloned()
         .collect();
     let pinned_set: std::collections::HashSet<&String> = pinned.iter().collect();
-    let to_remove: Vec<String> = current_workers.iter()
+    let to_remove: Vec<String> = current_workers
+        .iter()
         .filter(|c| !selected.iter().any(|s| s == *c) && !pinned_set.contains(*c))
         .cloned()
         .collect();
 
-    SelectionDiff { to_add, to_remove, selected }
+    SelectionDiff {
+        to_add,
+        to_remove,
+        selected,
+    }
 }
 
 #[cfg(test)]
@@ -271,10 +296,17 @@ mod tests {
     use super::*;
 
     fn cs(closes: &[f64], vol: f64) -> Vec<Candle> {
-        closes.iter().map(|&c| Candle {
-            open: c, high: c + 0.5, low: c - 0.5, close: c, volume: vol,
-            ..Default::default()
-        }).collect()
+        closes
+            .iter()
+            .map(|&c| Candle {
+                open: c,
+                high: c + 0.5,
+                low: c - 0.5,
+                close: c,
+                volume: vol,
+                ..Default::default()
+            })
+            .collect()
     }
 
     // ── score_symbol ────────────────────────────────────────────────────
@@ -299,14 +331,16 @@ mod tests {
 
     #[test]
     fn score_is_deterministic_on_same_input() {
-        let c: Vec<Candle> = (0..200).map(|i| Candle {
-            open: 100.0 + (i as f64) * 0.5,
-            high: 100.5 + (i as f64) * 0.5,
-            low:  99.5  + (i as f64) * 0.5,
-            close: 100.0 + (i as f64) * 0.5,
-            volume: 100.0,
-            ..Default::default()
-        }).collect();
+        let c: Vec<Candle> = (0..200)
+            .map(|i| Candle {
+                open: 100.0 + (i as f64) * 0.5,
+                high: 100.5 + (i as f64) * 0.5,
+                low: 99.5 + (i as f64) * 0.5,
+                close: 100.0 + (i as f64) * 0.5,
+                volume: 100.0,
+                ..Default::default()
+            })
+            .collect();
         let a = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0, 0.0);
         let b = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0, 0.0);
         assert_eq!(a, b);
@@ -319,15 +353,27 @@ mod tests {
     fn htf_bias_detects_trend_direction() {
         let up: Vec<Candle> = cs(&(0..60).map(|i| 100.0 + i as f64).collect::<Vec<_>>(), 1.0);
         let down: Vec<Candle> = cs(&(0..60).map(|i| 160.0 - i as f64).collect::<Vec<_>>(), 1.0);
-        assert_eq!(htf_bias(Some(&up), HTF_BIAS_FAST, HTF_BIAS_SLOW), HtfBias::Bullish);
-        assert_eq!(htf_bias(Some(&down), HTF_BIAS_FAST, HTF_BIAS_SLOW), HtfBias::Bearish);
+        assert_eq!(
+            htf_bias(Some(&up), HTF_BIAS_FAST, HTF_BIAS_SLOW),
+            HtfBias::Bullish
+        );
+        assert_eq!(
+            htf_bias(Some(&down), HTF_BIAS_FAST, HTF_BIAS_SLOW),
+            HtfBias::Bearish
+        );
     }
 
     #[test]
     fn htf_bias_neutral_when_insufficient_or_none() {
         let few = cs(&[100.0; 10], 1.0); // slow=30'dan az
-        assert_eq!(htf_bias(Some(&few), HTF_BIAS_FAST, HTF_BIAS_SLOW), HtfBias::Neutral);
-        assert_eq!(htf_bias(None, HTF_BIAS_FAST, HTF_BIAS_SLOW), HtfBias::Neutral);
+        assert_eq!(
+            htf_bias(Some(&few), HTF_BIAS_FAST, HTF_BIAS_SLOW),
+            HtfBias::Neutral
+        );
+        assert_eq!(
+            htf_bias(None, HTF_BIAS_FAST, HTF_BIAS_SLOW),
+            HtfBias::Neutral
+        );
     }
 
     #[test]
@@ -352,10 +398,34 @@ mod tests {
         let down: Vec<Candle> = cs(&(0..60).map(|i| 160.0 - i as f64).collect::<Vec<_>>(), 1.0);
 
         let base = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0, 0.0);
-        assert!(base.trades >= 3, "zig-zag yeterli işlem üretmeli (n={})", base.trades);
+        assert!(
+            base.trades >= 3,
+            "zig-zag yeterli işlem üretmeli (n={})",
+            base.trades
+        );
 
-        let bull = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, Some(&up), 0.3, 0.0);
-        let bear = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, Some(&down), 0.3, 0.0);
+        let bull = score_symbol(
+            &c,
+            "MA_CROSSOVER",
+            4.0,
+            2.0,
+            0.3,
+            10_000.0,
+            Some(&up),
+            0.3,
+            0.0,
+        );
+        let bear = score_symbol(
+            &c,
+            "MA_CROSSOVER",
+            4.0,
+            2.0,
+            0.3,
+            10_000.0,
+            Some(&down),
+            0.3,
+            0.0,
+        );
         assert_eq!(bull.htf_bias, HtfBias::Bullish);
         assert_eq!(bear.htf_bias, HtfBias::Bearish);
         assert!((bull.composite - (base.composite + 0.3)).abs() < 1e-9);
@@ -363,7 +433,17 @@ mod tests {
         assert!(bull.composite > bear.composite);
 
         // delta=0 → HTF verilse bile composite değişmez.
-        let zero = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, Some(&up), 0.0, 0.0);
+        let zero = score_symbol(
+            &c,
+            "MA_CROSSOVER",
+            4.0,
+            2.0,
+            0.3,
+            10_000.0,
+            Some(&up),
+            0.0,
+            0.0,
+        );
         assert!((zero.composite - base.composite).abs() < 1e-9);
     }
 
@@ -387,7 +467,17 @@ mod tests {
         assert!(edged.composite > base.composite);
 
         // HTF bias + edge bonusu BİRLİKTE birikir (additif, bağımsız).
-        let both = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, Some(&up), 0.2, 0.3);
+        let both = score_symbol(
+            &c,
+            "MA_CROSSOVER",
+            4.0,
+            2.0,
+            0.3,
+            10_000.0,
+            Some(&up),
+            0.2,
+            0.3,
+        );
         assert!((both.composite - (base.composite + 0.2 + 0.3)).abs() < 1e-9);
     }
 
@@ -399,7 +489,10 @@ mod tests {
         let s = score_symbol(&c, "MA_CROSSOVER", 4.0, 2.0, 0.3, 10_000.0, None, 0.0, 0.3);
         assert_eq!(s.trades, 0);
         assert_eq!(s.edge_bonus, 0.0, "empty skor edge bonusu taşımaz");
-        assert_eq!(s.composite, 0.0, "edge bonusu 0-işlemli sembolü seçime itmemeli");
+        assert_eq!(
+            s.composite, 0.0,
+            "edge bonusu 0-işlemli sembolü seçime itmemeli"
+        );
     }
 
     // ── composite_score ────────────────────────────────────────────────
@@ -421,20 +514,27 @@ mod tests {
     // ── select_top_n_diff ──────────────────────────────────────────────
 
     fn scored(names: &[&str]) -> Vec<(String, ScreenerScore)> {
-        names.iter().enumerate().map(|(i, n)| {
-            let mut s = ScreenerScore::empty(0.0, 0.0);
-            s.composite = (names.len() - i) as f64;
-            (n.to_string(), s)
-        }).collect()
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let mut s = ScreenerScore::empty(0.0, 0.0);
+                s.composite = (names.len() - i) as f64;
+                (n.to_string(), s)
+            })
+            .collect()
     }
 
     #[test]
     fn diff_adds_new_keeps_pinned_removes_unselected() {
         let current = vec!["BTCUSDT".into(), "ETHUSDT".into(), "OLDCOIN".into()];
-        let pinned  = vec!["BTCUSDT".into()];
+        let pinned = vec!["BTCUSDT".into()];
         let s = scored(&["ETHUSDT", "SOLUSDT", "AVAXUSDT"]);
         let d = select_top_n_diff(&current, &pinned, &s, 3, 16, 0.0);
-        assert_eq!(d.selected, vec!["BTCUSDT".to_string(), "ETHUSDT".into(), "SOLUSDT".into()]);
+        assert_eq!(
+            d.selected,
+            vec!["BTCUSDT".to_string(), "ETHUSDT".into(), "SOLUSDT".into()]
+        );
         assert_eq!(d.to_add, vec!["SOLUSDT".to_string()]);
         assert_eq!(d.to_remove, vec!["OLDCOIN".to_string()]);
     }
@@ -442,7 +542,7 @@ mod tests {
     #[test]
     fn diff_never_removes_pinned_even_if_score_low() {
         let current = vec!["BTCUSDT".into()];
-        let pinned  = vec!["BTCUSDT".into()];
+        let pinned = vec!["BTCUSDT".into()];
         // Hiç skorlu aday yok — pinned tek başına kalmalı, kimse to_remove'a girmemeli.
         let d = select_top_n_diff(&current, &pinned, &[], 5, 16, 0.0);
         assert_eq!(d.selected, vec!["BTCUSDT".to_string()]);
@@ -468,7 +568,10 @@ mod tests {
         let d = select_top_n_diff(&[], &pinned, &s, 3, 16, 0.0);
         // BTC bir kere
         assert_eq!(d.selected.iter().filter(|s| *s == "BTC").count(), 1);
-        assert_eq!(d.selected, vec!["BTC".to_string(), "ETH".into(), "SOL".into()]);
+        assert_eq!(
+            d.selected,
+            vec!["BTC".to_string(), "ETH".into(), "SOL".into()]
+        );
     }
 
     #[test]
@@ -484,7 +587,10 @@ mod tests {
     // Edge tabanı testi için açık skor: (base_composite, sharpe) belirle. composite sıralama için.
     fn sc_bs(name: &str, comp: f64, base: f64, sharpe: f64) -> (String, ScreenerScore) {
         let mut s = ScreenerScore::empty(0.0, 0.0);
-        s.composite = comp; s.base_composite = base; s.sharpe = sharpe; s.trades = 10;
+        s.composite = comp;
+        s.base_composite = base;
+        s.sharpe = sharpe;
+        s.trades = 10;
         (name.to_string(), s)
     }
 
@@ -494,18 +600,25 @@ mod tests {
         // SIREN-tipi: nihai composite yüksek (0.50, HTF şişmesi) ama base 0.30 < taban → ELENİR.
         // BEAT-tipi: composite taban-üstü (edge bonusu) ama sharpe<0 → ELENİR.
         let s = vec![
-            sc_bs("SIREN", 0.50, 0.30, 0.27),  // base düşük → elenmeli
-            sc_bs("BEAT",  0.47, 0.17, -0.24), // neg sharpe → elenmeli
-            sc_bs("GOOD",  0.45, 0.40, 0.60),  // base yüksek + poz sharpe → geçmeli
+            sc_bs("SIREN", 0.50, 0.30, 0.27), // base düşük → elenmeli
+            sc_bs("BEAT", 0.47, 0.17, -0.24), // neg sharpe → elenmeli
+            sc_bs("GOOD", 0.45, 0.40, 0.60),  // base yüksek + poz sharpe → geçmeli
         ];
         let d = select_top_n_diff(&[], &[], &s, 5, 16, 0.35);
-        assert_eq!(d.selected, vec!["GOOD".to_string()], "yalnız base≥taban + sharpe>0 geçer");
+        assert_eq!(
+            d.selected,
+            vec!["GOOD".to_string()],
+            "yalnız base≥taban + sharpe>0 geçer"
+        );
         // min_score=0 → kapı kapalı, hepsi geçer (sıfır regresyon).
         let off = select_top_n_diff(&[], &[], &s, 5, 16, 0.0);
         assert_eq!(off.selected.len(), 3, "taban 0 → kapı kapalı, tümü seçilir");
         // Pinned MUAF: düşük base/neg sharpe pinned yine kalır.
         let dp = select_top_n_diff(&[], &["SIREN".into()], &s, 5, 16, 0.35);
-        assert!(dp.selected.contains(&"SIREN".to_string()), "pinned taban-muaf");
+        assert!(
+            dp.selected.contains(&"SIREN".to_string()),
+            "pinned taban-muaf"
+        );
         assert!(dp.selected.contains(&"GOOD".to_string()));
     }
 }

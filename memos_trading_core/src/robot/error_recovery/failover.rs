@@ -3,7 +3,7 @@
 // Hata durumunda Binance executor'dan Mock executor'a otomatik geçiş
 // Graceful degradation - sistem çalışmaya devam eder
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Executor Türü
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,10 +33,10 @@ pub enum FailoverStrategy {
         /// Fallback executor
         fallback: ExecutorType,
     },
-    
+
     /// Sadece Mock executor kullan (test modu)
     MockOnly,
-    
+
     /// Sadece Binance executor kullan (strict)
     BinanceOnly,
 }
@@ -92,7 +92,7 @@ impl FailoverManager {
     /// Başarılı işlem kaydı
     pub fn record_success(&mut self) {
         self.failure_count = 0;
-        
+
         // Eğer fallback'ta ise, primary'ye geri dön
         if self.state == FailoverState::OnFallback {
             if let FailoverStrategy::PrimaryWithFallback { primary, .. } = self.strategy {
@@ -108,10 +108,7 @@ impl FailoverManager {
         self.failure_count += 1;
 
         match self.strategy {
-            FailoverStrategy::PrimaryWithFallback {
-                primary,
-                fallback,
-            } => {
+            FailoverStrategy::PrimaryWithFallback { primary, fallback } => {
                 if self.current_executor == primary
                     && self.failure_count >= self.max_consecutive_failures
                 {

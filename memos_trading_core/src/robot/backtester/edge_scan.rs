@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::persistence::reader::{list_series, read_candles_market, CandleSeriesRef};
-use crate::robot::backtester::{Backtester, BacktestConfig, ParameterOptimizer, WfCrossCheck};
+use crate::robot::backtester::{BacktestConfig, Backtester, ParameterOptimizer, WfCrossCheck};
 use crate::robot::data_pipeline::CandleHealth;
 use crate::robot::parameters::window_noise_floor_pct;
 use crate::robot::strategies::default_registry;
@@ -80,8 +80,8 @@ impl Default for EdgeScanConfig {
             breakeven_rr: 1.0,
             holdout_is_pct: 70,
             min_trades: 10,
-            min_rows: 400,      // holdout(%70)+OOS(%30) anlamlı olsun
-            max_gap_pct: 50.0,  // çok-gappy seri taramaya değmez
+            min_rows: 400,     // holdout(%70)+OOS(%30) anlamlı olsun
+            max_gap_pct: 50.0, // çok-gappy seri taramaya değmez
             max_series: 300,
             tp_grid: (2.0, 6.0, 2.0),
             sl_grid: (1.0, 3.0, 1.0),
@@ -90,9 +90,9 @@ impl Default for EdgeScanConfig {
             wf_is: 300,
             wf_oos: 100,
             wf_step: 100,
-            wf_min_consistency: 0.5,  // pencerelerin en az yarısı kârlı olmalı (zayıf taban; asıl kapı p-value)
-            wf_min_windows: 3,        // en az 3 işlemli pencere (tek-pencere fluke'u eler)
-            wf_max_pvalue: 0.10,      // pencere-tutarlılığı yazı-turadan anlamlı ayrışmalı (p≤0.10)
+            wf_min_consistency: 0.5, // pencerelerin en az yarısı kârlı olmalı (zayıf taban; asıl kapı p-value)
+            wf_min_windows: 3,       // en az 3 işlemli pencere (tek-pencere fluke'u eler)
+            wf_max_pvalue: 0.10,     // pencere-tutarlılığı yazı-turadan anlamlı ayrışmalı (p≤0.10)
         }
     }
 }
@@ -175,41 +175,69 @@ pub fn summarize_by_group(rows: &[EdgeRow]) -> Vec<GroupSummary> {
     use std::collections::BTreeMap;
     let mut groups: BTreeMap<(String, String), GroupSummary> = BTreeMap::new();
     for r in rows {
-        let g = groups.entry((r.market.clone(), r.interval.clone())).or_insert(GroupSummary {
-            market: r.market.clone(), interval: r.interval.clone(),
-            scanned: 0, profitable: 0, best_pf: f64::NEG_INFINITY,
-            best_symbol: String::new(), best_strategy: String::new(),
-        });
+        let g = groups
+            .entry((r.market.clone(), r.interval.clone()))
+            .or_insert(GroupSummary {
+                market: r.market.clone(),
+                interval: r.interval.clone(),
+                scanned: 0,
+                profitable: 0,
+                best_pf: f64::NEG_INFINITY,
+                best_symbol: String::new(),
+                best_strategy: String::new(),
+            });
         g.scanned += 1;
-        if r.profitable { g.profitable += 1; }
+        if r.profitable {
+            g.profitable += 1;
+        }
         if r.profit_factor > g.best_pf {
             g.best_pf = r.profit_factor;
             g.best_symbol = r.symbol.clone();
             g.best_strategy = r.best_strategy.clone();
         }
     }
-    let mut out: Vec<GroupSummary> = groups.into_values()
-        .map(|mut g| { if !g.best_pf.is_finite() { g.best_pf = 0.0; } g })
+    let mut out: Vec<GroupSummary> = groups
+        .into_values()
+        .map(|mut g| {
+            if !g.best_pf.is_finite() {
+                g.best_pf = 0.0;
+            }
+            g
+        })
         .collect();
-    out.sort_by(|a, b| b.best_pf.partial_cmp(&a.best_pf).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.best_pf
+            .partial_cmp(&a.best_pf)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out
 }
 
 /// Bir seriyi tara (holdout: IS'te optimize, OOS'ta ölç; strateji havuzunun en iyisi).
 /// `candles` KRONOLOJİK (ASC) olmalı. Sağlık/veri yetersizse veya hiçbir strateji
 /// sonuç vermezse `None`. Saf (DB okumaz) → birim-testli.
-pub fn scan_one_series(cfg: &EdgeScanConfig, series: &CandleSeriesRef, candles: &[crate::core::types::Candle]) -> Option<EdgeRow> {
+pub fn scan_one_series(
+    cfg: &EdgeScanConfig,
+    series: &CandleSeriesRef,
+    candles: &[crate::core::types::Candle],
+) -> Option<EdgeRow> {
     let n = candles.len();
-    if n < cfg.min_rows { return None; }
+    if n < cfg.min_rows {
+        return None;
+    }
     let health = CandleHealth::from_candles(candles, &series.interval);
-    if health.gap_pct > cfg.max_gap_pct { return None; }
+    if health.gap_pct > cfg.max_gap_pct {
+        return None;
+    }
     let stale_days = health.stale_secs as f64 / 86_400.0;
     // Likidite (majörlük) ölçütü — seri-seviyesi, strateji-bağımsız → döngü öncesi bir kez.
     let qvol = avg_daily_quote_volume(candles, &series.interval);
 
     // Holdout split.
     let split = (n * cfg.holdout_is_pct.min(95).max(50)) / 100;
-    if split < 2 || n - split < 40 { return None; }
+    if split < 2 || n - split < 40 {
+        return None;
+    }
     let (is_slice, oos_slice) = candles.split_at(split);
 
     // Canlı-temsili trailing mult: target(0.7) / pencere_noise_floor%, clamp[1.5,30].
@@ -221,10 +249,17 @@ pub fn scan_one_series(cfg: &EdgeScanConfig, series: &CandleSeriesRef, candles: 
     let pool = default_registry().canonical_pool();
     let mut best: Option<EdgeRow> = None;
     for strat in &pool {
-        let opt = ParameterOptimizer::new(series.symbol.clone(), series.interval.clone(), cfg.capital, strat.clone())
-            .with_edge_min_score(Some(cfg.edge_min))
-            .with_exit_model(Some(trail_mult), Some(cfg.breakeven_rr));
-        let Ok(res) = opt.optimize_parallel(is_slice, cfg.tp_grid, cfg.sl_grid, cfg.ps_grid) else { continue; };
+        let opt = ParameterOptimizer::new(
+            series.symbol.clone(),
+            series.interval.clone(),
+            cfg.capital,
+            strat.clone(),
+        )
+        .with_edge_min_score(Some(cfg.edge_min))
+        .with_exit_model(Some(trail_mult), Some(cfg.breakeven_rr));
+        let Ok(res) = opt.optimize_parallel(is_slice, cfg.tp_grid, cfg.sl_grid, cfg.ps_grid) else {
+            continue;
+        };
         let p = &res.best_parameters;
         // OOS ölçüm: IS'te bulunan en iyi param ile son dilimi koş (dürüst PF).
         let oos_cfg = BacktestConfig {
@@ -241,8 +276,14 @@ pub fn scan_one_series(cfg: &EdgeScanConfig, series: &CandleSeriesRef, candles: 
             breakeven_at_rr: Some(cfg.breakeven_rr),
             ..Default::default()
         };
-        let Ok(r) = Backtester::new(oos_cfg).run(oos_slice) else { continue; };
-        let expectancy = if r.total_trades > 0 { r.total_pnl / r.total_trades as f64 } else { 0.0 };
+        let Ok(r) = Backtester::new(oos_cfg).run(oos_slice) else {
+            continue;
+        };
+        let expectancy = if r.total_trades > 0 {
+            r.total_pnl / r.total_trades as f64
+        } else {
+            0.0
+        };
         let cand = EdgeRow {
             exchange: series.exchange.clone(),
             market: series.market.clone(),
@@ -265,7 +306,9 @@ pub fn scan_one_series(cfg: &EdgeScanConfig, series: &CandleSeriesRef, candles: 
             wf: WfCrossCheck::default(),
             wf_robust: false,
         };
-        if is_better(&cand, best.as_ref(), cfg.min_trades) { best = Some(cand); }
+        if is_better(&cand, best.as_ref(), cfg.min_trades) {
+            best = Some(cand);
+        }
     }
 
     // ─── WF çoklu-pencere çapraz-kontrol (yalnız KAZANAN config için; tek-holdout fluke'una karşı).
@@ -286,7 +329,12 @@ pub fn scan_one_series(cfg: &EdgeScanConfig, series: &CandleSeriesRef, candles: 
             breakeven_at_rr: Some(cfg.breakeven_rr),
             ..Default::default()
         };
-        let windows = crate::robot::backtester::walk_forward::wf_oos_windows(n, cfg.wf_is, cfg.wf_oos, cfg.wf_step);
+        let windows = crate::robot::backtester::walk_forward::wf_oos_windows(
+            n,
+            cfg.wf_is,
+            cfg.wf_oos,
+            cfg.wf_step,
+        );
         let cc = crate::robot::backtester::wf_cross_check(&win_cfg, candles, &windows);
         b.wf_robust = cc.pooled_pf >= 1.0
             && cc.windows >= cfg.wf_min_windows
@@ -321,7 +369,9 @@ fn is_better(cand: &EdgeRow, best: Option<&EdgeRow>, min_trades: usize) -> bool 
 /// değerler → likidite kapısı kullanılamazdı.) Interval ile GÜNLÜĞE normalize edilir → 1h/4h/1d
 /// kıyaslanabilir. Majörler (BTC/ETH) yüksek, illikit-alt düşük döner. Saf → testli. [[feedback_market_agnostic]].
 pub fn avg_daily_quote_volume(candles: &[crate::core::types::Candle], interval: &str) -> f64 {
-    if candles.is_empty() { return 0.0; }
+    if candles.is_empty() {
+        return 0.0;
+    }
     let per_candle: f64 = candles.iter().map(|c| c.volume).sum::<f64>() / candles.len() as f64;
     let secs = crate::robot::data_pipeline::DataNormalizer::parse_interval(interval).max(1) as f64;
     per_candle * (86_400.0 / secs)
@@ -329,11 +379,20 @@ pub fn avg_daily_quote_volume(candles: &[crate::core::types::Candle], interval: 
 
 /// Bir CandleSeriesRef filtreyi geçiyor mu (sembol/interval/min_rows). Saf → testli.
 fn series_passes(cfg: &EdgeScanConfig, s: &CandleSeriesRef) -> bool {
-    if s.rows < cfg.min_rows { return false; }
+    if s.rows < cfg.min_rows {
+        return false;
+    }
     if !cfg.symbol_filter.is_empty()
-        && !cfg.symbol_filter.iter().any(|f| f.eq_ignore_ascii_case(&s.symbol)) { return false; }
-    if !cfg.interval_filter.is_empty()
-        && !cfg.interval_filter.iter().any(|f| f == &s.interval) { return false; }
+        && !cfg
+            .symbol_filter
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case(&s.symbol))
+    {
+        return false;
+    }
+    if !cfg.interval_filter.is_empty() && !cfg.interval_filter.iter().any(|f| f == &s.interval) {
+        return false;
+    }
     true
 }
 
@@ -351,7 +410,8 @@ where
     F: FnMut(usize, usize, &CandleSeriesRef),
 {
     let all = list_series(&cfg.db_path, cfg.market_filter.as_deref()).unwrap_or_default();
-    let candidates: Vec<CandleSeriesRef> = all.into_iter()
+    let candidates: Vec<CandleSeriesRef> = all
+        .into_iter()
         .filter(|s| series_passes(cfg, s))
         .take(cfg.max_series)
         .collect();
@@ -361,14 +421,24 @@ where
     let mut skipped = 0usize;
     for (i, s) in candidates.iter().enumerate() {
         on_progress(i + 1, series_candidates, s);
-        let candles = read_candles_market(&cfg.db_path, &s.symbol, &s.interval, &s.market, cfg.candle_limit)
-            .unwrap_or_default();
+        let candles = read_candles_market(
+            &cfg.db_path,
+            &s.symbol,
+            &s.interval,
+            &s.market,
+            cfg.candle_limit,
+        )
+        .unwrap_or_default();
         match scan_one_series(cfg, s, &candles) {
             Some(row) => rows.push(row),
             None => skipped += 1,
         }
     }
-    rows.sort_by(|a, b| b.profit_factor.partial_cmp(&a.profit_factor).unwrap_or(std::cmp::Ordering::Equal));
+    rows.sort_by(|a, b| {
+        b.profit_factor
+            .partial_cmp(&a.profit_factor)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let profitable_count = rows.iter().filter(|r| r.profitable).count();
     let summary = summarize_by_group(&rows);
 
@@ -418,8 +488,14 @@ pub struct SeedRobustness {
 
 impl Default for SeedRobustness {
     fn default() -> Self {
-        Self { min_trades: 30, min_pf: 1.2, max_pf: 10.0, require_wf_robust: true,
-               min_daily_quote_volume: 0.0, wf_max_pvalue: 1.0 }
+        Self {
+            min_trades: 30,
+            min_pf: 1.2,
+            max_pf: 10.0,
+            require_wf_robust: true,
+            min_daily_quote_volume: 0.0,
+            wf_max_pvalue: 1.0,
+        }
     }
 }
 
@@ -458,39 +534,80 @@ pub fn passes_seed_bar(row: &EdgeRow, r: &SeedRobustness) -> bool {
         && (r.wf_max_pvalue >= 1.0 || row.wf.window_significance() <= r.wf_max_pvalue)
 }
 
-pub fn seed_symbol_multi_plan(report: &EdgeScanReport, r: SeedRobustness, max_tracks: usize)
-    -> HashMap<String, Vec<SeedEntry>>
-{
+pub fn seed_symbol_multi_plan(
+    report: &EdgeScanReport,
+    r: SeedRobustness,
+    max_tracks: usize,
+) -> HashMap<String, Vec<SeedEntry>> {
     // sembol → ((market,interval,strategy) → (SeedEntry, en iyi PF)) ile dedup.
     type EdgeKey = (String, String, String);
     type SymEdges = HashMap<EdgeKey, (SeedEntry, f64)>;
     let mut acc: HashMap<String, SymEdges> = HashMap::new();
     for row in &report.rows {
-        if !passes_seed_bar(row, &r) { continue; }
-        let key = (row.market.clone(), row.interval.clone(), row.best_strategy.clone());
-        let e = acc.entry(row.symbol.clone()).or_default()
+        if !passes_seed_bar(row, &r) {
+            continue;
+        }
+        let key = (
+            row.market.clone(),
+            row.interval.clone(),
+            row.best_strategy.clone(),
+        );
+        let e = acc
+            .entry(row.symbol.clone())
+            .or_default()
             .entry(key)
-            .or_insert_with(|| (SeedEntry { market: String::new(), interval: String::new(), strategy: String::new() }, f64::NEG_INFINITY));
+            .or_insert_with(|| {
+                (
+                    SeedEntry {
+                        market: String::new(),
+                        interval: String::new(),
+                        strategy: String::new(),
+                    },
+                    f64::NEG_INFINITY,
+                )
+            });
         if row.profit_factor > e.1 {
-            *e = (SeedEntry { market: row.market.clone(), interval: row.interval.clone(), strategy: row.best_strategy.clone() }, row.profit_factor);
+            *e = (
+                SeedEntry {
+                    market: row.market.clone(),
+                    interval: row.interval.clone(),
+                    strategy: row.best_strategy.clone(),
+                },
+                row.profit_factor,
+            );
         }
     }
-    acc.into_iter().map(|(sym, m)| {
-        let mut v: Vec<(SeedEntry, f64)> = m.into_values().collect();
-        // PF azalan (yüksek-PF "çapa" edge önce; eşitlikte deterministik (TF,strateji) sıralaması).
-        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| (a.0.interval.as_str(), a.0.strategy.as_str()).cmp(&(b.0.interval.as_str(), b.0.strategy.as_str()))));
-        v.truncate(max_tracks.max(1));
-        (sym, v.into_iter().map(|(e, _)| e).collect())
-    }).collect()
+    acc.into_iter()
+        .map(|(sym, m)| {
+            let mut v: Vec<(SeedEntry, f64)> = m.into_values().collect();
+            // PF azalan (yüksek-PF "çapa" edge önce; eşitlikte deterministik (TF,strateji) sıralaması).
+            v.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        (a.0.interval.as_str(), a.0.strategy.as_str())
+                            .cmp(&(b.0.interval.as_str(), b.0.strategy.as_str()))
+                    })
+            });
+            v.truncate(max_tracks.max(1));
+            (sym, v.into_iter().map(|(e, _)| e).collect())
+        })
+        .collect()
 }
 
 /// Bir rapordan robustluk barını geçen `sembol → SeedEntry(interval, strateji)` planı (tek-edge,
 /// sembol başına EN YÜKSEK PF). `seed_symbol_multi_plan(.., 1)`'e delege eder (TEK KAYNAK; filtre
 /// mantığı tek yerde). Saf → testli.
 pub fn seed_symbol_plan(report: &EdgeScanReport, r: SeedRobustness) -> HashMap<String, SeedEntry> {
-    seed_symbol_multi_plan(report, r, 1).into_iter()
-        .filter_map(|(sym, mut tracks)| if tracks.is_empty() { None } else { Some((sym, tracks.remove(0))) })
+    seed_symbol_multi_plan(report, r, 1)
+        .into_iter()
+        .filter_map(|(sym, mut tracks)| {
+            if tracks.is_empty() {
+                None
+            } else {
+                Some((sym, tracks.remove(0)))
+            }
+        })
         .collect()
 }
 
@@ -501,7 +618,9 @@ pub const SEED_MAX_TRACKS_DEFAULT: usize = 3;
 /// JSON rapor DOSYASINDAN seed planı (dosya yok/parse hatası → boş, sessiz). Boot'ta
 /// `EDGE_SEED_REPORT` env'i bu yola işaret ederse symbol_interval + symbol_strategy'ye yüklenir.
 pub fn seed_symbol_plan_from_file(path: &str, r: SeedRobustness) -> HashMap<String, SeedEntry> {
-    let Ok(txt) = std::fs::read_to_string(path) else { return HashMap::new() };
+    let Ok(txt) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
     match serde_json::from_str::<EdgeScanReport>(&txt) {
         Ok(report) => seed_symbol_plan(&report, r),
         Err(_) => HashMap::new(),
@@ -510,10 +629,14 @@ pub fn seed_symbol_plan_from_file(path: &str, r: SeedRobustness) -> HashMap<Stri
 
 /// JSON rapor DOSYASINDAN çoklu-iz seed planı (dosya yok/parse hatası → boş, sessiz).
 /// `EDGE_SEED_MULTI_TF` açıkken boot'ta symbol_tracks'e yüklenir [[project_edge_scan]].
-pub fn seed_symbol_multi_plan_from_file(path: &str, r: SeedRobustness, max_tracks: usize)
-    -> HashMap<String, Vec<SeedEntry>>
-{
-    let Ok(txt) = std::fs::read_to_string(path) else { return HashMap::new() };
+pub fn seed_symbol_multi_plan_from_file(
+    path: &str,
+    r: SeedRobustness,
+    max_tracks: usize,
+) -> HashMap<String, Vec<SeedEntry>> {
+    let Ok(txt) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
     match serde_json::from_str::<EdgeScanReport>(&txt) {
         Ok(report) => seed_symbol_multi_plan(&report, r, max_tracks),
         Err(_) => HashMap::new(),
@@ -527,32 +650,67 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     fn series_ref(sym: &str, iv: &str, rows: usize) -> CandleSeriesRef {
-        CandleSeriesRef { exchange: "binance".into(), market: "futures".into(),
-            symbol: sym.into(), interval: iv.into(), rows }
+        CandleSeriesRef {
+            exchange: "binance".into(),
+            market: "futures".into(),
+            symbol: sym.into(),
+            interval: iv.into(),
+            rows,
+        }
     }
 
     #[test]
     fn series_passes_respects_filters_and_min_rows() {
-        let cfg = EdgeScanConfig { min_rows: 400, symbol_filter: vec!["BTCUSDT".into()],
-            interval_filter: vec!["1h".into()], ..Default::default() };
+        let cfg = EdgeScanConfig {
+            min_rows: 400,
+            symbol_filter: vec!["BTCUSDT".into()],
+            interval_filter: vec!["1h".into()],
+            ..Default::default()
+        };
         assert!(series_passes(&cfg, &series_ref("BTCUSDT", "1h", 500)));
-        assert!(!series_passes(&cfg, &series_ref("BTCUSDT", "1h", 100)), "min_rows altı elenir");
-        assert!(!series_passes(&cfg, &series_ref("ETHUSDT", "1h", 500)), "sembol filtresi");
-        assert!(!series_passes(&cfg, &series_ref("BTCUSDT", "15m", 500)), "interval filtresi");
+        assert!(
+            !series_passes(&cfg, &series_ref("BTCUSDT", "1h", 100)),
+            "min_rows altı elenir"
+        );
+        assert!(
+            !series_passes(&cfg, &series_ref("ETHUSDT", "1h", 500)),
+            "sembol filtresi"
+        );
+        assert!(
+            !series_passes(&cfg, &series_ref("BTCUSDT", "15m", 500)),
+            "interval filtresi"
+        );
         // Büyük/küçük harf duyarsız sembol eşleşmesi.
-        let cfg2 = EdgeScanConfig { symbol_filter: vec!["btcusdt".into()], ..Default::default() };
+        let cfg2 = EdgeScanConfig {
+            symbol_filter: vec!["btcusdt".into()],
+            ..Default::default()
+        };
         assert!(series_passes(&cfg2, &series_ref("BTCUSDT", "1h", 500)));
     }
 
     #[test]
     fn is_better_prefers_sufficient_trades_then_pf() {
         let mk = |trades: usize, pf: f64| EdgeRow {
-            exchange: "b".into(), market: "f".into(), symbol: "S".into(), interval: "1h".into(),
-            rows: 500, gap_pct: 0.0, stale_days: 0.0, best_strategy: "X".into(),
-            take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
-            trades, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0,
-            avg_daily_quote_volume: 1e9, profitable: false,
-            wf: WfCrossCheck::default(), wf_robust: false,
+            exchange: "b".into(),
+            market: "f".into(),
+            symbol: "S".into(),
+            interval: "1h".into(),
+            rows: 500,
+            gap_pct: 0.0,
+            stale_days: 0.0,
+            best_strategy: "X".into(),
+            take_profit_pct: 4.0,
+            stop_loss_pct: 2.0,
+            max_position_size: 0.3,
+            trades,
+            win_rate: 0.5,
+            profit_factor: pf,
+            expectancy: 0.0,
+            sharpe: 0.0,
+            avg_daily_quote_volume: 1e9,
+            profitable: false,
+            wf: WfCrossCheck::default(),
+            wf_robust: false,
         };
         // Yeterli-işlemli düşük-PF, az-işlemli yüksek-PF'i yener (fluke koruması).
         let suff_low = mk(20, 1.1);
@@ -566,12 +724,26 @@ mod tests {
     #[test]
     fn summarize_by_group_counts_and_ranks() {
         let mk = |market: &str, iv: &str, sym: &str, pf: f64, profitable: bool| EdgeRow {
-            exchange: "b".into(), market: market.into(), symbol: sym.into(), interval: iv.into(),
-            rows: 500, gap_pct: 0.0, stale_days: 0.0, best_strategy: "X".into(),
-            take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
-            trades: 20, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0,
-            avg_daily_quote_volume: 1e9, profitable,
-            wf: WfCrossCheck::default(), wf_robust: false,
+            exchange: "b".into(),
+            market: market.into(),
+            symbol: sym.into(),
+            interval: iv.into(),
+            rows: 500,
+            gap_pct: 0.0,
+            stale_days: 0.0,
+            best_strategy: "X".into(),
+            take_profit_pct: 4.0,
+            stop_loss_pct: 2.0,
+            max_position_size: 0.3,
+            trades: 20,
+            win_rate: 0.5,
+            profit_factor: pf,
+            expectancy: 0.0,
+            sharpe: 0.0,
+            avg_daily_quote_volume: 1e9,
+            profitable,
+            wf: WfCrossCheck::default(),
+            wf_robust: false,
         };
         let rows = vec![
             mk("futures", "1h", "A", 1.5, true),
@@ -582,10 +754,20 @@ mod tests {
         let s = summarize_by_group(&rows);
         assert_eq!(s.len(), 3, "3 grup (futures1h, futures15m, spot1h)");
         // En iyi PF azalan → futures/15m (2.0) başta.
-        assert_eq!((s[0].market.as_str(), s[0].interval.as_str()), ("futures", "15m"));
+        assert_eq!(
+            (s[0].market.as_str(), s[0].interval.as_str()),
+            ("futures", "15m")
+        );
         assert!((s[0].best_pf - 2.0).abs() < 1e-9 && s[0].best_symbol == "C");
-        let f1h = s.iter().find(|g| g.market == "futures" && g.interval == "1h").unwrap();
-        assert_eq!((f1h.scanned, f1h.profitable), (2, 1), "futures/1h: 2 taranan, 1 kârlı");
+        let f1h = s
+            .iter()
+            .find(|g| g.market == "futures" && g.interval == "1h")
+            .unwrap();
+        assert_eq!(
+            (f1h.scanned, f1h.profitable),
+            (2, 1),
+            "futures/1h: 2 taranan, 1 kârlı"
+        );
         assert!((f1h.best_pf - 1.5).abs() < 1e-9 && f1h.best_symbol == "A");
     }
 
@@ -593,16 +775,39 @@ mod tests {
     fn report_json_roundtrips_through_seed_loader() {
         // serde round-trip: rapor yaz → seed_symbol_strategy_from_file oku (gerçek dosya dikişi).
         let report = EdgeScanReport {
-            generated_at: "t".into(), db_path: "d".into(), market_filter: Some("futures".into()),
-            series_candidates: 1, series_scanned: 1, series_skipped: 0, profitable_count: 1,
+            generated_at: "t".into(),
+            db_path: "d".into(),
+            market_filter: Some("futures".into()),
+            series_candidates: 1,
+            series_scanned: 1,
+            series_skipped: 0,
+            profitable_count: 1,
             summary: vec![],
             rows: vec![EdgeRow {
-                exchange: "binance".into(), market: "futures".into(), symbol: "BTCUSDT".into(),
-                interval: "1h".into(), rows: 5000, gap_pct: 0.0, stale_days: 0.0,
-                best_strategy: "ICT_COMPOSITE".into(), take_profit_pct: 6.0, stop_loss_pct: 1.0,
-                max_position_size: 0.3, trades: 40, win_rate: 0.4, profit_factor: 1.5,
-                expectancy: 5.0, sharpe: 0.5, avg_daily_quote_volume: 1e9, profitable: true,
-                wf: WfCrossCheck { windows: 6, profitable_windows: 5, pooled_pf: 1.4, trades: 40 },
+                exchange: "binance".into(),
+                market: "futures".into(),
+                symbol: "BTCUSDT".into(),
+                interval: "1h".into(),
+                rows: 5000,
+                gap_pct: 0.0,
+                stale_days: 0.0,
+                best_strategy: "ICT_COMPOSITE".into(),
+                take_profit_pct: 6.0,
+                stop_loss_pct: 1.0,
+                max_position_size: 0.3,
+                trades: 40,
+                win_rate: 0.4,
+                profit_factor: 1.5,
+                expectancy: 5.0,
+                sharpe: 0.5,
+                avg_daily_quote_volume: 1e9,
+                profitable: true,
+                wf: WfCrossCheck {
+                    windows: 6,
+                    profitable_windows: 5,
+                    pooled_pf: 1.4,
+                    trades: 40,
+                },
                 wf_robust: true,
             }],
         };
@@ -613,62 +818,127 @@ mod tests {
         let seed = seed_symbol_plan_from_file(&p, SeedRobustness::default());
         let _ = std::fs::remove_file(&p);
         let e = seed.get("BTCUSDT").expect("BTCUSDT seed'lenmeli");
-        assert_eq!((e.market.as_str(), e.interval.as_str(), e.strategy.as_str()),
+        assert_eq!(
+            (e.market.as_str(), e.interval.as_str(), e.strategy.as_str()),
             ("futures", "1h", "ICT_COMPOSITE"),
-            "rapor JSON seed loader'dan (market+interval+strateji) round-trip etmeli");
+            "rapor JSON seed loader'dan (market+interval+strateji) round-trip etmeli"
+        );
     }
 
     #[test]
     fn seed_filters_flukes_and_keeps_best_per_symbol() {
-        let mk = |sym: &str, iv: &str, strat: &str, pf: f64, trades: usize, profitable: bool, wf_robust: bool| EdgeRow {
-            exchange: "b".into(), market: "futures".into(), symbol: sym.into(), interval: iv.into(),
-            rows: 5000, gap_pct: 0.0, stale_days: 0.0, best_strategy: strat.into(),
-            take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
-            trades, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0,
-            avg_daily_quote_volume: 1e9, profitable,
-            wf: WfCrossCheck::default(), wf_robust,
+        let mk = |sym: &str,
+                  iv: &str,
+                  strat: &str,
+                  pf: f64,
+                  trades: usize,
+                  profitable: bool,
+                  wf_robust: bool| EdgeRow {
+            exchange: "b".into(),
+            market: "futures".into(),
+            symbol: sym.into(),
+            interval: iv.into(),
+            rows: 5000,
+            gap_pct: 0.0,
+            stale_days: 0.0,
+            best_strategy: strat.into(),
+            take_profit_pct: 4.0,
+            stop_loss_pct: 2.0,
+            max_position_size: 0.3,
+            trades,
+            win_rate: 0.5,
+            profit_factor: pf,
+            expectancy: 0.0,
+            sharpe: 0.0,
+            avg_daily_quote_volume: 1e9,
+            profitable,
+            wf: WfCrossCheck::default(),
+            wf_robust,
         };
         let report = EdgeScanReport {
-            generated_at: "t".into(), db_path: "d".into(), market_filter: None,
-            series_candidates: 6, series_scanned: 6, series_skipped: 0, profitable_count: 5,
+            generated_at: "t".into(),
+            db_path: "d".into(),
+            market_filter: None,
+            series_candidates: 6,
+            series_scanned: 6,
+            series_skipped: 0,
+            profitable_count: 5,
             summary: vec![],
             rows: vec![
-                mk("RAVEUSDT", "1h", "MA_CROSSOVER", 18.5, 16, true, true),  // fluke: trades<30 → elenir
-                mk("BTCUSDT", "1h", "ICT_COMPOSITE", 1.5, 40, true, true),   // robust + WF-onaylı → girer
-                mk("BTCUSDT", "4h", "MACD", 1.3, 35, true, true),            // aynı sembol düşük PF → kaybeder
-                mk("ETHUSDT", "1h", "RSI", 1.1, 50, true, true),             // PF<1.2 → elenir
-                mk("ADAUSDT", "1h", "BB", 2.0, 40, false, true),             // profitable=false → elenir
-                mk("XRPUSDT", "1h", "CCI", 1.4, 40, true, false),            // WF-onaysız → elenir (yeni)
+                mk("RAVEUSDT", "1h", "MA_CROSSOVER", 18.5, 16, true, true), // fluke: trades<30 → elenir
+                mk("BTCUSDT", "1h", "ICT_COMPOSITE", 1.5, 40, true, true), // robust + WF-onaylı → girer
+                mk("BTCUSDT", "4h", "MACD", 1.3, 35, true, true), // aynı sembol düşük PF → kaybeder
+                mk("ETHUSDT", "1h", "RSI", 1.1, 50, true, true),  // PF<1.2 → elenir
+                mk("ADAUSDT", "1h", "BB", 2.0, 40, false, true),  // profitable=false → elenir
+                mk("XRPUSDT", "1h", "CCI", 1.4, 40, true, false), // WF-onaysız → elenir (yeni)
             ],
         };
         let seed = seed_symbol_plan(&report, SeedRobustness::default());
-        assert_eq!(seed.len(), 1, "yalnız BTCUSDT tüm barları (trades+PF+WF) geçer");
+        assert_eq!(
+            seed.len(),
+            1,
+            "yalnız BTCUSDT tüm barları (trades+PF+WF) geçer"
+        );
         let btc = seed.get("BTCUSDT").expect("BTCUSDT seed'lenmeli");
         // En yüksek PF satırı (1h ICT, 1.5 > 4h MACD 1.3) → market+interval+strateji birlikte taşınır.
-        assert_eq!((btc.market.as_str(), btc.interval.as_str(), btc.strategy.as_str()),
-            ("futures", "1h", "ICT_COMPOSITE"));
+        assert_eq!(
+            (
+                btc.market.as_str(),
+                btc.interval.as_str(),
+                btc.strategy.as_str()
+            ),
+            ("futures", "1h", "ICT_COMPOSITE")
+        );
         assert!(!seed.contains_key("RAVEUSDT"), "16 işlem fluke elenir");
         assert!(!seed.contains_key("ETHUSDT"), "PF 1.1 < 1.2 elenir");
-        assert!(!seed.contains_key("XRPUSDT"), "WF-onaysız (wf_robust=false) elenir");
+        assert!(
+            !seed.contains_key("XRPUSDT"),
+            "WF-onaysız (wf_robust=false) elenir"
+        );
         // require_wf_robust=false → XRP (WF-onaysız ama PF/trades geçer) artık girer.
-        let loose = SeedRobustness { require_wf_robust: false, ..SeedRobustness::default() };
+        let loose = SeedRobustness {
+            require_wf_robust: false,
+            ..SeedRobustness::default()
+        };
         let seed2 = seed_symbol_plan(&report, loose);
-        assert!(seed2.contains_key("XRPUSDT"), "WF şartı gevşeyince XRP girer");
+        assert!(
+            seed2.contains_key("XRPUSDT"),
+            "WF şartı gevşeyince XRP girer"
+        );
     }
 
     #[test]
     fn seed_max_pf_cap_drops_fluke_and_falls_back_to_real_edge() {
         let mk = |sym: &str, iv: &str, strat: &str, pf: f64, trades: usize| EdgeRow {
-            exchange: "b".into(), market: "futures".into(), symbol: sym.into(), interval: iv.into(),
-            rows: 5000, gap_pct: 0.0, stale_days: 0.0, best_strategy: strat.into(),
-            take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
-            trades, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0,
-            avg_daily_quote_volume: 1e9, profitable: true,
-            wf: WfCrossCheck::default(), wf_robust: true,
+            exchange: "b".into(),
+            market: "futures".into(),
+            symbol: sym.into(),
+            interval: iv.into(),
+            rows: 5000,
+            gap_pct: 0.0,
+            stale_days: 0.0,
+            best_strategy: strat.into(),
+            take_profit_pct: 4.0,
+            stop_loss_pct: 2.0,
+            max_position_size: 0.3,
+            trades,
+            win_rate: 0.5,
+            profit_factor: pf,
+            expectancy: 0.0,
+            sharpe: 0.0,
+            avg_daily_quote_volume: 1e9,
+            profitable: true,
+            wf: WfCrossCheck::default(),
+            wf_robust: true,
         };
         let report = EdgeScanReport {
-            generated_at: "t".into(), db_path: "d".into(), market_filter: None,
-            series_candidates: 3, series_scanned: 3, series_skipped: 0, profitable_count: 3,
+            generated_at: "t".into(),
+            db_path: "d".into(),
+            market_filter: None,
+            series_candidates: 3,
+            series_scanned: 3,
+            series_skipped: 0,
+            profitable_count: 3,
             summary: vec![],
             rows: vec![
                 // Aynı sembol: 1h fluke (PF 61 > cap) ELENMELİ → 4h gerçek edge (PF 3.0) seçilmeli.
@@ -678,37 +948,67 @@ mod tests {
             ],
         };
         let seed = seed_symbol_plan(&report, SeedRobustness::default()); // max_pf=10 (default)
-        let rave = seed.get("RAVEUSDT").expect("RAVE'nin gerçek (4h) edge'i kalmalı");
+        let rave = seed
+            .get("RAVEUSDT")
+            .expect("RAVE'nin gerçek (4h) edge'i kalmalı");
         assert_eq!((rave.interval.as_str(), rave.strategy.as_str()), ("4h", "DONCHIAN"),
             "PF 61 fluke elenince sembolün cap-altı ikinci edge'i seçilir (yüksek-PF cazibesine kapılmaz)");
-        assert!(seed.contains_key("SIRENUSDT"), "cap-altı sağlam edge etkilenmez");
+        assert!(
+            seed.contains_key("SIRENUSDT"),
+            "cap-altı sağlam edge etkilenmez"
+        );
         // Cap'i gevşetince (max_pf çok büyük) fluke 1h geri kazanır → cap'in fiilen elediği doğrulanır.
-        let loose = SeedRobustness { max_pf: 1e9, ..SeedRobustness::default() };
+        let loose = SeedRobustness {
+            max_pf: 1e9,
+            ..SeedRobustness::default()
+        };
         let seed2 = seed_symbol_plan(&report, loose);
-        assert_eq!(seed2.get("RAVEUSDT").unwrap().interval.as_str(), "1h",
-            "cap kalkınca en yüksek PF (61, 1h) kazanır → cap'in elemesi ispatlanır");
+        assert_eq!(
+            seed2.get("RAVEUSDT").unwrap().interval.as_str(),
+            "1h",
+            "cap kalkınca en yüksek PF (61, 1h) kazanır → cap'in elemesi ispatlanır"
+        );
     }
 
     #[test]
     fn seed_multi_plan_keeps_all_validated_tf_edges_bounded_and_sorted() {
         let mk = |sym: &str, iv: &str, strat: &str, pf: f64| EdgeRow {
-            exchange: "b".into(), market: "futures".into(), symbol: sym.into(), interval: iv.into(),
-            rows: 5000, gap_pct: 0.0, stale_days: 0.0, best_strategy: strat.into(),
-            take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
-            trades: 40, win_rate: 0.5, profit_factor: pf, expectancy: 0.0, sharpe: 0.0,
-            avg_daily_quote_volume: 1e9, profitable: true,
-            wf: WfCrossCheck::default(), wf_robust: true,
+            exchange: "b".into(),
+            market: "futures".into(),
+            symbol: sym.into(),
+            interval: iv.into(),
+            rows: 5000,
+            gap_pct: 0.0,
+            stale_days: 0.0,
+            best_strategy: strat.into(),
+            take_profit_pct: 4.0,
+            stop_loss_pct: 2.0,
+            max_position_size: 0.3,
+            trades: 40,
+            win_rate: 0.5,
+            profit_factor: pf,
+            expectancy: 0.0,
+            sharpe: 0.0,
+            avg_daily_quote_volume: 1e9,
+            profitable: true,
+            wf: WfCrossCheck::default(),
+            wf_robust: true,
         };
         // ZEC-benzeri: 4 WF✓ edge (biri PF-cap üstü fluke) + tek-edge bir sembol.
         let report = EdgeScanReport {
-            generated_at: "t".into(), db_path: "d".into(), market_filter: None,
-            series_candidates: 5, series_scanned: 5, series_skipped: 0, profitable_count: 5,
+            generated_at: "t".into(),
+            db_path: "d".into(),
+            market_filter: None,
+            series_candidates: 5,
+            series_scanned: 5,
+            series_skipped: 0,
+            profitable_count: 5,
             summary: vec![],
             rows: vec![
                 mk("ZECUSDT", "1d", "STOCH_RSI", 4.42),
                 mk("ZECUSDT", "1h", "MACD", 2.27),
                 mk("ZECUSDT", "30m", "SUPERTREND", 2.02),
-                mk("ZECUSDT", "5m", "RSI", 50.0),   // fluke (>max_pf=10) → elenmeli, ize girmemeli
+                mk("ZECUSDT", "5m", "RSI", 50.0), // fluke (>max_pf=10) → elenmeli, ize girmemeli
                 mk("XRPUSDT", "1d", "MACD", 4.63),
             ],
         };
@@ -716,31 +1016,64 @@ mod tests {
         let multi = seed_symbol_multi_plan(&report, r.clone(), SEED_MAX_TRACKS_DEFAULT);
         let zec = multi.get("ZECUSDT").expect("ZEC çoklu-iz");
         // Fluke 5m elenir → 3 gerçek edge; PF AZALAN sıralı (1d > 1h > 30m).
-        assert_eq!(zec.len(), 3, "cap-altı 3 WF✓ edge tutulur (fluke 5m elenir)");
-        assert_eq!(zec.iter().map(|e| (e.interval.as_str(), e.strategy.as_str())).collect::<Vec<_>>(),
-            vec![("1d","STOCH_RSI"), ("1h","MACD"), ("30m","SUPERTREND")], "PF azalan sıra");
-        assert_eq!(multi.get("XRPUSDT").map(|v| v.len()), Some(1), "tek-edge sembol → tek iz");
+        assert_eq!(
+            zec.len(),
+            3,
+            "cap-altı 3 WF✓ edge tutulur (fluke 5m elenir)"
+        );
+        assert_eq!(
+            zec.iter()
+                .map(|e| (e.interval.as_str(), e.strategy.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("1d", "STOCH_RSI"), ("1h", "MACD"), ("30m", "SUPERTREND")],
+            "PF azalan sıra"
+        );
+        assert_eq!(
+            multi.get("XRPUSDT").map(|v| v.len()),
+            Some(1),
+            "tek-edge sembol → tek iz"
+        );
         // max_tracks=2 → yalnız en iyi 2 iz (bounded).
         let capped = seed_symbol_multi_plan(&report, r.clone(), 2);
-        assert_eq!(capped.get("ZECUSDT").unwrap().len(), 2, "max_tracks ile bounded");
+        assert_eq!(
+            capped.get("ZECUSDT").unwrap().len(),
+            2,
+            "max_tracks ile bounded"
+        );
         // Tek-edge seed_symbol_plan = çoklu'nun top-1'i (DRY delegasyon kanıtı).
         let single = seed_symbol_plan(&report, r);
-        assert_eq!((single["ZECUSDT"].interval.as_str(), single["ZECUSDT"].strategy.as_str()),
-            ("1d","STOCH_RSI"), "tek-plan = çoklu top-1");
+        assert_eq!(
+            (
+                single["ZECUSDT"].interval.as_str(),
+                single["ZECUSDT"].strategy.as_str()
+            ),
+            ("1d", "STOCH_RSI"),
+            "tek-plan = çoklu top-1"
+        );
     }
 
     #[test]
     fn avg_daily_quote_volume_normalizes_by_interval() {
         // volume ZATEN quote-volume (idx 7); mum-başı turnover = volume = 1000. 1h: günde 24 mum → 24_000/gün.
         let mk = |iv: &str, n: usize| -> Vec<Candle> {
-            (0..n).map(|i| Candle {
-                timestamp: Utc.timestamp_opt(i as i64 * 3600, 0).single().unwrap(),
-                open: 100.0, high: 100.0, low: 100.0, close: 100.0, volume: 1000.0,
-                symbol: "S".into(), interval: iv.into(),
-            }).collect()
+            (0..n)
+                .map(|i| Candle {
+                    timestamp: Utc.timestamp_opt(i as i64 * 3600, 0).single().unwrap(),
+                    open: 100.0,
+                    high: 100.0,
+                    low: 100.0,
+                    close: 100.0,
+                    volume: 1000.0,
+                    symbol: "S".into(),
+                    interval: iv.into(),
+                })
+                .collect()
         };
         let h1 = avg_daily_quote_volume(&mk("1h", 5), "1h");
-        assert!((h1 - 24_000.0).abs() < 1e-6, "1h: 1000×24=24000/gün, got {h1}");
+        assert!(
+            (h1 - 24_000.0).abs() < 1e-6,
+            "1h: 1000×24=24000/gün, got {h1}"
+        );
         // Aynı mum-başı hacim 1d'de günde 1 mum → 1000/gün (interval normalizasyonu kanıtı).
         let d1 = avg_daily_quote_volume(&mk("1d", 5), "1d");
         assert!((d1 - 1_000.0).abs() < 1e-6, "1d: 1000×1=1000/gün, got {d1}");
@@ -750,16 +1083,35 @@ mod tests {
     #[test]
     fn seed_min_qvol_filters_illiquid_keeps_majors() {
         let mk = |sym: &str, qvol: f64| EdgeRow {
-            exchange: "b".into(), market: "futures".into(), symbol: sym.into(), interval: "1h".into(),
-            rows: 5000, gap_pct: 0.0, stale_days: 0.0, best_strategy: "DONCHIAN".into(),
-            take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
-            trades: 40, win_rate: 0.5, profit_factor: 1.5, expectancy: 0.0, sharpe: 0.0,
-            avg_daily_quote_volume: qvol, profitable: true,
-            wf: WfCrossCheck::default(), wf_robust: true,
+            exchange: "b".into(),
+            market: "futures".into(),
+            symbol: sym.into(),
+            interval: "1h".into(),
+            rows: 5000,
+            gap_pct: 0.0,
+            stale_days: 0.0,
+            best_strategy: "DONCHIAN".into(),
+            take_profit_pct: 4.0,
+            stop_loss_pct: 2.0,
+            max_position_size: 0.3,
+            trades: 40,
+            win_rate: 0.5,
+            profit_factor: 1.5,
+            expectancy: 0.0,
+            sharpe: 0.0,
+            avg_daily_quote_volume: qvol,
+            profitable: true,
+            wf: WfCrossCheck::default(),
+            wf_robust: true,
         };
         let report = EdgeScanReport {
-            generated_at: "t".into(), db_path: "d".into(), market_filter: None,
-            series_candidates: 2, series_scanned: 2, series_skipped: 0, profitable_count: 2,
+            generated_at: "t".into(),
+            db_path: "d".into(),
+            market_filter: None,
+            series_candidates: 2,
+            series_scanned: 2,
+            series_skipped: 0,
+            profitable_count: 2,
             summary: vec![],
             rows: vec![
                 mk("AVAXUSDT", 500_000_000.0), // majör: 500M/gün → kalır
@@ -767,13 +1119,21 @@ mod tests {
             ],
         };
         // Kapı 0.0 (default) → ikisi de geçer (sıfır regresyon).
-        assert_eq!(seed_symbol_plan(&report, SeedRobustness::default()).len(), 2);
+        assert_eq!(
+            seed_symbol_plan(&report, SeedRobustness::default()).len(),
+            2
+        );
         // Majör tabanı 50M/gün → yalnız AVAX kalır, MYX elenir.
-        let major = SeedRobustness { min_daily_quote_volume: 50_000_000.0, ..SeedRobustness::default() };
+        let major = SeedRobustness {
+            min_daily_quote_volume: 50_000_000.0,
+            ..SeedRobustness::default()
+        };
         let seed = seed_symbol_plan(&report, major);
         assert_eq!(seed.len(), 1, "yalnız majör (AVAX) seed'lenir");
-        assert!(seed.contains_key("AVAXUSDT") && !seed.contains_key("MYXUSDT"),
-            "illikit-alt (MYX) majör tabanının altında → elenir (canlı purge gürültüsü kesilir)");
+        assert!(
+            seed.contains_key("AVAXUSDT") && !seed.contains_key("MYXUSDT"),
+            "illikit-alt (MYX) majör tabanının altında → elenir (canlı purge gürültüsü kesilir)"
+        );
     }
 
     #[test]
@@ -782,27 +1142,61 @@ mod tests {
         // (15/20 pencere, p≈0.02), diğeri yazı-tura (11/20, p≈0.41). Default kapı KAPALI (1.0)
         // → ikisi de geçer (sıfır regresyon). EDGE_SEED_WF_MAX_PVALUE=0.10 retrofiti → yalnız anlamlı kalır.
         let mk = |sym: &str, w: usize, pw: usize| EdgeRow {
-            exchange: "b".into(), market: "futures".into(), symbol: sym.into(), interval: "1d".into(),
-            rows: 5000, gap_pct: 0.0, stale_days: 0.0, best_strategy: "BB".into(),
-            take_profit_pct: 4.0, stop_loss_pct: 2.0, max_position_size: 0.3,
-            trades: 40, win_rate: 0.55, profit_factor: 1.5, expectancy: 0.0, sharpe: 0.0,
-            avg_daily_quote_volume: 1e9, profitable: true,
-            wf: WfCrossCheck { windows: w, profitable_windows: pw, pooled_pf: 1.4, trades: 80 },
+            exchange: "b".into(),
+            market: "futures".into(),
+            symbol: sym.into(),
+            interval: "1d".into(),
+            rows: 5000,
+            gap_pct: 0.0,
+            stale_days: 0.0,
+            best_strategy: "BB".into(),
+            take_profit_pct: 4.0,
+            stop_loss_pct: 2.0,
+            max_position_size: 0.3,
+            trades: 40,
+            win_rate: 0.55,
+            profit_factor: 1.5,
+            expectancy: 0.0,
+            sharpe: 0.0,
+            avg_daily_quote_volume: 1e9,
+            profitable: true,
+            wf: WfCrossCheck {
+                windows: w,
+                profitable_windows: pw,
+                pooled_pf: 1.4,
+                trades: 80,
+            },
             wf_robust: true,
         };
         let report = EdgeScanReport {
-            generated_at: "t".into(), db_path: "d".into(), market_filter: None,
-            series_candidates: 2, series_scanned: 2, series_skipped: 0, profitable_count: 2,
+            generated_at: "t".into(),
+            db_path: "d".into(),
+            market_filter: None,
+            series_candidates: 2,
+            series_scanned: 2,
+            series_skipped: 0,
+            profitable_count: 2,
             summary: vec![],
             rows: vec![mk("SIGUSDT", 20, 15), mk("NOISEUSDT", 20, 11)],
         };
         // Default (wf_max_pvalue=1.0 KAPALI) → ikisi de seed'lenir (mevcut davranış korunur).
         let seed_off = seed_symbol_plan(&report, SeedRobustness::default());
-        assert_eq!(seed_off.len(), 2, "kapı kapalıyken (default) ikisi de geçer — sıfır regresyon");
+        assert_eq!(
+            seed_off.len(),
+            2,
+            "kapı kapalıyken (default) ikisi de geçer — sıfır regresyon"
+        );
         // Retrofit AÇIK (0.10) → yazı-tura (p≈0.41) elenir, anlamlı (p≈0.02) kalır.
-        let strict = SeedRobustness { wf_max_pvalue: 0.10, ..SeedRobustness::default() };
+        let strict = SeedRobustness {
+            wf_max_pvalue: 0.10,
+            ..SeedRobustness::default()
+        };
         let seed_on = seed_symbol_plan(&report, strict);
-        assert_eq!(seed_on.len(), 1, "anlamlılık retrofiti yazı-tura satırı eler");
+        assert_eq!(
+            seed_on.len(),
+            1,
+            "anlamlılık retrofiti yazı-tura satırı eler"
+        );
         assert!(seed_on.contains_key("SIGUSDT") && !seed_on.contains_key("NOISEUSDT"),
             "yalnız istatistiksel anlamlı (15/20, p≈0.02) seed'lenir; 11/20 (p≈0.41) küçük-örneklem fluke elenir");
     }
@@ -811,11 +1205,18 @@ mod tests {
     fn scan_one_series_skips_thin_and_gappy() {
         let cfg = EdgeScanConfig::default();
         // Az bar → None (min_rows altı).
-        let thin: Vec<Candle> = (0..50).map(|i| Candle {
-            timestamp: Utc.timestamp_opt(i * 3600, 0).single().unwrap(),
-            open: 100.0, high: 100.5, low: 99.5, close: 100.0, volume: 1.0,
-            symbol: "S".into(), interval: "1h".into(),
-        }).collect();
+        let thin: Vec<Candle> = (0..50)
+            .map(|i| Candle {
+                timestamp: Utc.timestamp_opt(i * 3600, 0).single().unwrap(),
+                open: 100.0,
+                high: 100.5,
+                low: 99.5,
+                close: 100.0,
+                volume: 1.0,
+                symbol: "S".into(),
+                interval: "1h".into(),
+            })
+            .collect();
         assert!(scan_one_series(&cfg, &series_ref("S", "1h", 50), &thin).is_none());
     }
 }

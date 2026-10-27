@@ -1,8 +1,8 @@
 // immutable_log.rs - Değiştirilemez (append-only) log sistemi
 
 use chrono::Utc;
-use std::fs::{self, OpenOptions, File};
-use std::io::{Write, BufWriter};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufWriter, Write};
 use std::sync::{Mutex, OnceLock};
 
 // Modern Rust: lazy_static yerine OnceLock kullanımı (Zero-dependency)
@@ -37,7 +37,7 @@ pub fn append_immutable_log(event_type: &str, message: &str) {
     if let Ok(mut file) = OpenOptions::new()
         .create(true)
         .append(true)
-        .open("logs/immutable_audit.log") 
+        .open("logs/immutable_audit.log")
     {
         let _ = file.write_all(log_entry.as_bytes());
     }

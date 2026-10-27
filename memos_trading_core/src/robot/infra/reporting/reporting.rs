@@ -6,16 +6,15 @@
 // 3. Match-Guard ile dinamik dışa aktarım
 // 4. Zero-Copy String formatlama
 
+use crate::core::types::{Signal, Trade};
 use crate::robot::infra::interfaces::Reporter;
-use crate::core::types::{Trade, Signal};
 use crate::Result;
-
 
 // src/robot/infra/reporting.rs - Srivastava ATP Adli Raporlama ve Hata Kayıt Birimi
 
+use chrono::Local;
 use std::fs::OpenOptions;
 use std::io::Write;
-use chrono::Local;
 
 /// Robotun operasyonel hatalarını mühürleyen ana yapı
 pub struct ErrorLogger;
@@ -33,7 +32,7 @@ impl ErrorLogger {
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
             .append(true)
-            .open("logs/error_audit.log") 
+            .open("logs/error_audit.log")
         {
             let _ = file.write_all(log_entry.as_bytes());
         }
@@ -45,7 +44,6 @@ impl ErrorLogger {
         println!("[{}] 🔧 [REPAIR] {}: {}", ts, step_id, message);
     }
 }
-
 
 pub struct UniversalReporter;
 
@@ -74,7 +72,9 @@ impl UniversalReporter {
     /// §84.2: Performanslı Tablo Oluşturucu
     /// İşlem listesini bellek dostu iteratörler ile formatlar.
     pub fn report_trades_table(&self, trades: &[Trade]) {
-        if trades.is_empty() { return; }
+        if trades.is_empty() {
+            return;
+        }
 
         let header = "|   ID   |  Symbol  | Entry  | Exit   | Amount | PnL    | Strategy   |";
         let separator = "-".repeat(header.len());
@@ -86,7 +86,11 @@ impl UniversalReporter {
         trades.iter().for_each(|t| {
             println!(
                 "| {:<6} | {:<8} | {:<6.2} | {:<6.2} | {:<6.2} | {:<6.2} | {:<10} |",
-                t.id.map(|i| i.to_string()).unwrap_or_else(|| "-".into()).chars().take(6).collect::<String>(), // ID kısaltma
+                t.id.map(|i| i.to_string())
+                    .unwrap_or_else(|| "-".into())
+                    .chars()
+                    .take(6)
+                    .collect::<String>(), // ID kısaltma
                 t.symbol,
                 t.entry_price,
                 t.exit_price.unwrap_or(0.0),
@@ -95,8 +99,7 @@ impl UniversalReporter {
                 t.strategy
             );
         });
-        
+
         println!("{}", separator);
     }
 }
-

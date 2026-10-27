@@ -1,9 +1,9 @@
 // walk_forward.rs - Kayan Pencere (Walk-Forward) Analiz Motoru
 
-use serde::{Deserialize, Serialize};
-use rayon::prelude::*; // Paralel işleme desteği
 use crate::core::types::Candle;
-use crate::robot::backtester::{Backtester, BacktestConfig, BacktestResult, DirectionMode};
+use crate::robot::backtester::{BacktestConfig, BacktestResult, Backtester, DirectionMode};
+use rayon::prelude::*; // Paralel işleme desteği
+use serde::{Deserialize, Serialize};
 
 // --- 1. YAPILANDIRMA VE SONUÇ MODELLERİ ---
 
@@ -36,6 +36,9 @@ pub struct WalkForwardConfig {
     /// Canlı çıkış modeli: breakeven RR eşiği (canlı default 1.0). Default None.
     #[serde(default)]
     pub breakeven_at_rr: Option<f64>,
+    /// Canlı trend-pyramiding davranışını OOS seçiminde de kullan.
+    #[serde(default)]
+    pub pyramiding_enabled: bool,
 }
 
 impl Default for WalkForwardConfig {
@@ -54,6 +57,7 @@ impl Default for WalkForwardConfig {
             orderbook_sim: None,
             atr_trail_mult: None,
             breakeven_at_rr: None,
+            pyramiding_enabled: false,
         }
     }
 }
@@ -102,7 +106,9 @@ impl WalkForwardTester {
     pub fn run(&self, candles: &[Candle]) -> Option<WalkForwardResult> {
         let total = candles.len();
         let window_size = self.config.in_sample_bars + self.config.out_of_sample_bars;
-        if total < window_size { return None; }
+        if total < window_size {
+            return None;
+        }
 
         // Pencereleri önceden tanımla (Allocation-optimized)
         let mut window_definitions = Vec::new();
@@ -113,30 +119,36 @@ impl WalkForwardTester {
         }
 
         // PARALEL İŞLEME: Her pencereyi farklı CPU çekirdeğinde analiz et
-        let windows: Vec<WindowResult> = window_definitions.par_iter().enumerate().map(|(idx, &start)| {
-            let is_end = start + self.config.in_sample_bars;
-            let oos_end = is_end + self.config.out_of_sample_bars;
+        let windows: Vec<WindowResult> = window_definitions
+            .par_iter()
+            .enumerate()
+            .map(|(idx, &start)| {
+                let is_end = start + self.config.in_sample_bars;
+                let oos_end = is_end + self.config.out_of_sample_bars;
 
-            let in_sample = &candles[start..is_end];
-            let oos = &candles[is_end..oos_end];
+                let in_sample = &candles[start..is_end];
+                let oos = &candles[is_end..oos_end];
 
-            // 1. In-Sample: En iyi parametreleri bul (Eğitim)
-            let (best_tp, best_sl) = self.quick_optimize(in_sample);
+                // 1. In-Sample: En iyi parametreleri bul (Eğitim)
+                let (best_tp, best_sl) = self.quick_optimize(in_sample);
 
-            // 2. Out-of-Sample: Parametreleri test et (Validasyon)
-            let metrics = self.run_backtest(oos, best_tp, best_sl);
+                // 2. Out-of-Sample: Parametreleri test et (Validasyon)
+                let metrics = self.run_backtest(oos, best_tp, best_sl);
 
-            WindowResult {
-                window_idx: idx,
-                in_sample_range: (start, is_end),
-                oos_range: (is_end, oos_end),
-                best_tp_pct: best_tp,
-                best_sl_pct: best_sl,
-                oos_metrics: metrics,
-            }
-        }).collect();
+                WindowResult {
+                    window_idx: idx,
+                    in_sample_range: (start, is_end),
+                    oos_range: (is_end, oos_end),
+                    best_tp_pct: best_tp,
+                    best_sl_pct: best_sl,
+                    oos_metrics: metrics,
+                }
+            })
+            .collect();
 
-        if windows.is_empty() { return None; }
+        if windows.is_empty() {
+            return None;
+        }
 
         self.finalize_report(windows)
     }
@@ -151,9 +163,11 @@ impl WalkForwardTester {
 
         for &tp in &tp_grid {
             for &sl in &sl_grid {
-                if tp <= sl { continue; }
+                if tp <= sl {
+                    continue;
+                }
                 let res = self.run_backtest(candles, tp, sl);
-                
+
                 // Kompozit Skor: Sharpe %40 + PnL %35 + WinRate %25
                 let score = (res.sharpe * 0.40) + (res.pnl_pct * 0.35) + (res.win_rate * 0.0025);
                 if score > best_score {
@@ -182,6 +196,10 @@ impl WalkForwardTester {
             // Canlı çıkış modeli (varsa) → strateji seçimi de trailing'i görür.
             atr_trail_mult: self.config.atr_trail_mult,
             breakeven_at_rr: self.config.breakeven_at_rr,
+            position_profile: self
+                .config
+                .pyramiding_enabled
+                .then(|| "trend-pyramiding".to_string()),
             ..Default::default()
         };
 
@@ -200,7 +218,10 @@ impl WalkForwardTester {
 
     fn finalize_report(&self, windows: Vec<WindowResult>) -> Option<WalkForwardResult> {
         let n = windows.len() as f64;
-        let profitable_count = windows.iter().filter(|w| w.oos_metrics.pnl_pct > 0.0).count();
+        let profitable_count = windows
+            .iter()
+            .filter(|w| w.oos_metrics.pnl_pct > 0.0)
+            .count();
 
         Some(WalkForwardResult {
             avg_oos_pnl_pct: windows.iter().map(|w| w.oos_metrics.pnl_pct).sum::<f64>() / n,
@@ -253,7 +274,9 @@ where
             continue;
         }
         let regime = classify(&candles[start..end]);
-        buckets.entry(regime).or_default()
+        buckets
+            .entry(regime)
+            .or_default()
             .push((w.best_tp_pct, w.best_sl_pct));
     }
 
@@ -268,13 +291,20 @@ where
         sls.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median = |xs: &[f64]| -> f64 {
             let m = xs.len() / 2;
-            if xs.len().is_multiple_of(2) { (xs[m - 1] + xs[m]) / 2.0 } else { xs[m] }
+            if xs.len().is_multiple_of(2) {
+                (xs[m - 1] + xs[m]) / 2.0
+            } else {
+                xs[m]
+            }
         };
-        out.insert(regime, RegimeAggregate {
-            median_tp_pct: median(&tps),
-            median_sl_pct: median(&sls),
-            sample_count: samples.len(),
-        });
+        out.insert(
+            regime,
+            RegimeAggregate {
+                median_tp_pct: median(&tps),
+                median_sl_pct: median(&sls),
+                sample_count: samples.len(),
+            },
+        );
     }
     out
 }
@@ -290,7 +320,10 @@ pub(crate) const MIN_EVAL_WINDOW_LEN: usize = 30;
 /// Bir `BacktestConfig` varyantını tek bir mum dilimi üzerinde koşar, toplam PnL
 /// döndürür (hata/boş → 0.0). Otonom değerlendiricilerin paylaşılan skorlama atomu.
 pub(crate) fn backtest_pnl(cfg: &BacktestConfig, slice: &[Candle]) -> f64 {
-    Backtester::new(cfg.clone()).run(slice).map(|r| r.total_pnl).unwrap_or(0.0)
+    Backtester::new(cfg.clone())
+        .run(slice)
+        .map(|r| r.total_pnl)
+        .unwrap_or(0.0)
 }
 
 /// Bir cfg'i dilimde koşar; `(brüt_kâr, brüt_zarar≥0, işlem_sayısı)` döner. Pooled
@@ -301,7 +334,12 @@ pub(crate) fn backtest_gross(cfg: &BacktestConfig, slice: &[Candle]) -> (f64, f6
     match Backtester::new(cfg.clone()).run(slice) {
         Ok(r) => {
             let gp: f64 = r.trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).sum();
-            let gl: f64 = r.trades.iter().filter(|t| t.pnl < 0.0).map(|t| -t.pnl).sum();
+            let gl: f64 = r
+                .trades
+                .iter()
+                .filter(|t| t.pnl < 0.0)
+                .map(|t| -t.pnl)
+                .sum();
             (gp, gl, r.total_trades)
         }
         Err(_) => (0.0, 0.0, 0),
@@ -322,13 +360,24 @@ pub struct WfCrossCheck {
 }
 
 impl Default for WfCrossCheck {
-    fn default() -> Self { Self { windows: 0, profitable_windows: 0, pooled_pf: 0.0, trades: 0 } }
+    fn default() -> Self {
+        Self {
+            windows: 0,
+            profitable_windows: 0,
+            pooled_pf: 0.0,
+            trades: 0,
+        }
+    }
 }
 
 impl WfCrossCheck {
     /// Kâr-eden pencere oranı (0..1). İşlemli pencere yoksa 0.
     pub fn consistency(&self) -> f64 {
-        if self.windows == 0 { 0.0 } else { self.profitable_windows as f64 / self.windows as f64 }
+        if self.windows == 0 {
+            0.0
+        } else {
+            self.profitable_windows as f64 / self.windows as f64
+        }
     }
 
     /// Tek-yanlı binom anlamlılığı: `P(X ≥ profitable_windows)` için `X ~ Binom(windows, 0.5)`.
@@ -341,10 +390,12 @@ impl WfCrossCheck {
     /// Saf → testli.
     pub fn window_significance(&self) -> f64 {
         let n = self.windows;
-        if n == 0 { return 1.0; }
+        if n == 0 {
+            return 1.0;
+        }
         let k = self.profitable_windows.min(n);
         let mut pmf = 0.5_f64.powi(n as i32); // pmf(0) = C(n,0)·0.5ⁿ
-        let mut cdf_below = 0.0_f64;           // P(X ≤ k−1)
+        let mut cdf_below = 0.0_f64; // P(X ≤ k−1)
         for i in 0..k {
             cdf_below += pmf;
             pmf *= (n - i) as f64 / (i + 1) as f64;
@@ -357,27 +408,58 @@ impl WfCrossCheck {
 /// `score_config_over_windows` yalnız pooled PF döndürür; bu, EK OLARAK pencere-bazlı tutarlılığı
 /// (edge bir şanslı pencereden mi yoksa süregelen mi) ölçer. İşlemsiz pencere `windows` sayımına
 /// girmez (boş pencere tutarlılığı bozmasın). Edge-tarama çapraz-kontrolünün tek-kaynağı.
-pub fn wf_cross_check(cfg: &BacktestConfig, candles: &[Candle], windows: &[WindowResult]) -> WfCrossCheck {
-    let (mut gp_sum, mut gl_sum, mut trades, mut with_trades, mut profitable) = (0.0_f64, 0.0_f64, 0usize, 0usize, 0usize);
+pub fn wf_cross_check(
+    cfg: &BacktestConfig,
+    candles: &[Candle],
+    windows: &[WindowResult],
+) -> WfCrossCheck {
+    let (mut gp_sum, mut gl_sum, mut trades, mut with_trades, mut profitable) =
+        (0.0_f64, 0.0_f64, 0usize, 0usize, 0usize);
     for w in windows {
         let (s, e) = w.oos_range;
-        if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN { continue; }
+        if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN {
+            continue;
+        }
         let (gp, gl, t) = backtest_gross(cfg, &candles[s..e]);
-        if t == 0 { continue; }
-        gp_sum += gp; gl_sum += gl; trades += t; with_trades += 1;
-        let win_pf = if gl > f64::EPSILON { gp / gl } else if gp > 0.0 { f64::INFINITY } else { 0.0 };
-        if win_pf >= 1.0 { profitable += 1; }
+        if t == 0 {
+            continue;
+        }
+        gp_sum += gp;
+        gl_sum += gl;
+        trades += t;
+        with_trades += 1;
+        let win_pf = if gl > f64::EPSILON {
+            gp / gl
+        } else if gp > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+        if win_pf >= 1.0 {
+            profitable += 1;
+        }
     }
-    let pooled_pf = if gl_sum > f64::EPSILON { gp_sum / gl_sum }
-                    else if gp_sum > 0.0 { 100.0 } else { 0.0 };
-    WfCrossCheck { windows: with_trades, profitable_windows: profitable, pooled_pf, trades }
+    let pooled_pf = if gl_sum > f64::EPSILON {
+        gp_sum / gl_sum
+    } else if gp_sum > 0.0 {
+        100.0
+    } else {
+        0.0
+    };
+    WfCrossCheck {
+        windows: with_trades,
+        profitable_windows: profitable,
+        pooled_pf,
+        trades,
+    }
 }
 
 /// Bir cfg'i dilimde koşar; tek tek işlem PnL'lerini döner (boş/hata → []).
 /// Çıkış-modeli taraması pencereler boyunca tüm PnL'leri havuzlayıp beklenti/PF/
 /// sharpe hesaplamak için kullanır (tek-kaynak istatistik).
 pub(crate) fn backtest_trade_pnls(cfg: &BacktestConfig, slice: &[Candle]) -> Vec<f64> {
-    Backtester::new(cfg.clone()).run(slice)
+    Backtester::new(cfg.clone())
+        .run(slice)
         .map(|r| r.trades.iter().map(|t| t.pnl).collect())
         .unwrap_or_default()
 }
@@ -390,12 +472,12 @@ pub(crate) fn backtest_trade_pnls(cfg: &BacktestConfig, slice: &[Candle]) -> Vec
 pub struct ExitModelStats {
     pub label: String,
     pub total_trades: usize,
-    pub win_rate: f64,      // 0..1
+    pub win_rate: f64, // 0..1
     pub avg_win: f64,
-    pub avg_loss: f64,      // pozitif
-    pub expectancy: f64,    // işlem başına ortalama PnL
+    pub avg_loss: f64,   // pozitif
+    pub expectancy: f64, // işlem başına ortalama PnL
     pub profit_factor: f64,
-    pub sharpe: f64,        // işlem-başı PnL ortalaması / std (yıllıklaştırılmamış proxy)
+    pub sharpe: f64, // işlem-başı PnL ortalaması / std (yıllıklaştırılmamış proxy)
     pub total_pnl: f64,
 }
 
@@ -403,12 +485,17 @@ pub struct ExitModelStats {
 /// HAVUZLAR ve beklenti/PF/sharpe/win-rate istatistiğini tek seferde üretir. Config-varyant
 /// A/B'lerinin (çıkış-modeli, edge-filtre, …) paylaşılan çekirdeği — tek-kaynak.
 fn pooled_variant_stats(
-    label: String, candles: &[Candle], windows: &[WindowResult], cfg: &BacktestConfig,
+    label: String,
+    candles: &[Candle],
+    windows: &[WindowResult],
+    cfg: &BacktestConfig,
 ) -> ExitModelStats {
     let mut pnls: Vec<f64> = Vec::new();
     for w in windows {
         let (s, e) = w.oos_range;
-        if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN { continue; }
+        if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN {
+            continue;
+        }
         pnls.extend(backtest_trade_pnls(cfg, &candles[s..e]));
     }
     let n = pnls.len();
@@ -417,21 +504,51 @@ fn pooled_variant_stats(
     let gp: f64 = wins.iter().sum();
     let gl: f64 = losses.iter().map(|p| -p).sum();
     let total_pnl: f64 = pnls.iter().sum();
-    let win_rate = if n > 0 { wins.len() as f64 / n as f64 } else { 0.0 };
-    let avg_win = if !wins.is_empty() { gp / wins.len() as f64 } else { 0.0 };
-    let avg_loss = if !losses.is_empty() { gl / losses.len() as f64 } else { 0.0 };
+    let win_rate = if n > 0 {
+        wins.len() as f64 / n as f64
+    } else {
+        0.0
+    };
+    let avg_win = if !wins.is_empty() {
+        gp / wins.len() as f64
+    } else {
+        0.0
+    };
+    let avg_loss = if !losses.is_empty() {
+        gl / losses.len() as f64
+    } else {
+        0.0
+    };
     let expectancy = if n > 0 { total_pnl / n as f64 } else { 0.0 };
-    let profit_factor = if gl > f64::EPSILON { gp / gl }
-                        else if gp > 0.0 { f64::INFINITY } else { 0.0 };
+    let profit_factor = if gl > f64::EPSILON {
+        gp / gl
+    } else if gp > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
     let sharpe = if n >= 2 {
         let mean = total_pnl / n as f64;
         let var = pnls.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
         let sd = var.sqrt();
-        if sd > f64::EPSILON { mean / sd } else { 0.0 }
-    } else { 0.0 };
+        if sd > f64::EPSILON {
+            mean / sd
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
     ExitModelStats {
-        label, total_trades: n, win_rate, avg_win, avg_loss,
-        expectancy, profit_factor, sharpe, total_pnl,
+        label,
+        total_trades: n,
+        win_rate,
+        avg_win,
+        avg_loss,
+        expectancy,
+        profit_factor,
+        sharpe,
+        total_pnl,
     }
 }
 
@@ -444,12 +561,15 @@ pub fn evaluate_exit_models(
     base: &BacktestConfig,
     exits: &[(String, Option<f64>, Option<f64>)],
 ) -> Vec<ExitModelStats> {
-    exits.iter().map(|(label, trail, be)| {
-        let mut c = base.clone();
-        c.atr_trail_mult = *trail;
-        c.breakeven_at_rr = *be;
-        pooled_variant_stats(label.clone(), candles, windows, &c)
-    }).collect()
+    exits
+        .iter()
+        .map(|(label, trail, be)| {
+            let mut c = base.clone();
+            c.atr_trail_mult = *trail;
+            c.breakeven_at_rr = *be;
+            pooled_variant_stats(label.clone(), candles, windows, &c)
+        })
+        .collect()
 }
 
 /// Edge-filtre A/B taraması — yalnız GİRİŞ HUNİSİ (edge_min_score) değişir, çıkış/strateji/
@@ -463,22 +583,27 @@ pub fn evaluate_edge_filters(
     base: &BacktestConfig,
     thresholds: &[Option<f64>],
 ) -> Vec<ExitModelStats> {
-    thresholds.iter().map(|t| {
-        let mut c = base.clone();
-        c.edge_min_score = *t;
-        let label = match t {
-            Some(v) => format!("edge≥{:.2}", v),
-            None => "filtre-yok".to_string(),
-        };
-        pooled_variant_stats(label, candles, windows, &c)
-    }).collect()
+    thresholds
+        .iter()
+        .map(|t| {
+            let mut c = base.clone();
+            c.edge_min_score = *t;
+            let label = match t {
+                Some(v) => format!("edge≥{:.2}", v),
+                None => "filtre-yok".to_string(),
+            };
+            pooled_variant_stats(label, candles, windows, &c)
+        })
+        .collect()
 }
 
 /// `cfg`'i tüm OOS pencere dilimlerinde koşup toplam PnL döndürür — her pencere
 /// bağımsız (look-ahead'siz). `MIN_EVAL_WINDOW_LEN` altı pencereler atlanır.
 /// Sembol-interval değerlendirmesi bunu aday TF başına kullanır.
 pub(crate) fn score_config_over_windows(
-    cfg: &BacktestConfig, candles: &[Candle], windows: &[WindowResult],
+    cfg: &BacktestConfig,
+    candles: &[Candle],
+    windows: &[WindowResult],
 ) -> f64 {
     // OBJEKTİF: pooled Profit Factor (Σgp/Σgl, pencereler boyunca) — ham PnL DEĞİL.
     // Gerekçe ([[project_rr_trail_ab]] lever A): gürültü TF'i (örn. 1m, fee/gürültü baskın,
@@ -487,19 +612,29 @@ pub(crate) fn score_config_over_windows(
     // etmeye iter (kazanan-çok/kaybeden-büyük = net negatif). PF R/R dengesini ölçtüğü için
     // düşük-PF gürültü TF'lerini otonom eler (hard-coded TF yasağı yok [[feedback_autonomy_first]]).
     // Trail A/B'de PnL→PF dönüşümüyle (0fe2c33) aynı ders; backtest_gross tek-kaynak (DRY).
-    const MIN_IV_TRADES: usize = 5;   // pooled işlem altı → seçim yapma (küçük-örneklem gürültüsü)
-    const PF_CAP: f64 = 100.0;        // kayıpsız varyant → INF yerine finite tavan (seçim stabil)
+    const MIN_IV_TRADES: usize = 5; // pooled işlem altı → seçim yapma (küçük-örneklem gürültüsü)
+    const PF_CAP: f64 = 100.0; // kayıpsız varyant → INF yerine finite tavan (seçim stabil)
     let (mut gp, mut gl, mut n) = (0.0_f64, 0.0_f64, 0usize);
     for w in windows {
         let (s, e) = w.oos_range;
-        if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN { continue; }
+        if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN {
+            continue;
+        }
         let (p, l, t) = backtest_gross(cfg, &candles[s..e]);
-        gp += p; gl += l; n += t;
+        gp += p;
+        gl += l;
+        n += t;
     }
-    if n < MIN_IV_TRADES { return 0.0; }
-    if gl > f64::EPSILON { gp / gl }
-    else if gp > 0.0 { PF_CAP }
-    else { 0.0 }
+    if n < MIN_IV_TRADES {
+        return 0.0;
+    }
+    if gl > f64::EPSILON {
+        gp / gl
+    } else if gp > 0.0 {
+        PF_CAP
+    } else {
+        0.0
+    }
 }
 
 /// `n` mumdan WF OOS pencere aralıklarını üretir — param-opt YOK, yalnız index aralıkları
@@ -519,10 +654,12 @@ pub fn wf_oos_windows(n: usize, is_bars: usize, oos_bars: usize, step: usize) ->
             window_idx: idx,
             in_sample_range: (start, is_end),
             oos_range: (is_end, is_end + oos_bars),
-            best_tp_pct: 0.0, best_sl_pct: 0.0,
+            best_tp_pct: 0.0,
+            best_sl_pct: 0.0,
             oos_metrics: BacktestMetrics::default(),
         });
-        start += step; idx += 1;
+        start += step;
+        idx += 1;
     }
     out
 }
@@ -531,15 +668,25 @@ pub fn wf_oos_windows(n: usize, is_bars: usize, oos_bars: usize, step: usize) ->
 /// varsa) skorunu `margin` ile AŞIYORSA değiştir — aksi halde mevcut korunur
 /// (flip-flop/instabilite koruması). `current` yoksa salt en iyi. Boş → None.
 pub(crate) fn pick_best_with_margin<T: Clone + PartialEq>(
-    scored: &[(T, f64)], current: Option<&T>, margin: f64,
+    scored: &[(T, f64)],
+    current: Option<&T>,
+    margin: f64,
 ) -> Option<T> {
-    let best = scored.iter()
+    let best = scored
+        .iter()
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
     match current {
         Some(cur) => {
-            let cur_score = scored.iter().find(|(t, _)| t == cur)
-                .map(|(_, s)| *s).unwrap_or(f64::NEG_INFINITY);
-            if best.1 > cur_score + margin { Some(best.0.clone()) } else { Some(cur.clone()) }
+            let cur_score = scored
+                .iter()
+                .find(|(t, _)| t == cur)
+                .map(|(_, s)| *s)
+                .unwrap_or(f64::NEG_INFINITY);
+            if best.1 > cur_score + margin {
+                Some(best.0.clone())
+            } else {
+                Some(cur.clone())
+            }
         }
         None => Some(best.0.clone()),
     }
@@ -553,7 +700,11 @@ pub(crate) fn pick_best_with_margin<T: Clone + PartialEq>(
 /// `score`/`load` closure'ları persistence + WalkForwardTester'ı çağırana bırakır (decoupled,
 /// test edilebilir). Faz 0 `pick_best_with_margin`'i yeniden kullanır. [[project_adaptive_regime]].
 pub fn evaluate_symbol_interval<L, S>(
-    candidates: &[String], load: L, score: S, current: Option<&str>, margin: f64,
+    candidates: &[String],
+    load: L,
+    score: S,
+    current: Option<&str>,
+    margin: f64,
 ) -> (Option<String>, Vec<(String, f64)>)
 where
     L: Fn(&str) -> Vec<Candle>,
@@ -562,9 +713,13 @@ where
     let mut scored: Vec<(String, f64)> = Vec::new();
     for c in candidates {
         let candles = load(c);
-        if let Some(s) = score(c, &candles) { scored.push((c.clone(), s)); }
+        if let Some(s) = score(c, &candles) {
+            scored.push((c.clone(), s));
+        }
     }
-    if scored.is_empty() { return (None, scored); }
+    if scored.is_empty() {
+        return (None, scored);
+    }
     let cur = current.map(|s| s.to_string());
     let choice = pick_best_with_margin(&scored, cur.as_ref(), margin);
     (choice, scored)
@@ -599,17 +754,25 @@ pub enum StrategyChoice {
 ///
 /// Döner: (karar, tüm skorlar — log/snapshot için). [[project_edge_scan]].
 pub fn evaluate_symbol_strategy<S>(
-    candidates: &[String], score: S, current: Option<&str>, margin: f64, min_score: f64,
+    candidates: &[String],
+    score: S,
+    current: Option<&str>,
+    margin: f64,
+    min_score: f64,
 ) -> (StrategyChoice, Vec<(String, f64)>)
 where
     S: Fn(&str) -> Option<f64>,
 {
     let mut scored: Vec<(String, f64)> = Vec::new();
     for c in candidates {
-        if let Some(s) = score(c) { scored.push((c.clone(), s)); }
+        if let Some(s) = score(c) {
+            scored.push((c.clone(), s));
+        }
     }
     // Skorlanacak aday yok → veriden hüküm çıkmaz; ÇÜRÜME kararı verme (mevcut neyse kalsın).
-    if scored.is_empty() { return (StrategyChoice::Keep, scored); }
+    if scored.is_empty() {
+        return (StrategyChoice::Keep, scored);
+    }
 
     // Mevcut atamanın güncel skoru (listede yoksa → çürümüş/skorlanamaz sayılır).
     let cur_score = current.and_then(|cur| scored.iter().find(|(n, _)| n == cur).map(|(_, s)| *s));
@@ -617,7 +780,8 @@ where
 
     if decayed {
         // Ölü seed'i margin korumaz: edge'li en iyi aday varsa ona geç, yoksa KALDIR.
-        let best = scored.iter()
+        let best = scored
+            .iter()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         let decision = match best {
             Some((name, s)) if *s >= min_score => StrategyChoice::Assign(name.clone()),
@@ -630,7 +794,11 @@ where
     let cur = current.map(|s| s.to_string());
     let decision = match pick_best_with_margin(&scored, cur.as_ref(), margin) {
         Some(name) => {
-            let s = scored.iter().find(|(n, _)| *n == name).map(|(_, s)| *s).unwrap_or(f64::NEG_INFINITY);
+            let s = scored
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, s)| *s)
+                .unwrap_or(f64::NEG_INFINITY);
             if s < min_score || current == Some(name.as_str()) {
                 StrategyChoice::Keep // edge yok (mevcut da yok), ya da mevcut zaten en iyi → yazma yok
             } else {
@@ -663,9 +831,13 @@ where
     let mut acc: HashMap<String, (f64, f64, usize)> = HashMap::new();
     for w in windows {
         let (start, end) = w.oos_range;
-        if end > candles.len() || start >= end { continue; }
+        if end > candles.len() || start >= end {
+            continue;
+        }
         let slice = &candles[start..end];
-        if slice.len() < MIN_EVAL_WINDOW_LEN { continue; }
+        if slice.len() < MIN_EVAL_WINDOW_LEN {
+            continue;
+        }
         let regime = classify(slice);
         // Ortak skorlama atomu (backtest_pnl) — yalnız direction override edilir.
         let score = |dir: DirectionMode| -> f64 {
@@ -676,7 +848,9 @@ where
         let lp = score(DirectionMode::LongOnly);
         let rp = score(DirectionMode::RegimeDirectional);
         let e = acc.entry(regime).or_insert((0.0, 0.0, 0));
-        e.0 += lp; e.1 += rp; e.2 += 1;
+        e.0 += lp;
+        e.1 += rp;
+        e.2 += 1;
     }
     // RD >= Long → disiplin uygula (eşitlikte uygula: RD ayrıca tail-risk azaltır).
     acc.into_iter()
@@ -717,20 +891,29 @@ where
     // Bir adayın eligible sayılması için rejim genelinde gereken min toplam işlem —
     // tek-iki işlemli "gl=0 → PF=∞" flukelerini eler.
     const MIN_TRADES: usize = 5;
-    if candidates.is_empty() { return HashMap::new(); }
+    if candidates.is_empty() {
+        return HashMap::new();
+    }
 
     // regime → (aday başına (Σgp, Σgl, Σtrades), geçerli pencere sayısı)
     type Acc = (Vec<(f64, f64, usize)>, usize);
     let mut acc: HashMap<String, Acc> = HashMap::new();
     for w in windows {
         let (start, end) = w.oos_range;
-        if end > candles.len() || start >= end { continue; }
+        if end > candles.len() || start >= end {
+            continue;
+        }
         let slice = &candles[start..end];
-        if slice.len() < MIN_EVAL_WINDOW_LEN { continue; }
+        if slice.len() < MIN_EVAL_WINDOW_LEN {
+            continue;
+        }
         // Pencere mikro-yapısı (canlı noise floor ile aynı hesap). Üretilemezse atla.
-        let Some(noise) = window_noise_floor_pct(slice).filter(|&n| n > 0.0) else { continue };
+        let Some(noise) = window_noise_floor_pct(slice).filter(|&n| n > 0.0) else {
+            continue;
+        };
         let regime = classify(slice);
-        let entry = acc.entry(regime)
+        let entry = acc
+            .entry(regime)
             .or_insert_with(|| (vec![(0.0, 0.0, 0); candidates.len()], 0));
         for (i, &target) in candidates.iter().enumerate() {
             let mult = (target / noise).clamp(MIN_MULT, MAX_MULT);
@@ -748,11 +931,18 @@ where
         .filter(|(_, (_, n))| *n >= min_samples)
         .filter_map(|(r, (stats, _))| {
             // Pooled PF; yalnız MIN_TRADES eşiğini geçen adaylar yarışır.
-            let best = candidates.iter().zip(stats.iter())
+            let best = candidates
+                .iter()
+                .zip(stats.iter())
                 .filter(|(_, (_, _, trades))| *trades >= MIN_TRADES)
                 .map(|(t, (gp, gl, _))| {
-                    let pf = if *gl > f64::EPSILON { gp / gl }
-                             else if *gp > 0.0 { f64::INFINITY } else { 0.0 };
+                    let pf = if *gl > f64::EPSILON {
+                        gp / gl
+                    } else if *gp > 0.0 {
+                        f64::INFINITY
+                    } else {
+                        0.0
+                    };
                     (*t, pf)
                 })
                 .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
@@ -774,36 +964,59 @@ mod tests {
     #[ignore]
     fn lever_a_interval_pnl_vs_pf() {
         // Gerçek DB repo-kökünde (crate CWD'sinden bir üst). İkisini de dene.
-        let db = ["../data/trader.db", "data/trader.db"].into_iter()
+        let db = ["../data/trader.db", "data/trader.db"]
+            .into_iter()
             .find(|p| std::path::Path::new(p).exists())
             .expect("trader.db bulunamadı");
         let (sym, market) = ("BTCUSDT", "futures");
         // Üretim iv_base'iyle aynı ruhta temsili config (çıkış modeli set: canlıyı modeller).
         let base = BacktestConfig {
-            symbol: sym.into(), initial_balance: 10_000.0, max_position_size: 1.0,
-            take_profit_pct: 4.0, stop_loss_pct: 2.0, strategy_name: "EMA_CROSSOVER".into(),
-            commission_pct: 0.0004, edge_min_score: Some(0.20),
-            breakeven_at_rr: Some(1.0), atr_trail_mult: Some(2.0),
+            symbol: sym.into(),
+            initial_balance: 10_000.0,
+            max_position_size: 1.0,
+            take_profit_pct: 4.0,
+            stop_loss_pct: 2.0,
+            strategy_name: "EMA_CROSSOVER".into(),
+            commission_pct: 0.0004,
+            edge_min_score: Some(0.20),
+            breakeven_at_rr: Some(1.0),
+            atr_trail_mult: Some(2.0),
             ..Default::default()
         };
         let (wf_is, wf_oos, wf_step) = (300usize, 100usize, 100usize);
         println!("\n=== Lever A teşhis: {sym} {market} — ham PnL vs pooled PF ===");
         for tf in ["1m", "15m", "1h"] {
-            let candles = crate::persistence::reader::read_candles_market(db, sym, tf, market, 5000)
-                .unwrap_or_default();
-            if candles.len() < wf_is + wf_oos { println!("{tf:>4}: yetersiz mum ({})", candles.len()); continue; }
+            let candles =
+                crate::persistence::reader::read_candles_market(db, sym, tf, market, 5000)
+                    .unwrap_or_default();
+            if candles.len() < wf_is + wf_oos {
+                println!("{tf:>4}: yetersiz mum ({})", candles.len());
+                continue;
+            }
             let windows = wf_oos_windows(candles.len(), wf_is, wf_oos, wf_step);
-            let mut cfg = base.clone(); cfg.interval = tf.to_string();
+            let mut cfg = base.clone();
+            cfg.interval = tf.to_string();
             // Ham PnL (eski objektif) — manuel topla.
-            let pnl: f64 = windows.iter().filter_map(|w| {
-                let (s, e) = w.oos_range;
-                if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN { None }
-                else { Some(backtest_pnl(&cfg, &candles[s..e])) }
-            }).sum();
+            let pnl: f64 = windows
+                .iter()
+                .filter_map(|w| {
+                    let (s, e) = w.oos_range;
+                    if e > candles.len() || s >= e || (e - s) < MIN_EVAL_WINDOW_LEN {
+                        None
+                    } else {
+                        Some(backtest_pnl(&cfg, &candles[s..e]))
+                    }
+                })
+                .sum();
             // Pooled PF (yeni objektif).
             let pf = score_config_over_windows(&cfg, &candles, &windows);
-            println!("{tf:>4}: bar={:<5} pencere={:<3} hamPnL={:>10.2}  pooledPF={:>6.3}",
-                     candles.len(), windows.len(), pnl, pf);
+            println!(
+                "{tf:>4}: bar={:<5} pencere={:<3} hamPnL={:>10.2}  pooledPF={:>6.3}",
+                candles.len(),
+                windows.len(),
+                pnl,
+                pf
+            );
         }
         println!("Beklenti: 1m hamPnL yanıltıcı olabilir; pooledPF 1h'ı üstün göstermeli.\n");
     }
@@ -815,14 +1028,22 @@ mod tests {
     #[test]
     #[ignore]
     fn kol_b_fee_sensitivity() {
-        let db = ["../data/trader.db", "data/trader.db"].into_iter()
-            .find(|p| std::path::Path::new(p).exists()).expect("trader.db yok");
+        let db = ["../data/trader.db", "data/trader.db"]
+            .into_iter()
+            .find(|p| std::path::Path::new(p).exists())
+            .expect("trader.db yok");
         let (sym, market, tf) = ("BTCUSDT", "futures", "1h");
         let base = BacktestConfig {
-            symbol: sym.into(), interval: tf.into(), initial_balance: 10_000.0,
-            max_position_size: 1.0, take_profit_pct: 4.0, stop_loss_pct: 2.0,
-            strategy_name: "EMA_CROSSOVER".into(), edge_min_score: Some(0.20),
-            breakeven_at_rr: Some(1.0), atr_trail_mult: Some(2.0),
+            symbol: sym.into(),
+            interval: tf.into(),
+            initial_balance: 10_000.0,
+            max_position_size: 1.0,
+            take_profit_pct: 4.0,
+            stop_loss_pct: 2.0,
+            strategy_name: "EMA_CROSSOVER".into(),
+            edge_min_score: Some(0.20),
+            breakeven_at_rr: Some(1.0),
+            atr_trail_mult: Some(2.0),
             ..Default::default()
         };
         let candles = crate::persistence::reader::read_candles_market(db, sym, tf, market, 5000)
@@ -830,9 +1051,14 @@ mod tests {
         let windows = wf_oos_windows(candles.len(), 300, 100, 100);
         println!("\n=== Kol B teşhis: {sym} {market} {tf} — fee duyarlılığı (pooled PF) ===");
         // (etiket, simetrik commission_pct). 0.0003 ≈ maker-giriş(0.0002)+taker-çıkış(0.0004) ort.
-        for (label, c) in [("taker 0.0004", 0.0004), ("maker-ort 0.0003", 0.0003),
-                           ("maker 0.0002", 0.0002), ("SIFIR (tavan)", 0.0)] {
-            let mut cfg = base.clone(); cfg.commission_pct = c;
+        for (label, c) in [
+            ("taker 0.0004", 0.0004),
+            ("maker-ort 0.0003", 0.0003),
+            ("maker 0.0002", 0.0002),
+            ("SIFIR (tavan)", 0.0),
+        ] {
+            let mut cfg = base.clone();
+            cfg.commission_pct = c;
             let pf = score_config_over_windows(&cfg, &candles, &windows);
             println!("  {label:<18}: pooledPF={pf:>6.3}");
         }
@@ -853,12 +1079,14 @@ mod tests {
     #[test]
     fn aggregate_groups_by_regime_and_computes_median() {
         // 6 pencere: 3'ü "Ranging", 3'ü "Trending"
-        let candles: Vec<Candle> = (0..100).map(|i| Candle {
-            close: 100.0 + i as f64,
-            ..Default::default()
-        }).collect();
+        let candles: Vec<Candle> = (0..100)
+            .map(|i| Candle {
+                close: 100.0 + i as f64,
+                ..Default::default()
+            })
+            .collect();
         let windows = vec![
-            wnd(0,  10, 2.0, 1.0),
+            wnd(0, 10, 2.0, 1.0),
             wnd(10, 20, 3.0, 1.5),
             wnd(20, 30, 4.0, 2.0),
             wnd(30, 40, 5.0, 2.5),
@@ -867,8 +1095,11 @@ mod tests {
         ];
         // İlk 3 pencere Ranging, kalan 3 Trending
         let classify = |s: &[Candle]| {
-            if s.first().map(|c| c.close).unwrap_or(0.0) < 130.0 { "Ranging".into() }
-            else { "Trending".into() }
+            if s.first().map(|c| c.close).unwrap_or(0.0) < 130.0 {
+                "Ranging".into()
+            } else {
+                "Trending".into()
+            }
         };
         let agg = aggregate_windows_by_regime(&candles, &windows, classify, 1);
         assert_eq!(agg.len(), 2);
@@ -884,11 +1115,16 @@ mod tests {
 
     fn dir_base_cfg() -> BacktestConfig {
         BacktestConfig {
-            symbol: "T".into(), interval: "1h".into(),
-            initial_balance: 10_000.0, max_position_size: 1.0,
-            take_profit_pct: 4.0, stop_loss_pct: 2.0,
+            symbol: "T".into(),
+            interval: "1h".into(),
+            initial_balance: 10_000.0,
+            max_position_size: 1.0,
+            take_profit_pct: 4.0,
+            stop_loss_pct: 2.0,
             strategy_name: "EMA_CROSSOVER".into(),
-            commission_pct: 0.0004, breakeven_at_rr: Some(1.0), atr_trail_mult: Some(2.0),
+            commission_pct: 0.0004,
+            breakeven_at_rr: Some(1.0),
+            atr_trail_mult: Some(2.0),
             ..Default::default()
         }
     }
@@ -897,73 +1133,133 @@ mod tests {
     fn score_config_over_windows_is_profit_factor_finite_and_skips_short() {
         // Düşüş serisinde long-only ~hep zarar → pooled PF = 0 (gp=0). Kısa pencere
         // (<MIN_EVAL_WINDOW_LEN) atlanır → işlem yok → MIN_IV_TRADES guard'ı 0 döndürür.
-        let candles: Vec<Candle> = (0..120).map(|i| {
-            let c = 200.0 - 0.1 * i as f64;
-            Candle { open: c, high: c * 1.004, low: c * 0.996, close: c,
-                     volume: 1000.0, symbol: "T".into(), interval: "1h".into(),
-                     ..Default::default() }
-        }).collect();
-        let windows = vec![wnd(0, 50, 4.0, 2.0), wnd(50, 100, 4.0, 2.0), wnd(100, 110, 4.0, 2.0)];
+        let candles: Vec<Candle> = (0..120)
+            .map(|i| {
+                let c = 200.0 - 0.1 * i as f64;
+                Candle {
+                    open: c,
+                    high: c * 1.004,
+                    low: c * 0.996,
+                    close: c,
+                    volume: 1000.0,
+                    symbol: "T".into(),
+                    interval: "1h".into(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let windows = vec![
+            wnd(0, 50, 4.0, 2.0),
+            wnd(50, 100, 4.0, 2.0),
+            wnd(100, 110, 4.0, 2.0),
+        ];
         let s_all = score_config_over_windows(&dir_base_cfg(), &candles, &windows);
-        let only_short = score_config_over_windows(&dir_base_cfg(), &candles, &[wnd(100, 110, 4.0, 2.0)]);
-        assert_eq!(only_short, 0.0, "kısa pencere (<30) → işlem yok → guard 0 döndürür");
+        let only_short =
+            score_config_over_windows(&dir_base_cfg(), &candles, &[wnd(100, 110, 4.0, 2.0)]);
+        assert_eq!(
+            only_short, 0.0,
+            "kısa pencere (<30) → işlem yok → guard 0 döndürür"
+        );
         // PF her zaman SONLU (INF değil — PF_CAP) ve negatif değil (ham PnL'in aksine).
-        assert!(s_all.is_finite() && s_all >= 0.0, "skor finite, non-negatif PF olmalı (PnL değil)");
+        assert!(
+            s_all.is_finite() && s_all >= 0.0,
+            "skor finite, non-negatif PF olmalı (PnL değil)"
+        );
     }
 
     #[test]
     fn evaluate_regime_trail_selects_candidate_and_respects_min_samples() {
         // Belirgin zigzag (~%4 tepe-dip) → EMA crossover sık tetiklenir, hem kazanç
         // hem kayıp üretir (pooled PF anlamlı + MIN_TRADES eşiği aşılır). 4 OOS penceresi.
-        let candles: Vec<Candle> = (0..240).map(|i| {
-            let phase = (i / 8) % 2; // 8 barlık yukarı/aşağı dalgalar
-            let dir = if phase == 0 { 1.0 } else { -1.0 };
-            let base = 100.0 + dir * (i % 8) as f64 * 0.5;
-            let c = base + dir * 0.5;
-            Candle { open: base, high: c.max(base) + 0.6, low: c.min(base) - 0.6, close: c,
-                     volume: 1000.0, symbol: "T".into(), interval: "1h".into(),
-                     ..Default::default() }
-        }).collect();
-        let windows = vec![wnd(0, 60, 4.0, 2.0), wnd(60, 120, 4.0, 2.0),
-                           wnd(120, 180, 4.0, 2.0), wnd(180, 240, 4.0, 2.0)];
+        let candles: Vec<Candle> = (0..240)
+            .map(|i| {
+                let phase = (i / 8) % 2; // 8 barlık yukarı/aşağı dalgalar
+                let dir = if phase == 0 { 1.0 } else { -1.0 };
+                let base = 100.0 + dir * (i % 8) as f64 * 0.5;
+                let c = base + dir * 0.5;
+                Candle {
+                    open: base,
+                    high: c.max(base) + 0.6,
+                    low: c.min(base) - 0.6,
+                    close: c,
+                    volume: 1000.0,
+                    symbol: "T".into(),
+                    interval: "1h".into(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let windows = vec![
+            wnd(0, 60, 4.0, 2.0),
+            wnd(60, 120, 4.0, 2.0),
+            wnd(120, 180, 4.0, 2.0),
+            wnd(180, 240, 4.0, 2.0),
+        ];
         let candidates = [0.5, 1.0, 2.0, 3.0];
         let classify = |_s: &[Candle]| "Trending".to_string();
 
-        let map = evaluate_regime_trail(&candles, &windows, classify, &dir_base_cfg(),
-            &candidates, 2);
+        let map = evaluate_regime_trail(
+            &candles,
+            &windows,
+            classify,
+            &dir_base_cfg(),
+            &candidates,
+            2,
+        );
         // Eligible aday varsa seçilen aday kümesinde olmalı (PF tabanlı seçim).
         if let Some(chosen) = map.get("Trending").copied() {
-            assert!(candidates.contains(&chosen), "seçilen {chosen} aday kümesinde olmalı");
+            assert!(
+                candidates.contains(&chosen),
+                "seçilen {chosen} aday kümesinde olmalı"
+            );
         }
 
         // min_samples pencere sayısından büyük → rejim dışlanır (boş map).
-        let strict = evaluate_regime_trail(&candles, &windows, classify, &dir_base_cfg(),
-            &candidates, 99);
+        let strict = evaluate_regime_trail(
+            &candles,
+            &windows,
+            classify,
+            &dir_base_cfg(),
+            &candidates,
+            99,
+        );
         assert!(strict.is_empty(), "min_samples üstünde rejim yazılmamalı");
 
         // Boş aday kümesi → boş map (panik yok).
-        let empty = evaluate_regime_trail(&candles, &windows, classify, &dir_base_cfg(),
-            &[], 1);
+        let empty = evaluate_regime_trail(&candles, &windows, classify, &dir_base_cfg(), &[], 1);
         assert!(empty.is_empty());
     }
 
     #[test]
     fn evaluate_exit_models_returns_stats_per_model_in_order() {
-        let candles: Vec<Candle> = (0..240).map(|i| {
-            let phase = (i / 8) % 2;
-            let dir = if phase == 0 { 1.0 } else { -1.0 };
-            let base = 100.0 + dir * (i % 8) as f64 * 0.5;
-            let c = base + dir * 0.5;
-            Candle { open: base, high: c.max(base) + 0.6, low: c.min(base) - 0.6, close: c,
-                     volume: 1000.0, symbol: "T".into(), interval: "1h".into(),
-                     ..Default::default() }
-        }).collect();
-        let windows = vec![wnd(0, 60, 4.0, 2.0), wnd(60, 120, 4.0, 2.0),
-                           wnd(120, 180, 4.0, 2.0), wnd(180, 240, 4.0, 2.0)];
+        let candles: Vec<Candle> = (0..240)
+            .map(|i| {
+                let phase = (i / 8) % 2;
+                let dir = if phase == 0 { 1.0 } else { -1.0 };
+                let base = 100.0 + dir * (i % 8) as f64 * 0.5;
+                let c = base + dir * 0.5;
+                Candle {
+                    open: base,
+                    high: c.max(base) + 0.6,
+                    low: c.min(base) - 0.6,
+                    close: c,
+                    volume: 1000.0,
+                    symbol: "T".into(),
+                    interval: "1h".into(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let windows = vec![
+            wnd(0, 60, 4.0, 2.0),
+            wnd(60, 120, 4.0, 2.0),
+            wnd(120, 180, 4.0, 2.0),
+            wnd(180, 240, 4.0, 2.0),
+        ];
         let exits = vec![
-            ("trailing-yok".to_string(), None,      Some(1.0)),
-            ("baseline".to_string(),     Some(2.0), Some(1.0)),
-            ("gevsek".to_string(),       Some(8.0), Some(1.0)),
+            ("trailing-yok".to_string(), None, Some(1.0)),
+            ("baseline".to_string(), Some(2.0), Some(1.0)),
+            ("gevsek".to_string(), Some(8.0), Some(1.0)),
         ];
         let stats = evaluate_exit_models(&candles, &windows, &dir_base_cfg(), &exits);
         assert_eq!(stats.len(), 3, "her model için bir kayıt");
@@ -979,28 +1275,51 @@ mod tests {
 
     #[test]
     fn evaluate_edge_filters_returns_stats_and_tighter_filter_trades_no_more() {
-        let candles: Vec<Candle> = (0..240).map(|i| {
-            let phase = (i / 8) % 2;
-            let dir = if phase == 0 { 1.0 } else { -1.0 };
-            let base = 100.0 + dir * (i % 8) as f64 * 0.5;
-            let c = base + dir * 0.5;
-            Candle { open: base, high: c.max(base) + 0.6, low: c.min(base) - 0.6, close: c,
-                     volume: 1000.0, symbol: "T".into(), interval: "1h".into(),
-                     ..Default::default() }
-        }).collect();
-        let windows = vec![wnd(0, 60, 4.0, 2.0), wnd(60, 120, 4.0, 2.0),
-                           wnd(120, 180, 4.0, 2.0), wnd(180, 240, 4.0, 2.0)];
+        let candles: Vec<Candle> = (0..240)
+            .map(|i| {
+                let phase = (i / 8) % 2;
+                let dir = if phase == 0 { 1.0 } else { -1.0 };
+                let base = 100.0 + dir * (i % 8) as f64 * 0.5;
+                let c = base + dir * 0.5;
+                Candle {
+                    open: base,
+                    high: c.max(base) + 0.6,
+                    low: c.min(base) - 0.6,
+                    close: c,
+                    volume: 1000.0,
+                    symbol: "T".into(),
+                    interval: "1h".into(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let windows = vec![
+            wnd(0, 60, 4.0, 2.0),
+            wnd(60, 120, 4.0, 2.0),
+            wnd(120, 180, 4.0, 2.0),
+            wnd(180, 240, 4.0, 2.0),
+        ];
         let thresholds = vec![None, Some(0.10), Some(0.40)];
         let stats = evaluate_edge_filters(&candles, &windows, &dir_base_cfg(), &thresholds);
         assert_eq!(stats.len(), 3);
         assert_eq!(stats[0].label, "filtre-yok");
         assert_eq!(stats[2].label, "edge≥0.40");
         // Daha sıkı eşik daha çok işlem AÇMAMALI (monotonluk: filtre yalnız eler).
-        assert!(stats[0].total_trades >= stats[1].total_trades,
-            "filtre-yok ({}) ≥ edge≥0.10 ({})", stats[0].total_trades, stats[1].total_trades);
-        assert!(stats[1].total_trades >= stats[2].total_trades,
-            "edge≥0.10 ({}) ≥ edge≥0.40 ({})", stats[1].total_trades, stats[2].total_trades);
-        for s in &stats { assert!(!s.profit_factor.is_nan() && s.expectancy.is_finite()); }
+        assert!(
+            stats[0].total_trades >= stats[1].total_trades,
+            "filtre-yok ({}) ≥ edge≥0.10 ({})",
+            stats[0].total_trades,
+            stats[1].total_trades
+        );
+        assert!(
+            stats[1].total_trades >= stats[2].total_trades,
+            "edge≥0.10 ({}) ≥ edge≥0.40 ({})",
+            stats[1].total_trades,
+            stats[2].total_trades
+        );
+        for s in &stats {
+            assert!(!s.profit_factor.is_nan() && s.expectancy.is_finite());
+        }
     }
 
     #[test]
@@ -1024,7 +1343,12 @@ mod tests {
         // 15m=1.0, 1h=1.5. current yok → en iyi (1h) + skorlar 5m hariç.
         let load = |_tf: &str| -> Vec<Candle> { vec![Candle::default(); 100] };
         let score = |tf: &str, _c: &[Candle]| -> Option<f64> {
-            match tf { "5m" => None, "15m" => Some(1.0), "1h" => Some(1.5), _ => None }
+            match tf {
+                "5m" => None,
+                "15m" => Some(1.0),
+                "1h" => Some(1.5),
+                _ => None,
+            }
         };
         let (choice, scored) = evaluate_symbol_interval(&cands, load, score, None, 0.0);
         assert_eq!(choice, Some("1h".to_string()));
@@ -1032,11 +1356,16 @@ mod tests {
 
         // current=15m, margin 1.0: 1h (1.5) > 15m (1.0)+1.0=2.0 DEĞİL → 15m korunur.
         let (hold, _) = evaluate_symbol_interval(&cands, load, score, Some("15m"), 1.0);
-        assert_eq!(hold, Some("15m".to_string()), "marj altında interval değişmemeli");
+        assert_eq!(
+            hold,
+            Some("15m".to_string()),
+            "marj altında interval değişmemeli"
+        );
 
         // Hiçbir aday skorlanamazsa (None,[]) — flip-flop/yanlış yazım önleme.
         let none_score = |_tf: &str, _c: &[Candle]| -> Option<f64> { None };
-        let (empty_choice, empty_scored) = evaluate_symbol_interval(&cands, load, none_score, Some("1h"), 0.0);
+        let (empty_choice, empty_scored) =
+            evaluate_symbol_interval(&cands, load, none_score, Some("1h"), 0.0);
         assert_eq!(empty_choice, None);
         assert!(empty_scored.is_empty());
     }
@@ -1044,36 +1373,77 @@ mod tests {
     #[test]
     fn wf_cross_check_counts_windows_and_consistency() {
         // Düşüş serisi + long-only → her pencere zarar → profitable_windows=0, pooled_pf=0.
-        let candles: Vec<Candle> = (0..120).map(|i| {
-            let c = 200.0 - 0.1 * i as f64;
-            Candle { open: c, high: c * 1.004, low: c * 0.996, close: c,
-                     volume: 1000.0, symbol: "T".into(), interval: "1h".into(), ..Default::default() }
-        }).collect();
+        let candles: Vec<Candle> = (0..120)
+            .map(|i| {
+                let c = 200.0 - 0.1 * i as f64;
+                Candle {
+                    open: c,
+                    high: c * 1.004,
+                    low: c * 0.996,
+                    close: c,
+                    volume: 1000.0,
+                    symbol: "T".into(),
+                    interval: "1h".into(),
+                    ..Default::default()
+                }
+            })
+            .collect();
         let windows = vec![wnd(0, 50, 4.0, 2.0), wnd(50, 100, 4.0, 2.0)];
         let cc = wf_cross_check(&dir_base_cfg(), &candles, &windows);
-        assert_eq!(cc.profitable_windows, 0, "düşüşte hiçbir pencere kârlı değil");
+        assert_eq!(
+            cc.profitable_windows, 0,
+            "düşüşte hiçbir pencere kârlı değil"
+        );
         assert!(cc.pooled_pf >= 0.0 && cc.pooled_pf < 1.0);
         // consistency math.
-        let synth = WfCrossCheck { windows: 4, profitable_windows: 3, pooled_pf: 1.2, trades: 40 };
+        let synth = WfCrossCheck {
+            windows: 4,
+            profitable_windows: 3,
+            pooled_pf: 1.2,
+            trades: 40,
+        };
         assert!((synth.consistency() - 0.75).abs() < 1e-9);
         assert_eq!(WfCrossCheck::default().consistency(), 0.0, "işlemsiz → 0");
     }
 
     #[test]
     fn window_significance_binomial_sf_known_values() {
-        let sig = |w: usize, p: usize| WfCrossCheck { windows: w, profitable_windows: p, pooled_pf: 1.0, trades: 1 }.window_significance();
+        let sig = |w: usize, p: usize| {
+            WfCrossCheck {
+                windows: w,
+                profitable_windows: p,
+                pooled_pf: 1.0,
+                trades: 1,
+            }
+            .window_significance()
+        };
         // P(X≥k | Binom(n,0.5)) elle: 5/5 → 1/32; 6/5 → 7/64; 10/5 → 638/1024; 20/11 ≈ 0.412.
-        assert!((sig(5, 5) - 1.0/32.0).abs() < 1e-12, "5/5 pencere → 0.03125");
-        assert!((sig(6, 5) - 7.0/64.0).abs() < 1e-12, "6/5 → 0.109375");
-        assert!((sig(10, 5) - 638.0/1024.0).abs() < 1e-12, "10/5 → 0.623 (yazı-tura civarı)");
-        assert!((sig(20, 11) - 0.4119).abs() < 1e-3, "20/11 → ~0.412: 'tutarlılık 0.55' anlamsız");
+        assert!(
+            (sig(5, 5) - 1.0 / 32.0).abs() < 1e-12,
+            "5/5 pencere → 0.03125"
+        );
+        assert!((sig(6, 5) - 7.0 / 64.0).abs() < 1e-12, "6/5 → 0.109375");
+        assert!(
+            (sig(10, 5) - 638.0 / 1024.0).abs() < 1e-12,
+            "10/5 → 0.623 (yazı-tura civarı)"
+        );
+        assert!(
+            (sig(20, 11) - 0.4119).abs() < 1e-3,
+            "20/11 → ~0.412: 'tutarlılık 0.55' anlamsız"
+        );
         // Sınır: pencere yok → 1.0 (kanıt yok); k=0 → 1.0 (P(X≥0)=1); k=n monoton azalır.
         assert_eq!(sig(0, 0), 1.0, "windows=0 → 1.0");
         assert_eq!(sig(8, 0), 1.0, "k=0 → P(X≥0)=1");
-        assert!(sig(20, 15) < sig(20, 11), "daha çok kârlı pencere → daha küçük p (daha anlamlı)");
+        assert!(
+            sig(20, 15) < sig(20, 11),
+            "daha çok kârlı pencere → daha küçük p (daha anlamlı)"
+        );
         // KÜÇÜK-ÖRNEKLEM özü: aynı %60 tutarlılık, büyük örneklemde anlamlı, küçükte değil.
         assert!(sig(100, 60) < 0.05, "60/100 (=%60) güçlü → p<0.05 (≈0.028)");
-        assert!(sig(5, 3) > 0.10, "3/5 (=%60) güçsüz → p=0.50 (örneklem küçük → ayrışmaz)");
+        assert!(
+            sig(5, 3) > 0.10,
+            "3/5 (=%60) güçsüz → p=0.50 (örneklem küçük → ayrışmaz)"
+        );
     }
 
     #[test]
@@ -1081,7 +1451,11 @@ mod tests {
         let pool = vec!["EMA".to_string(), "ICT".to_string(), "RSI".to_string()];
         // PF: EMA=0.68 (edge yok), ICT=1.53 (edge), RSI skorlanamaz (None).
         let score = |name: &str| -> Option<f64> {
-            match name { "EMA" => Some(0.68), "ICT" => Some(1.53), _ => None }
+            match name {
+                "EMA" => Some(0.68),
+                "ICT" => Some(1.53),
+                _ => None,
+            }
         };
         // current yok, min_score=1.0 → en iyi ICT (1.53 ≥ 1.0) atanır; RSI atlanır.
         let (choice, scored) = evaluate_symbol_strategy(&pool, score, None, 0.10, 1.0);
@@ -1089,40 +1463,85 @@ mod tests {
         assert_eq!(scored.len(), 2, "RSI skorlanamadı → atlanmalı");
 
         // Tüm adaylar PF<1.0 + mevcut YOK → Keep (gürültüde per-symbol override yok).
-        let weak = |name: &str| -> Option<f64> { match name { "EMA" => Some(0.7), "ICT" => Some(0.9), _ => None } };
+        let weak = |name: &str| -> Option<f64> {
+            match name {
+                "EMA" => Some(0.7),
+                "ICT" => Some(0.9),
+                _ => None,
+            }
+        };
         let (none_choice, _) = evaluate_symbol_strategy(&pool, weak, None, 0.10, 1.0);
-        assert_eq!(none_choice, StrategyChoice::Keep, "edge yokken (PF<1.0) atama yapılmamalı");
+        assert_eq!(
+            none_choice,
+            StrategyChoice::Keep,
+            "edge yokken (PF<1.0) atama yapılmamalı"
+        );
 
         // current=ICT(1.53), aday EMA daha düşük → margin'le ICT korunur, yazma yok → Keep.
         let (hold, _) = evaluate_symbol_strategy(&pool, score, Some("ICT"), 0.10, 1.0);
-        assert_eq!(hold, StrategyChoice::Keep, "mevcut zaten en iyi + edge'li → Keep (flip-flop yok)");
+        assert_eq!(
+            hold,
+            StrategyChoice::Keep,
+            "mevcut zaten en iyi + edge'li → Keep (flip-flop yok)"
+        );
     }
 
     #[test]
     fn evaluate_symbol_strategy_demotes_decayed_current() {
         let pool = vec!["EMA".to_string(), "ICT".to_string()];
         // Çürüme: seed=EMA artık 0.7 (<1.0), tek alternatif ICT=0.9 de edge'siz → DEMOTE (kaldır).
-        let decayed = |name: &str| -> Option<f64> { match name { "EMA" => Some(0.7), "ICT" => Some(0.9), _ => None } };
+        let decayed = |name: &str| -> Option<f64> {
+            match name {
+                "EMA" => Some(0.7),
+                "ICT" => Some(0.9),
+                _ => None,
+            }
+        };
         let (d, _) = evaluate_symbol_strategy(&pool, decayed, Some("EMA"), 0.10, 1.0);
-        assert_eq!(d, StrategyChoice::Demote,
-            "çürüyen mevcut + edge'li aday yok → KALDIR (ölü seed canlıyı sürüklemesin)");
+        assert_eq!(
+            d,
+            StrategyChoice::Demote,
+            "çürüyen mevcut + edge'li aday yok → KALDIR (ölü seed canlıyı sürüklemesin)"
+        );
 
         // Çürüyen seed ama edge'li alternatif var → margin'i beklemeden o stratejiye GEÇ.
         // EMA(seed)=0.7<1.0 çürüdü; ICT=1.4≥1.0 → flip-flop margin ölü seed'i korumaz → Assign(ICT).
-        let migrate = |name: &str| -> Option<f64> { match name { "EMA" => Some(0.7), "ICT" => Some(1.4), _ => None } };
+        let migrate = |name: &str| -> Option<f64> {
+            match name {
+                "EMA" => Some(0.7),
+                "ICT" => Some(1.4),
+                _ => None,
+            }
+        };
         let (m, _) = evaluate_symbol_strategy(&pool, migrate, Some("EMA"), 0.10, 1.0);
-        assert_eq!(m, StrategyChoice::Assign("ICT".to_string()),
-            "çürüyen seed yerine edge'li adaya margin'siz geçilir");
+        assert_eq!(
+            m,
+            StrategyChoice::Assign("ICT".to_string()),
+            "çürüyen seed yerine edge'li adaya margin'siz geçilir"
+        );
 
         // Mevcut listede hiç skorlanamadı (None) → çürümüş sayılır; edge'li aday yoksa Demote.
-        let cur_unscorable = |name: &str| -> Option<f64> { match name { "ICT" => Some(0.8), _ => None } };
+        let cur_unscorable = |name: &str| -> Option<f64> {
+            match name {
+                "ICT" => Some(0.8),
+                _ => None,
+            }
+        };
         let (u, _) = evaluate_symbol_strategy(&pool, cur_unscorable, Some("EMA"), 0.10, 1.0);
-        assert_eq!(u, StrategyChoice::Demote, "skorlanamayan mevcut + edge yok → Demote");
+        assert_eq!(
+            u,
+            StrategyChoice::Demote,
+            "skorlanamayan mevcut + edge yok → Demote"
+        );
 
         // Aday hiç skorlanamadı (boş scored) → veriden hüküm çıkmaz → Keep (yanlışlıkla demote etme).
         let empty = |_: &str| -> Option<f64> { None };
         let (k, scored) = evaluate_symbol_strategy(&pool, empty, Some("EMA"), 0.10, 1.0);
-        assert_eq!(k, StrategyChoice::Keep, "skor yokken çürüme kararı verilmez");
+        assert_eq!(
+            k,
+            StrategyChoice::Keep,
+            "skor yokken çürüme kararı verilmez"
+        );
         assert!(scored.is_empty());
     }
 
@@ -1147,58 +1566,89 @@ mod tests {
         use chrono::{TimeZone, Utc};
         // İstikrarlı düşüş: LongOnly ya işlem açmaz ya zarar; RegimeDirectional short ile
         // yakalar → rp >= lp → "Down" rejimi için true.
-        let candles: Vec<Candle> = (0..200).map(|i| {
-            let f = i as f64;
-            let c = 200.0 - 0.10 * f + 4.0 * (f * 0.3).sin();
-            Candle {
-                timestamp: Utc.timestamp_opt(1_700_000_000 + i as i64 * 3600, 0).unwrap(),
-                open: c, high: c * 1.004, low: c * 0.996, close: c,
-                volume: 1000.0, symbol: "T".into(), interval: "1h".into(),
-            }
-        }).collect();
+        let candles: Vec<Candle> = (0..200)
+            .map(|i| {
+                let f = i as f64;
+                let c = 200.0 - 0.10 * f + 4.0 * (f * 0.3).sin();
+                Candle {
+                    timestamp: Utc
+                        .timestamp_opt(1_700_000_000 + i as i64 * 3600, 0)
+                        .unwrap(),
+                    open: c,
+                    high: c * 1.004,
+                    low: c * 0.996,
+                    close: c,
+                    volume: 1000.0,
+                    symbol: "T".into(),
+                    interval: "1h".into(),
+                }
+            })
+            .collect();
         let windows = vec![wnd(0, 200, 4.0, 2.0)];
         let map = evaluate_regime_direction(
-            &candles, &windows, |_| "Down".to_string(), &dir_base_cfg(), 1,
+            &candles,
+            &windows,
+            |_| "Down".to_string(),
+            &dir_base_cfg(),
+            1,
         );
-        assert_eq!(map.get("Down"), Some(&true),
-            "düşüşte RegimeDirectional LongOnly'yi en az eşitlemeli (short kazancı)");
+        assert_eq!(
+            map.get("Down"),
+            Some(&true),
+            "düşüşte RegimeDirectional LongOnly'yi en az eşitlemeli (short kazancı)"
+        );
     }
 
     #[test]
     fn evaluate_regime_direction_respects_min_samples() {
-        let candles: Vec<Candle> = (0..60).map(|i| Candle {
-            close: 100.0 - i as f64, open: 100.0 - i as f64,
-            high: 100.0 - i as f64, low: 100.0 - i as f64,
-            ..Default::default()
-        }).collect();
+        let candles: Vec<Candle> = (0..60)
+            .map(|i| Candle {
+                close: 100.0 - i as f64,
+                open: 100.0 - i as f64,
+                high: 100.0 - i as f64,
+                low: 100.0 - i as f64,
+                ..Default::default()
+            })
+            .collect();
         // Tek pencere → n=1; min_samples=2 ile elenir → boş map.
         let windows = vec![wnd(0, 60, 4.0, 2.0)];
         let map = evaluate_regime_direction(
-            &candles, &windows, |_| "Down".to_string(), &dir_base_cfg(), 2,
+            &candles,
+            &windows,
+            |_| "Down".to_string(),
+            &dir_base_cfg(),
+            2,
         );
         assert!(map.is_empty(), "min_samples=2 altında rejim yazılmamalı");
     }
 
     #[test]
     fn aggregate_skips_regimes_below_min_samples() {
-        let candles: Vec<Candle> = (0..40).map(|i| Candle {
-            close: 100.0 + i as f64,
-            ..Default::default()
-        }).collect();
+        let candles: Vec<Candle> = (0..40)
+            .map(|i| Candle {
+                close: 100.0 + i as f64,
+                ..Default::default()
+            })
+            .collect();
         let windows = vec![
-            wnd(0,  10, 2.0, 1.0),
+            wnd(0, 10, 2.0, 1.0),
             wnd(10, 20, 3.0, 1.5),
             // Aşağıdaki tek pencere Trending — min_samples=2 ile elenir.
             wnd(20, 30, 5.0, 2.5),
         ];
         let classify = |s: &[Candle]| {
-            if s.first().map(|c| c.close).unwrap_or(0.0) < 120.0 { "Ranging".into() }
-            else { "Trending".into() }
+            if s.first().map(|c| c.close).unwrap_or(0.0) < 120.0 {
+                "Ranging".into()
+            } else {
+                "Trending".into()
+            }
         };
         let agg = aggregate_windows_by_regime(&candles, &windows, classify, 2);
         assert!(agg.contains_key("Ranging"));
-        assert!(!agg.contains_key("Trending"),
-            "tek örnekli rejim yazılmamalı, min_samples=2");
+        assert!(
+            !agg.contains_key("Trending"),
+            "tek örnekli rejim yazılmamalı, min_samples=2"
+        );
     }
 
     #[test]

@@ -24,6 +24,15 @@ pub(crate) const YAHOO_UA: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 const YAHOO_HOSTS: &[&str] = &["query1.finance.yahoo.com", "query2.finance.yahoo.com"];
 const MAX_RETRIES: usize = 3;
+const DEFAULT_RETRY_BASE_MS: u64 = 500;
+const MAX_RETRY_DELAY_MS: u64 = 30_000;
+
+fn retry_delay_ms(base_ms: u64, attempt_index: usize) -> u64 {
+    base_ms
+        .min(MAX_RETRY_DELAY_MS)
+        .saturating_mul(1u64 << attempt_index.min(6))
+        .min(MAX_RETRY_DELAY_MS)
+}
 
 pub struct YahooFetcher {
     client: Client,
@@ -64,13 +73,20 @@ impl YahooFetcher {
 
     /// Yahoo chart yanıtını `Candle`'a parse et — SAF (ağsız test edilir). `out_symbol` üretilen
     /// mumun `symbol` alanı (çıplak sembol; Yahoo-eki taşımaz). Geçersiz/eksik bar atlanır.
-    pub fn parse_chart(body: &str, out_symbol: &str, interval: &str) -> Result<Vec<Candle>, String> {
+    pub fn parse_chart(
+        body: &str,
+        out_symbol: &str,
+        interval: &str,
+    ) -> Result<Vec<Candle>, String> {
         let v: serde_json::Value =
             serde_json::from_str(body).map_err(|e| format!("Yahoo JSON parse: {e}"))?;
         // Hata gövdesi: {"chart":{"result":null,"error":{"code":..,"description":..}}}
         if let Some(err) = v.pointer("/chart/error") {
             if !err.is_null() {
-                let desc = err.get("description").and_then(|d| d.as_str()).unwrap_or("bilinmeyen");
+                let desc = err
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("bilinmeyen");
                 return Err(format!("Yahoo hata [{out_symbol}]: {desc}"));
             }
         }
@@ -92,7 +108,8 @@ impl YahooFetcher {
                 _ => continue,
             };
             let get_f = |key: &str| {
-                quote.get(key)
+                quote
+                    .get(key)
                     .and_then(|a| a.as_array())
                     .and_then(|a| a.get(i))
                     .and_then(|x| x.as_f64())
@@ -100,7 +117,9 @@ impl YahooFetcher {
             // Yahoo seans-içi eksik barda null koyar → herhangi biri yoksa barı atla.
             let (open, high, low, close, volume) =
                 match (get_f("open"), get_f("high"), get_f("low"), get_f("close")) {
-                    (Some(o), Some(h), Some(l), Some(c)) => (o, h, l, c, get_f("volume").unwrap_or(0.0)),
+                    (Some(o), Some(h), Some(l), Some(c)) => {
+                        (o, h, l, c, get_f("volume").unwrap_or(0.0))
+                    }
                     _ => continue,
                 };
             if validate_ohlcv(open, high, low, close, volume).is_err() {
@@ -127,39 +146,58 @@ impl YahooFetcher {
     /// (`1mo`/`6mo`/`1y`/`2y`/`5y`/`10y`/`max`). `out_symbol` üretilen mumun çıplak sembolü.
     /// query1↔query2 host-rotasyonu + retry (429/5xx). En yeni sonda, artan sıralı döner.
     pub async fn fetch_daily(
-        &self, ticker: &str, out_symbol: &str, interval: &str, range: &str,
+        &self,
+        ticker: &str,
+        out_symbol: &str,
+        interval: &str,
+        range: &str,
     ) -> Result<Vec<Candle>, String> {
         let mut last_err = String::from("bilinmeyen");
-        for host in YAHOO_HOSTS {
+        let retry_base_ms = std::env::var("YAHOO_RETRY_BASE_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_RETRY_BASE_MS)
+            .min(MAX_RETRY_DELAY_MS);
+        for attempt_index in 0..(YAHOO_HOSTS.len() * MAX_RETRIES) {
+            let host = YAHOO_HOSTS[attempt_index % YAHOO_HOSTS.len()];
             let url = format!(
                 "https://{host}/v8/finance/chart/{ticker}?interval={interval}&range={range}"
             );
-            for attempt in 1..=MAX_RETRIES {
-                match self.client.get(&url).send().await {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        if status.as_u16() == 429 {
-                            last_err = format!("[{host}] 429 (rate-limit) → diğer host");
-                            break; // bu host'ta retry boşuna → host değiştir
+            let attempt = attempt_index + 1;
+            match self.client.get(&url).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.as_u16() == 429 || status.is_server_error() {
+                        last_err = if status.as_u16() == 429 {
+                            format!("[{host}] 429 (rate-limit)")
+                        } else {
+                            format!("[{host}] HTTP {status}")
+                        };
+                        if attempt < YAHOO_HOSTS.len() * MAX_RETRIES {
+                            let delay = retry_delay_ms(retry_base_ms, attempt_index);
+                            tokio::time::sleep(Duration::from_millis(delay)).await;
                         }
-                        if status.is_server_error() {
-                            tokio::time::sleep(Duration::from_secs(attempt as u64)).await;
-                            continue;
-                        }
-                        if !status.is_success() {
-                            return Err(format!("Yahoo HTTP {status} [{out_symbol}]"));
-                        }
-                        let body = resp.text().await.map_err(|e| e.to_string())?;
-                        return Self::parse_chart(&body, out_symbol, interval);
+                        continue;
                     }
-                    Err(e) => {
-                        last_err = format!("ağ: {e}");
-                        tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
+                    if !status.is_success() {
+                        return Err(format!("Yahoo HTTP {status} [{out_symbol}]"));
+                    }
+                    let body = resp.text().await.map_err(|e| e.to_string())?;
+                    return Self::parse_chart(&body, out_symbol, interval);
+                }
+                Err(e) => {
+                    last_err = format!("ağ: {e}");
+                    if attempt < YAHOO_HOSTS.len() * MAX_RETRIES {
+                        let delay = retry_delay_ms(retry_base_ms, attempt_index);
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
                     }
                 }
             }
         }
-        Err(format!("Yahoo çekme başarısız [{out_symbol}]: {last_err}"))
+        Err(format!(
+            "Yahoo çekme başarısız [{out_symbol}]: {last_err}; 429 Yahoo tarafı rate-limitidir, \
+             tekrar denemeyi seyrekleştirin veya daha sonra çalıştırın"
+        ))
     }
 }
 
@@ -171,8 +209,19 @@ impl MarketFetcher for YahooFetcher {
 
     /// Genel `MarketFetcher` yüzeyi: sembol zaten Yahoo-doğal ticker varsayılır (operatör/çağıran
     /// eki vermiş olur). `limit`→`range` kabaca eşlenir (günlük için 2y bolca yeter).
-    async fn fetch_latest(&self, symbol: &str, interval: &str, limit: usize) -> Result<Vec<Candle>, String> {
-        let range = if limit > 1300 { "10y" } else if limit > 260 { "5y" } else { "2y" };
+    async fn fetch_latest(
+        &self,
+        symbol: &str,
+        interval: &str,
+        limit: usize,
+    ) -> Result<Vec<Candle>, String> {
+        let range = if limit > 1300 {
+            "10y"
+        } else if limit > 260 {
+            "5y"
+        } else {
+            "2y"
+        };
         let mut candles = self.fetch_daily(symbol, symbol, interval, range).await?;
         if candles.len() > limit {
             candles = candles.split_off(candles.len() - limit);
@@ -198,6 +247,14 @@ mod tests {
     }
 
     #[test]
+    fn retry_delay_is_exponential_and_capped() {
+        assert_eq!(retry_delay_ms(100, 0), 100);
+        assert_eq!(retry_delay_ms(100, 1), 200);
+        assert_eq!(retry_delay_ms(100, 3), 800);
+        assert_eq!(retry_delay_ms(10_000, 2), MAX_RETRY_DELAY_MS);
+    }
+
+    #[test]
     fn parse_chart_extracts_ascending_candles() {
         let body = json!({
             "chart": {"error": null, "result": [{
@@ -211,7 +268,8 @@ mod tests {
                     "volume":[1000.0, 1200.0]
                 }]}
             }]}
-        }).to_string();
+        })
+        .to_string();
         let c = YahooFetcher::parse_chart(&body, "THYAO", "1d").unwrap();
         assert_eq!(c.len(), 2);
         assert_eq!(c[0].symbol, "THYAO");
@@ -233,7 +291,8 @@ mod tests {
                     "volume":[1000.0, null, 900.0]
                 }]}
             }]}
-        }).to_string();
+        })
+        .to_string();
         let c = YahooFetcher::parse_chart(&body, "X", "1d").unwrap();
         assert_eq!(c.len(), 2, "null bar atlanır");
     }

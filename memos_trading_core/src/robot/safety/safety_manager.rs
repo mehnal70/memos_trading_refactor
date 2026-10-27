@@ -1,5 +1,5 @@
 use crate::core::types::Trade;
-use chrono::{DateTime, Utc, Duration};
+use chrono::{DateTime, Duration, Utc};
 use std::collections::VecDeque;
 
 /// Maksimum drawdown izlemi için yapı
@@ -16,7 +16,7 @@ impl SafetyDrawdownMonitor {
     pub fn new(initial_balance: f64) -> Self {
         let mut history = VecDeque::new();
         history.push_back((Utc::now(), initial_balance));
-        
+
         Self {
             peak_balance: initial_balance,
             current_balance: initial_balance,
@@ -28,21 +28,20 @@ impl SafetyDrawdownMonitor {
     /// Balance güncelle ve drawdown hesapla
     pub fn update_balance(&mut self, new_balance: f64) {
         self.current_balance = new_balance;
-        
+
         // Peak'i güncelle
         if new_balance > self.peak_balance {
             self.peak_balance = new_balance;
         }
-        
+
         // Mevcut drawdown hesapla
         if self.peak_balance > 0.0 {
-            self.max_drawdown_pct = 
-                ((self.peak_balance - new_balance) / self.peak_balance) * 100.0;
+            self.max_drawdown_pct = ((self.peak_balance - new_balance) / self.peak_balance) * 100.0;
         }
-        
+
         // History'e ekle
         self.history.push_back((Utc::now(), new_balance));
-        
+
         // Son 100 kaydı tut (bellek yönetimi)
         while self.history.len() > 100 {
             self.history.pop_front();
@@ -65,11 +64,11 @@ impl SafetyDrawdownMonitor {
 /// Safety yönetim kuralları
 #[derive(Debug, Clone)]
 pub struct SafetyRules {
-    pub max_drawdown_pct: f64,              // Maksimum %15 drawdown
-    pub max_consecutive_losses: usize,     // Maksimum 5 ardışık kayıp
-    pub circuit_breaker_threshold: f64,    // %10'dan fazla loss → durdur
-    pub daily_loss_limit_pct: f64,         // Günlük maksimum %2 loss
-    pub pause_duration_minutes: u64,       // Hatadan sonra pause süresi
+    pub max_drawdown_pct: f64,          // Maksimum %15 drawdown
+    pub max_consecutive_losses: usize,  // Maksimum 5 ardışık kayıp
+    pub circuit_breaker_threshold: f64, // %10'dan fazla loss → durdur
+    pub daily_loss_limit_pct: f64,      // Günlük maksimum %2 loss
+    pub pause_duration_minutes: u64,    // Hatadan sonra pause süresi
 }
 
 impl Default for SafetyRules {
@@ -162,9 +161,8 @@ impl SafetyManager {
     /// Hata durumunda pause tetikle
     fn trigger_pause(&mut self) {
         self.is_paused = true;
-        self.pause_until = Some(
-            Utc::now() + Duration::minutes(self.rules.pause_duration_minutes as i64)
-        );
+        self.pause_until =
+            Some(Utc::now() + Duration::minutes(self.rules.pause_duration_minutes as i64));
     }
 
     /// Safety durum kontrolü - trading yapılabilir mi?
@@ -233,10 +231,10 @@ mod tests {
         let mut monitor = SafetyDrawdownMonitor::new(10000.0);
         monitor.update_balance(9000.0); // %10 loss
         assert_eq!(monitor.current_drawdown_pct(), 10.0);
-        
+
         monitor.update_balance(8000.0); // %20 total loss
         assert_eq!(monitor.current_drawdown_pct(), 20.0);
-        
+
         // Eski peak'ten recovery
         monitor.update_balance(9500.0);
         assert_eq!(monitor.current_drawdown_pct(), 5.0);
@@ -252,11 +250,14 @@ mod tests {
 
     #[test]
     fn test_circuit_breaker_trigger() {
-        let mut manager = SafetyManager::new(10000.0, SafetyRules {
-            max_drawdown_pct: 10.0,
-            ..Default::default()
-        });
-        
+        let mut manager = SafetyManager::new(
+            10000.0,
+            SafetyRules {
+                max_drawdown_pct: 10.0,
+                ..Default::default()
+            },
+        );
+
         manager.update_balance(8500.0); // %15 drawdown
         let result = manager.check_trade_safety(&Trade {
             id: None,
@@ -270,18 +271,21 @@ mod tests {
             pnl_pct: None,
             strategy: "test".to_string(),
         });
-        
+
         assert!(result.is_err());
         assert!(manager.circuit_breaker_triggered);
     }
 
     #[test]
     fn test_consecutive_losses_pause() {
-        let mut manager = SafetyManager::new(10000.0, SafetyRules {
-            max_consecutive_losses: 2,
-            ..Default::default()
-        });
-        
+        let mut manager = SafetyManager::new(
+            10000.0,
+            SafetyRules {
+                max_consecutive_losses: 2,
+                ..Default::default()
+            },
+        );
+
         // 2 ardışık loss
         for _ in 0..3 {
             let trade = Trade {
@@ -296,10 +300,10 @@ mod tests {
                 pnl_pct: Some(-1.0),
                 strategy: "test".to_string(),
             };
-            
+
             let _ = manager.check_trade_safety(&trade);
         }
-        
+
         assert!(manager.is_paused);
     }
 

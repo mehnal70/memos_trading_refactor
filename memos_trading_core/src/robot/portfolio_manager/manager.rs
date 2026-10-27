@@ -3,8 +3,8 @@
 // Srivastava mimarisi: Multi-position tracking ve PnL yönetimi
 
 use super::types::*;
-use crate::Result as MemosTradingResult;
 use crate::MemosTradingError;
+use crate::Result as MemosTradingResult;
 use chrono::Utc;
 use std::collections::HashMap;
 
@@ -13,19 +13,19 @@ use std::collections::HashMap;
 pub struct PortfolioManager {
     /// Toplam sermaye
     initial_capital: f64,
-    
+
     /// Mevcut cash
     available_cash: f64,
-    
+
     /// Açık pozisyonlar (symbol → Position)
     positions: HashMap<String, Position>,
-    
+
     /// Kapalı işlemler
     closed_trades: Vec<ClosedTrade>,
-    
+
     /// En yüksek portfolio value (drawdown hesabı için)
     peak_value: f64,
-    
+
     /// Equity history (hesaplanan)
     equity_history: Vec<(chrono::DateTime<Utc>, f64)>,
 }
@@ -41,9 +41,9 @@ impl PortfolioManager {
             equity_history: vec![(Utc::now(), initial_capital)],
         }
     }
-    
+
     // ============ Position Management ============
-    
+
     /// Yeni pozisyon aç
     pub fn open_position(
         &mut self,
@@ -57,21 +57,20 @@ impl PortfolioManager {
         // Kontrol: Yeterli cash var mı?
         let required = entry_price * quantity;
         if self.available_cash < required {
-            return Err(MemosTradingError::Unknown(
-                format!(
-                    "Insufficient cash: need {}, have {}",
-                    required, self.available_cash
-                )
-            ));
+            return Err(MemosTradingError::Unknown(format!(
+                "Insufficient cash: need {}, have {}",
+                required, self.available_cash
+            )));
         }
-        
+
         // Kontrol: Aynı sembol için sadece bir pozisyon
         if self.positions.contains_key(&symbol) {
-            return Err(MemosTradingError::Unknown(
-                format!("Position already open for {}", symbol)
-            ));
+            return Err(MemosTradingError::Unknown(format!(
+                "Position already open for {}",
+                symbol
+            )));
         }
-        
+
         let position = Position {
             symbol: symbol.clone(),
             entry_price,
@@ -82,31 +81,32 @@ impl PortfolioManager {
             stop_loss,
             take_profit,
         };
-        
+
         self.positions.insert(symbol.clone(), position);
         self.available_cash -= required;
-        
-        println!("✓ Pozisyon açıldı: {} x {:.2} @ {:.2}", 
-                 quantity, entry_price, symbol);
-        
+
+        println!(
+            "✓ Pozisyon açıldı: {} x {:.2} @ {:.2}",
+            quantity, entry_price, symbol
+        );
+
         Ok(())
     }
-    
+
     /// Pozisyonu kapat
     pub fn close_position(&mut self, symbol: &str, exit_price: f64) -> MemosTradingResult<()> {
-        let position = self.positions
+        let position = self
+            .positions
             .remove(symbol)
-            .ok_or_else(|| MemosTradingError::Unknown(
-                format!("Position not found: {}", symbol)
-            ))?;
-        
+            .ok_or_else(|| MemosTradingError::Unknown(format!("Position not found: {}", symbol)))?;
+
         let pnl = (exit_price - position.entry_price) * position.quantity * position.direction;
         let pnl_pct = if position.entry_price > 0.0 {
             (pnl / (position.entry_price * position.quantity)) * 100.0
         } else {
             0.0
         };
-        
+
         let closed = ClosedTrade {
             symbol: position.symbol.clone(),
             entry_price: position.entry_price,
@@ -118,16 +118,18 @@ impl PortfolioManager {
             realized_pnl: pnl,
             realized_pnl_pct: pnl_pct,
         };
-        
+
         self.closed_trades.push(closed);
         self.available_cash += exit_price * position.quantity;
-        
-        println!("✓ Pozisyon kapatıldı: {} | PnL: {:.2} ({:.2}%)", 
-                 symbol, pnl, pnl_pct);
-        
+
+        println!(
+            "✓ Pozisyon kapatıldı: {} | PnL: {:.2} ({:.2}%)",
+            symbol, pnl, pnl_pct
+        );
+
         Ok(())
     }
-    
+
     /// Pozisyon fiyatlarını güncelle
     pub fn update_prices(&mut self, prices: HashMap<String, f64>) {
         for (symbol, price) in prices {
@@ -136,68 +138,59 @@ impl PortfolioManager {
             }
         }
     }
-    
+
     // ============ Queries ============
-    
+
     pub fn total_capital(&self) -> f64 {
         self.initial_capital
     }
-    
+
     pub fn available_cash(&self) -> f64 {
         self.available_cash
     }
-    
+
     pub fn positions_count(&self) -> usize {
         self.positions.len()
     }
-    
+
     pub fn get_position(&self, symbol: &str) -> Option<&Position> {
         self.positions.get(symbol)
     }
-    
+
     pub fn all_positions(&self) -> Vec<&Position> {
         self.positions.values().collect()
     }
-    
+
     pub fn closed_trades_count(&self) -> usize {
         self.closed_trades.len()
     }
-    
+
     pub fn get_closed_trades(&self) -> &[ClosedTrade] {
         &self.closed_trades
     }
-    
+
     // ============ Metrics Calculation ============
-    
+
     /// Unrealized PnL (tüm açık pozisyonlar)
     pub fn unrealized_pnl(&self) -> f64 {
-        self.positions
-            .values()
-            .map(|p| p.unrealized_pnl())
-            .sum()
+        self.positions.values().map(|p| p.unrealized_pnl()).sum()
     }
-    
+
     /// Realized PnL (tüm kapalı işlemler)
     pub fn realized_pnl(&self) -> f64 {
-        self.closed_trades
-            .iter()
-            .map(|t| t.realized_pnl)
-            .sum()
+        self.closed_trades.iter().map(|t| t.realized_pnl).sum()
     }
-    
+
     /// Portfolio equity value
     pub fn equity_value(&self) -> f64 {
         self.initial_capital + self.unrealized_pnl() + self.realized_pnl()
     }
-    
+
     /// Open positions'ların toplam value
     pub fn open_positions_value(&self) -> f64 {
-        self.positions
-            .values()
-            .map(|p| p.position_value())
-            .sum()
+        self.positions.values().map(|p| p.position_value()).sum()
     }
-    
+
     /// Win rate
     pub fn win_rate(&self) -> f64 {
         if self.closed_trades.is_empty() {
@@ -206,91 +199,99 @@ impl PortfolioManager {
         let wins = self.closed_trades.iter().filter(|t| t.is_win()).count();
         wins as f64 / self.closed_trades.len() as f64
     }
-    
+
     /// Average win size
     pub fn avg_win(&self) -> f64 {
-        let wins: Vec<f64> = self.closed_trades
+        let wins: Vec<f64> = self
+            .closed_trades
             .iter()
             .filter(|t| t.is_win())
             .map(|t| t.realized_pnl)
             .collect();
-        
+
         if wins.is_empty() {
             0.0
         } else {
             wins.iter().sum::<f64>() / wins.len() as f64
         }
     }
-    
+
     /// Average loss size
     pub fn avg_loss(&self) -> f64 {
-        let losses: Vec<f64> = self.closed_trades
+        let losses: Vec<f64> = self
+            .closed_trades
             .iter()
             .filter(|t| !t.is_win())
             .map(|t| t.realized_pnl)
             .collect();
-        
+
         if losses.is_empty() {
             0.0
         } else {
             losses.iter().sum::<f64>() / losses.len() as f64
         }
     }
-    
+
     /// Profit factor
     pub fn profit_factor(&self) -> f64 {
-        let total_wins: f64 = self.closed_trades
+        let total_wins: f64 = self
+            .closed_trades
             .iter()
             .filter(|t| t.is_win())
             .map(|t| t.realized_pnl)
             .sum();
-        
-        let total_losses: f64 = self.closed_trades
+
+        let total_losses: f64 = self
+            .closed_trades
             .iter()
             .filter(|t| !t.is_win())
             .map(|t| -t.realized_pnl)
             .sum();
-        
+
         if total_losses == 0.0 {
-            if total_wins > 0.0 { f64::INFINITY } else { 0.0 }
+            if total_wins > 0.0 {
+                f64::INFINITY
+            } else {
+                0.0
+            }
         } else {
             total_wins / total_losses
         }
     }
-    
+
     /// Max drawdown
     pub fn max_drawdown(&self) -> (f64, f64) {
         // Türkçe: Maksimum equity düşüşü
         let mut max_dd = 0.0;
         let mut max_dd_pct = 0.0;
         let mut peak = self.initial_capital;
-        
+
         let mut equity = self.initial_capital;
-        
+
         // History simulate et
         for trade in &self.closed_trades {
             equity += trade.realized_pnl;
-            
+
             let dd = peak - equity;
             let dd_pct = if peak > 0.0 { (dd / peak) * 100.0 } else { 0.0 };
-            
+
             if dd > max_dd {
                 max_dd = dd;
                 max_dd_pct = dd_pct;
             }
-            
+
             if equity > peak {
                 peak = equity;
             }
         }
-        
+
         (max_dd, max_dd_pct)
     }
-    
+
     /// Comprehensive metrics
     pub fn calculate_metrics(&self) -> PortfolioMetrics {
         let (max_dd, max_dd_pct) = self.max_drawdown();
-        
+
         PortfolioMetrics {
             total_capital: self.initial_capital,
             available_cash: self.available_cash,
@@ -320,33 +321,36 @@ impl PortfolioManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_open_and_close_position() {
         let mut pm = PortfolioManager::new(10000.0);
-        
+
         // Pozisyon aç
-        pm.open_position("BTCUSDT".into(), 45000.0, 0.1, 1.0, None, None).unwrap();
+        pm.open_position("BTCUSDT".into(), 45000.0, 0.1, 1.0, None, None)
+            .unwrap();
         assert_eq!(pm.positions_count(), 1);
-        
+
         // Pozisyon kapat (+100 PnL)
         pm.close_position("BTCUSDT", 46000.0).unwrap();
         assert_eq!(pm.positions_count(), 0);
         assert!(pm.realized_pnl() > 0.0);
     }
-    
+
     #[test]
     fn test_profit_factor() {
         let mut pm = PortfolioManager::new(10000.0);
-        
+
         // Win
-        pm.open_position("BTC".into(), 100.0, 1.0, 1.0, None, None).unwrap();
+        pm.open_position("BTC".into(), 100.0, 1.0, 1.0, None, None)
+            .unwrap();
         pm.close_position("BTC", 110.0).unwrap();
-        
+
         // Loss
-        pm.open_position("ETH".into(), 2000.0, 0.1, 1.0, None, None).unwrap();
+        pm.open_position("ETH".into(), 2000.0, 0.1, 1.0, None, None)
+            .unwrap();
         pm.close_position("ETH", 1900.0).unwrap();
-        
+
         let pf = pm.profit_factor();
         assert!(pf > 0.0);
     }

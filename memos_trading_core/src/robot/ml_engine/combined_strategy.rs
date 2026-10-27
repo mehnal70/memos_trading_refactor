@@ -9,7 +9,9 @@ impl CombinedStrategy {
     /// MA Crossover Sinyali - Performans: Sıfır kopyalama, sadece son pencere hesabı.
     pub fn ma_crossover(candles: &[Candle], fast_p: usize, slow_p: usize) -> Result<Signal> {
         let n = candles.len();
-        if n < slow_p + 1 { return Ok(Signal::Hold); }
+        if n < slow_p + 1 {
+            return Ok(Signal::Hold);
+        }
 
         // Slicing: Tüm listeyi hesaplamak yerine sadece son iki durumu hesapla
         let fast_curr = Self::get_single_sma(&candles[n - fast_p..n], fast_p);
@@ -18,7 +20,7 @@ impl CombinedStrategy {
         let slow_prev = Self::get_single_sma(&candles[n - slow_p - 1..n - 1], slow_p);
 
         let signal = match (fast_prev <= slow_prev, fast_curr > slow_curr) {
-            (true, true) => Signal::Buy,   // Golden Cross
+            (true, true) => Signal::Buy, // Golden Cross
             _ if fast_prev >= slow_prev && fast_curr < slow_curr => Signal::Sell, // Death Cross
             _ => Signal::Hold,
         };
@@ -28,12 +30,14 @@ impl CombinedStrategy {
 
     /// RSI Sinyali - Wilder's Smoothing mantığıyla optimize edildi.
     pub fn rsi_signal(candles: &[Candle], period: usize, threshold: f64) -> Result<Signal> {
-        if candles.len() < period + 1 { return Ok(Signal::Hold); }
+        if candles.len() < period + 1 {
+            return Ok(Signal::Hold);
+        }
 
         let rsi_val = Self::get_last_rsi(candles, period);
 
         let signal = match rsi_val {
-            r if r < threshold => Signal::Buy,          // Oversold
+            r if r < threshold => Signal::Buy,            // Oversold
             r if r > (100.0 - threshold) => Signal::Sell, // Overbought
             _ => Signal::Hold,
         };
@@ -80,10 +84,16 @@ impl CombinedStrategy {
 
         for w in candles[start..].windows(2) {
             let diff = w[1].close - w[0].close;
-            if diff > 0.0 { gains += diff; } else { losses += diff.abs(); }
+            if diff > 0.0 {
+                gains += diff;
+            } else {
+                losses += diff.abs();
+            }
         }
 
-        if losses == 0.0 { return 100.0; }
+        if losses == 0.0 {
+            return 100.0;
+        }
         100.0 - (100.0 / (1.0 + (gains / losses)))
     }
 }

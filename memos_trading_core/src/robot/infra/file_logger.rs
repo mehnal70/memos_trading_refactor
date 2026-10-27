@@ -1,8 +1,8 @@
 // robot/file_logger.rs - Dosya tabanlı loglama
-use std::fs::{OpenOptions};
-use std::io::Write;
-use chrono::Utc;
 use crate::robot::infra::error::ErrorLogger;
+use chrono::Utc;
+use std::fs::OpenOptions;
+use std::io::Write;
 
 pub struct FileLogger {
     pub path: String,
@@ -10,10 +10,16 @@ pub struct FileLogger {
 
 impl FileLogger {
     pub fn new(path: &str) -> Self {
-        Self { path: path.to_string() }
+        Self {
+            path: path.to_string(),
+        }
     }
     fn write_line(&self, line: &str) {
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&self.path) {
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
             let _ = writeln!(file, "{}", line);
         }
     }
@@ -28,7 +34,7 @@ impl ErrorLogger for FileLogger {
         let ts = Utc::now();
         self.write_line(&format!("[{}][INFO][{}] {}", ts, context, msg));
     }
-        // --- 🧬 F1: FILE LOGGER ADLİ ONARIM DELEGESİNİN EKİLMESİ ---
+    // --- 🧬 F1: FILE LOGGER ADLİ ONARIM DELEGESİNİN EKİLMESİ ---
     // Trait kontratındaki eksik halka kalıcı dosya arşivi için de kapatıldı, 'log_repair' vizelendi.
     fn log_repair(&self, step_id: &str, message: &str) {
         let ts = chrono::Utc::now().to_rfc3339();
@@ -38,7 +44,7 @@ impl ErrorLogger for FileLogger {
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open("logs/app_repair_audit.log") 
+            .open("logs/app_repair_audit.log")
         {
             let _ = std::io::Write::write_all(&mut file, log_entry.as_bytes());
         }

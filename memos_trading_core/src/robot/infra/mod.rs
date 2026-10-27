@@ -1,22 +1,23 @@
 // src/robot/infra/mod.rs içinde:
-pub mod telemetry;
-pub mod exchange;
-pub mod monitoring;
-pub mod telegram_notifier;
 pub mod compliance;
-pub mod reporting;
+pub mod exchange;
 pub mod management;
+pub mod monitoring;
 pub mod orchestration;
+pub mod reporting;
 pub mod services;
-
+pub mod telegram_notifier;
+pub mod telemetry;
 
 pub mod api;
+pub mod app_state_lock_watchdog;
 pub mod autonomous_audit;
 pub mod dashboard;
 pub mod error;
+pub mod event_bus;
 pub mod file_logger;
+pub mod heartbeat_writer;
 pub mod interfaces;
 pub mod logger;
-pub mod throttle;
-pub mod heartbeat_writer;
 pub mod snapshot_writer;
+pub mod throttle;

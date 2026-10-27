@@ -16,7 +16,12 @@ pub struct BacktestResult {
 }
 
 pub trait BacktestManager {
-    fn run_backtest(&mut self, strategy: &str, start: DateTime<Utc>, end: DateTime<Utc>) -> BacktestResult;
+    fn run_backtest(
+        &mut self,
+        strategy: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> BacktestResult;
     fn record_result(&mut self, result: BacktestResult);
     // Pipeline uyumu için referans listesi dönen metod
     fn all_results(&self) -> Vec<&BacktestResult>;
@@ -44,10 +49,15 @@ impl SimpleBacktestManager {
 }
 
 impl BacktestManager for SimpleBacktestManager {
-    fn run_backtest(&mut self, strategy: &str, start: DateTime<Utc>, end: DateTime<Utc>) -> BacktestResult {
+    fn run_backtest(
+        &mut self,
+        strategy: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> BacktestResult {
         // Modern Rust: String formatlama optimizasyonu
         let test_id = format!("{}-{}", strategy, Utc::now().timestamp());
-        
+
         let result = BacktestResult {
             test_id: test_id.clone(),
             strategy: strategy.to_owned(),

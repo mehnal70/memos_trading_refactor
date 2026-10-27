@@ -121,7 +121,9 @@ impl MarketHoursPolicy {
 }
 
 impl ExecutionPolicy for MarketHoursPolicy {
-    fn name(&self) -> &str { "market_hours" }
+    fn name(&self) -> &str {
+        "market_hours"
+    }
     fn evaluate(&self, ctx: &ExecutionContext<'_>) -> ExecutionDecision {
         self.evaluate_hours(ctx.market_hours, ctx.current_hour)
     }
@@ -136,18 +138,18 @@ pub struct IdleStrategyPolicy;
 impl IdleStrategyPolicy {
     pub fn evaluate_name(&self, name: Option<&str>) -> ExecutionDecision {
         match name {
-            Some(n) if n.trim().to_uppercase().starts_with("IDLE") => {
-                ExecutionDecision::Skip {
-                    reason: format!("Savunma rejimi: strateji={n}"),
-                }
-            }
+            Some(n) if n.trim().to_uppercase().starts_with("IDLE") => ExecutionDecision::Skip {
+                reason: format!("Savunma rejimi: strateji={n}"),
+            },
             _ => ExecutionDecision::Allow,
         }
     }
 }
 
 impl ExecutionPolicy for IdleStrategyPolicy {
-    fn name(&self) -> &str { "idle_strategy" }
+    fn name(&self) -> &str {
+        "idle_strategy"
+    }
     fn evaluate(&self, ctx: &ExecutionContext<'_>) -> ExecutionDecision {
         self.evaluate_name(ctx.strategy_name)
     }
@@ -172,7 +174,9 @@ impl BasketEmptyPolicy {
 }
 
 impl ExecutionPolicy for BasketEmptyPolicy {
-    fn name(&self) -> &str { "basket_empty" }
+    fn name(&self) -> &str {
+        "basket_empty"
+    }
     fn evaluate(&self, ctx: &ExecutionContext<'_>) -> ExecutionDecision {
         self.evaluate_size(ctx.basket_size)
     }

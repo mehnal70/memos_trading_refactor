@@ -50,7 +50,11 @@ impl SimpleRegulatoryManager {
     pub fn get_pending_compliance_issues(&self) -> Vec<&ComplianceEvent> {
         self.events
             .values()
-            .filter(|e| !e.resolved && (e.event_type == ComplianceType::AmlCheck || e.event_type == ComplianceType::KycCheck))
+            .filter(|e| {
+                !e.resolved
+                    && (e.event_type == ComplianceType::AmlCheck
+                        || e.event_type == ComplianceType::KycCheck)
+            })
             .collect()
     }
 }

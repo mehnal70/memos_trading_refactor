@@ -11,10 +11,10 @@
 //
 // Hedef HTF eşlemesi `DataPipeline::get_htf_interval` tek-noktasından gelir.
 
-use crate::core::types::Candle;
-use crate::persistence::reader::{read_candles, read_candles_market};
 use super::orchestrator::DataPipeline;
 use super::synth::CandleSynth;
+use crate::core::types::Candle;
+use crate::persistence::reader::{read_candles, read_candles_market, read_candles_ns};
 
 /// Minimum HTF mum sayısı — htf_trend_filter `slow=30` SMA istediği için
 /// 30'un altında çağrı boşa gider; loader bunun altını "yetersiz" sayar.
@@ -23,6 +23,72 @@ pub const HTF_MIN_REQUIRED: usize = 30;
 /// HTF mumlarını yükle.
 /// `min_required` az ise DB sonucu da yetersiz sayılır → fallback denenir.
 /// Hiçbiri yetmezse boş Vec döner — çağıran `Some(&v)` yerine `None` geçirebilir.
+/// `load_htf_candles`'ın kanonik-namespace sürümü: `(exchange, market)` çiftiyle,
+/// ÇIPLAK sembolle okur. Çok-venue profilde HTF filtresinin de doğru kovadan
+/// beslenmesi için çağıranlar `Engine::resolve_read_ns` çıktısıyla bunu kullanır;
+/// route edilemeyen semboller eski `load_htf_candles`'a düşer (geriye-uyum).
+pub fn load_htf_candles_ns(
+    db_path: &str,
+    bare_symbol: &str,
+    base_interval: &str,
+    exchange: &str,
+    market: &str,
+    min_required: usize,
+) -> Vec<Candle> {
+    load_htf_candles_ns_for_profile(
+        db_path,
+        bare_symbol,
+        base_interval,
+        exchange,
+        market,
+        "default",
+        min_required,
+    )
+}
+
+pub fn load_htf_candles_ns_for_profile(
+    db_path: &str,
+    bare_symbol: &str,
+    base_interval: &str,
+    exchange: &str,
+    market: &str,
+    profile: &str,
+    min_required: usize,
+) -> Vec<Candle> {
+    let htf = DataPipeline::get_htf_interval(base_interval);
+    if htf == base_interval {
+        return Vec::new();
+    }
+    let need = min_required.max(HTF_MIN_REQUIRED);
+    let read = |iv: &str, lim: usize| -> crate::Result<Vec<Candle>> {
+        crate::persistence::reader::read_candles_ns_for_profile(
+            db_path,
+            bare_symbol,
+            iv,
+            exchange,
+            market,
+            profile,
+            lim,
+        )
+    };
+    if let Ok(c) = read(htf, need.max(50)) {
+        if c.len() >= need {
+            return c;
+        }
+    }
+    if base_interval == "1m" {
+        let target_mins = interval_minutes(htf);
+        if target_mins == 0 {
+            return Vec::new();
+        }
+        let pull = (need * target_mins) + target_mins;
+        if let Ok(base_1m) = read(base_interval, pull) {
+            return aggregate_1m_to(&base_1m, htf, bare_symbol);
+        }
+    }
+    Vec::new()
+}
+
 pub fn load_htf_candles(
     db_path: &str,
     symbol: &str,
@@ -39,8 +105,21 @@ pub fn load_htf_candles(
 
     // Faz 1: market-saf okuma (boşsa market-kör fallback → geriye-uyum).
     let read = |iv: &str, lim: usize| -> crate::Result<Vec<Candle>> {
-        if market.is_empty() { read_candles(db_path, symbol, iv, lim) }
-        else { read_candles_market(db_path, symbol, iv, market, lim) }
+        let (bare_symbol, venue_tag) = crate::robot::venue::registry::split_venue_tag(symbol);
+        if let Some(exchange) = venue_tag {
+            crate::persistence::reader::read_candles_for_venue(
+                db_path,
+                bare_symbol,
+                iv,
+                exchange.as_str(),
+                market,
+                lim,
+            )
+        } else if market.is_empty() {
+            read_candles(db_path, symbol, iv, lim)
+        } else {
+            read_candles_market(db_path, symbol, iv, market, lim)
+        }
     };
 
     // 1) DB önceliği
@@ -113,7 +192,9 @@ fn interval_minutes(intv: &str) -> usize {
 /// "forming" (henüz tamamlanmamış) bucket'ı dışlamak çağıranın sorumluluğudur.
 pub fn aggregate_to(base: &[Candle], target_interval: &str, symbol: &str) -> Vec<Candle> {
     let tgt_min = interval_minutes(target_interval);
-    if base.is_empty() || tgt_min == 0 { return Vec::new(); }
+    if base.is_empty() || tgt_min == 0 {
+        return Vec::new();
+    }
     let bucket_secs = (tgt_min * 60) as i64;
     let mut out: Vec<Candle> = Vec::new();
     let mut cur_bucket: Option<i64> = None;
@@ -128,11 +209,13 @@ pub fn aggregate_to(base: &[Candle], target_interval: &str, symbol: &str) -> Vec
             }
         } else {
             cur_bucket = Some(b);
-            let ts = chrono::DateTime::from_timestamp(b * bucket_secs, 0)
-                .unwrap_or(c.timestamp);
+            let ts = chrono::DateTime::from_timestamp(b * bucket_secs, 0).unwrap_or(c.timestamp);
             out.push(Candle {
                 timestamp: ts,
-                open: c.open, high: c.high, low: c.low, close: c.close,
+                open: c.open,
+                high: c.high,
+                low: c.low,
+                close: c.close,
                 volume: c.volume,
                 symbol: symbol.to_string(),
                 interval: target_interval.to_string(),
@@ -207,14 +290,22 @@ mod tests {
     /// Saatlik mum dizisi (genel aggregate_to testi için, 1m-özel değil).
     fn mk_hourly(count: usize, base_close: f64) -> Vec<Candle> {
         let start = Utc.timestamp_opt(0, 0).single().unwrap();
-        (0..count).map(|i| {
-            let ts = start + Duration::hours(i as i64);
-            let close = base_close + (i as f64);
-            Candle {
-                timestamp: ts, open: close - 0.5, high: close + 1.0, low: close - 1.0,
-                close, volume: 10.0, symbol: "TEST".to_string(), interval: "1h".to_string(),
-            }
-        }).collect()
+        (0..count)
+            .map(|i| {
+                let ts = start + Duration::hours(i as i64);
+                let close = base_close + (i as f64);
+                Candle {
+                    timestamp: ts,
+                    open: close - 0.5,
+                    high: close + 1.0,
+                    low: close - 1.0,
+                    close,
+                    volume: 10.0,
+                    symbol: "TEST".to_string(),
+                    interval: "1h".to_string(),
+                }
+            })
+            .collect()
     }
 
     #[test]

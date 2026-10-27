@@ -3,9 +3,9 @@
 // Hot-reload desteği: Sistem çalışırken yeni stratejileri yükle
 // Dynamic strategy management
 
-use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Strategy Yükleme Hatası
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,7 +24,11 @@ impl std::fmt::Display for StrategyLoadError {
             StrategyLoadError::StrategyNotFound(name) => write!(f, "Strategy not found: {}", name),
             StrategyLoadError::InvalidConfiguration(msg) => write!(f, "Invalid config: {}", msg),
             StrategyLoadError::VersionMismatch { required, found } => {
-                write!(f, "Version mismatch: required {}, found {}", required, found)
+                write!(
+                    f,
+                    "Version mismatch: required {}, found {}",
+                    required, found
+                )
             }
             StrategyLoadError::DecodingError(msg) => write!(f, "Decoding error: {}", msg),
             StrategyLoadError::AlreadyLoaded(name) => write!(f, "Already loaded: {}", name),
@@ -91,9 +95,10 @@ impl StrategyLoader {
 
         // Kontrol: Max stratejiye ulaştı mı?
         if self.loaded_strategies.len() >= self.max_strategies {
-            return Err(StrategyLoadError::InvalidConfiguration(
-                format!("Max strategies ({}) reached", self.max_strategies),
-            ));
+            return Err(StrategyLoadError::InvalidConfiguration(format!(
+                "Max strategies ({}) reached",
+                self.max_strategies
+            )));
         }
 
         // Yeni strateji oluştur
@@ -197,7 +202,11 @@ impl StrategyLoader {
 
     /// İstatistikleri al
     pub fn stats(&self) -> (u32, u32, usize) {
-        (self.total_loaded, self.total_unloaded, self.loaded_strategies.len())
+        (
+            self.total_loaded,
+            self.total_unloaded,
+            self.loaded_strategies.len(),
+        )
     }
 }
 
@@ -261,9 +270,7 @@ mod tests {
             .unwrap();
 
         // Aktif pozisyon ekle
-        loader
-            .update_active_positions("ma_cross", 5)
-            .unwrap();
+        loader.update_active_positions("ma_cross", 5).unwrap();
 
         let result = loader.unload_strategy("ma_cross");
 

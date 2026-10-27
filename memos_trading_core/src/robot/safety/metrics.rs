@@ -166,7 +166,8 @@ impl EquityTrend {
         }
 
         let avg = self.average_equity();
-        let variance: f64 = self.history
+        let variance: f64 = self
+            .history
             .iter()
             .map(|(_, e)| (e - avg).powi(2))
             .sum::<f64>()

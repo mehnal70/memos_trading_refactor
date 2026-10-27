@@ -10,6 +10,6 @@
 pub mod policy;
 
 pub use policy::{
-    default_chain, BasketEmptyPolicy, ExecutionContext, ExecutionDecision,
-    ExecutionPolicy, IdleStrategyPolicy, MarketHoursPolicy,
+    default_chain, BasketEmptyPolicy, ExecutionContext, ExecutionDecision, ExecutionPolicy,
+    IdleStrategyPolicy, MarketHoursPolicy,
 };

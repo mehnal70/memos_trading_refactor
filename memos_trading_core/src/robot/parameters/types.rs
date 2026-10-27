@@ -29,7 +29,9 @@ pub struct RegimePatch {
 }
 
 impl RegimePatch {
-    pub fn empty() -> Self { Self::default() }
+    pub fn empty() -> Self {
+        Self::default()
+    }
 
     pub fn with_edge(mut self, e: EdgeThresholds) -> Self {
         self.edge_thresholds = Some(e);
@@ -54,8 +56,10 @@ impl RegimePatch {
     /// Patch hiçbir alanı override etmiyor mu? Engine boş patch'leri store'a
     /// koymaktan kaçınmak için bunu kontrol eder.
     pub fn is_empty(&self) -> bool {
-        self.edge_thresholds.is_none() && self.trade_risk.is_none()
-            && self.policy.is_none() && self.target_trail_pct.is_none()
+        self.edge_thresholds.is_none()
+            && self.trade_risk.is_none()
+            && self.policy.is_none()
+            && self.target_trail_pct.is_none()
     }
 }
 
@@ -91,7 +95,9 @@ impl RegimeFeedback {
 
     /// Win-rate (0.0..=1.0). Kuyruk boşsa 0 döner.
     pub fn win_rate(&self) -> f64 {
-        if self.recent_pnl.is_empty() { return 0.0; }
+        if self.recent_pnl.is_empty() {
+            return 0.0;
+        }
         let wins = self.recent_pnl.iter().filter(|&&p| p > 0.0).count();
         wins as f64 / self.recent_pnl.len() as f64
     }
@@ -121,8 +127,8 @@ pub struct TradeRiskParams {
 impl Default for TradeRiskParams {
     fn default() -> Self {
         Self {
-            take_profit_pct:   3.0,
-            stop_loss_pct:     1.5,
+            take_profit_pct: 3.0,
+            stop_loss_pct: 1.5,
             max_position_size: 0.5,
         }
     }
@@ -158,9 +164,9 @@ impl Default for LeverageParams {
             // `LEVERAGE_ENABLED=0` env. Manuel override: base/max env'leri.
             enabled: true,
             base: 3.0,
-            max: 10.0,           // core/model.rs default_leverage_max ile aynı
+            max: 10.0, // core/model.rs default_leverage_max ile aynı
             conf_boost_threshold: 0.70,
-            vol_floor_pct: 1.0,  // %1 median ATR — bunun üstü "yüksek wiggle"
+            vol_floor_pct: 1.0, // %1 median ATR — bunun üstü "yüksek wiggle"
         }
     }
 }
@@ -228,12 +234,12 @@ impl Default for XsLiveParams {
             top_k: 3,
             exit_buffer: 1,
             momentum: true,
-            position_pct: 0.10, // eşit-ağırlık: bacak başına equity'nin %10'u
-            leverage: 1.0,      // kaldıraçsız (marjinal nötr edge'de mütevazı; XS_LIVE_LEVERAGE ile artır)
-            regime_gate: true,  // Volatile rejimde kitabı flat'a çek (kriz koruması)
+            position_pct: 0.10,     // eşit-ağırlık: bacak başına equity'nin %10'u
+            leverage: 1.0, // kaldıraçsız (marjinal nötr edge'de mütevazı; XS_LIVE_LEVERAGE ile artır)
+            regime_gate: true, // Volatile rejimde kitabı flat'a çek (kriz koruması)
             max_drawdown_pct: 0.0, // devre kesici KAPALI (opt-in; rejim-gate birincil koruma)
             cb_cooldown_secs: 3600, // tetiklenirse 1 saat flat kal
-            take_profit_pct: 0.0,   // kitap-düzeyi take-profit KAPALI (opt-in)
+            take_profit_pct: 0.0, // kitap-düzeyi take-profit KAPALI (opt-in)
             tp_cooldown_secs: 3600, // tetiklenirse 1 saat flat kal (kâr realize sonrası churn koruması)
         }
     }
@@ -375,29 +381,72 @@ impl Default for BlendLiveParams {
 /// kademede kurar; ek kademeler REJİME GÖRE açılır: trend rejimde PYRAMIDING (lehte hareket → kazananı
 /// besle), ranging rejimde AVERAGING (aleyhte hareket → ortalama maliyet). Teyit: HTF trend hizası +
 /// yeterli hareket. Default DISABLED (opt-in, sıfır regresyon). [[feedback_autonomy_first]]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GradedTriggerMode {
+    Percent,
+    Atr,
+    Hybrid,
+}
+
+impl Default for GradedTriggerMode {
+    fn default() -> Self {
+        Self::Hybrid
+    }
+}
+
+/// Kademe ağırlıklarının nasıl yorumlanacağı:
+/// - Normalized: tüm kademeler tek hedef sermayeye normalize edilir (legacy).
+/// - Relative: ilk kademe `target_capital`, diğerleri `target_capital * weight[k]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GradedWeightMode {
+    Normalized,
+    Relative,
+}
+
+impl Default for GradedWeightMode {
+    fn default() -> Self {
+        Self::Normalized
+    }
+}
+
+/// `Henry`-tarzı kademe kümeleri için normalize edilmiş büyüklükler: [1.0, 0.5, 0.25] gibi
+/// diziler toplam üzerinden paylaştırılır; böylece ilk dalga ikinciye göre 2x, üçüncüye göre 4x
+/// büyük kalır ama toplam risk tek bütçede tutulur.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GradedEntryParams {
     /// Master kapı. False → her pozisyon tek seferde tam boyutta açılır (mevcut davranış).
     pub enabled: bool,
     /// Kademe ağırlıkları (hedef sermayenin oranları). İlk = açılış kademesi; toplam ≈ 1.0 olmalı.
-    /// N = len. Örn. [0.4, 0.3, 0.3] → 3 kademe. Boş/tek-eleman → fiilen tek-fill (kademe yok).
+    /// N = len. Örn. [1.0, 0.5, 0.25] → 3 kademe (100/50/25 oranı); içerde normalize edilir.
     pub tranche_weights: Vec<f64>,
+    /// Tetik modu: yüzde, ATR ya da hibrit.
+    pub trigger_mode: GradedTriggerMode,
+    /// Kademe ağırlıklarının yorum modu (legacy normalize veya Henry-tarzı relative).
+    pub weight_mode: GradedWeightMode,
+    /// ATR tetik çarpanı. 1.0 → fiyat en az 1 ATR kadar lehte hareket edince ekleme.
+    pub trigger_atr_mult: f64,
     /// PYRAMIDING (trend rejim) eşiği: pozisyon LEHTE bu yüzde kadar hareket edince ek kademe.
     pub favorable_move_pct: f64,
     /// AVERAGING (ranging rejim) eşiği: pozisyon ALEYHTE bu yüzde kadar hareket edince ek kademe.
     pub adverse_move_pct: f64,
     /// Ek kademe için HTF trend hizası şart mı (multi_tf gerekir; kapalıysa yalnız hareket eşiği).
     pub require_htf_align: bool,
+    /// Sadece trend rejimlerinde pyramiding yap.
+    pub pyramiding_only: bool,
 }
 
 impl Default for GradedEntryParams {
     fn default() -> Self {
         Self {
             enabled: false,
-            tranche_weights: vec![0.4, 0.3, 0.3], // 3 kademe (40/30/30)
-            favorable_move_pct: 1.0,
+            tranche_weights: vec![1.0, 0.5, 0.25], // 100/50/25 oranı
+            trigger_mode: GradedTriggerMode::Hybrid,
+            weight_mode: GradedWeightMode::Normalized,
+            trigger_atr_mult: 1.0,
+            favorable_move_pct: 5.0,
             adverse_move_pct: 1.0,
             require_htf_align: true,
+            pyramiding_only: true,
         }
     }
 }
@@ -407,9 +456,35 @@ impl GradedEntryParams {
     pub fn tranche_count(&self) -> usize {
         self.tranche_weights.len()
     }
-    /// k. kademenin ağırlığı (yoksa 0.0). 0-indeksli.
+    /// Ağırlıkların normalize toplamı.
+    pub fn tranche_weight_sum(&self) -> f64 {
+        self.tranche_weights
+            .iter()
+            .copied()
+            .filter(|w| *w > 0.0)
+            .sum::<f64>()
+            .max(0.0)
+    }
+    /// k. kademenin normalize ağırlığı (yoksa 0.0). 0-indeksli.
     pub fn weight_at(&self, k: usize) -> f64 {
-        self.tranche_weights.get(k).copied().unwrap_or(0.0)
+        let raw = self.tranche_weights.get(k).copied().unwrap_or(0.0).max(0.0);
+        match self.weight_mode {
+            GradedWeightMode::Relative => {
+                if k == 0 {
+                    1.0
+                } else {
+                    raw
+                }
+            }
+            GradedWeightMode::Normalized => {
+                let sum = self.tranche_weight_sum();
+                if sum <= 0.0 {
+                    0.0
+                } else {
+                    raw / sum
+                }
+            }
+        }
     }
 }
 
@@ -454,8 +529,8 @@ impl Default for PartialFillParams {
     fn default() -> Self {
         Self {
             overfill_tolerance: 0.001,
-            cum_tolerance:      0.001,
-            max_slippage_pct:   1.0,
+            cum_tolerance: 0.001,
+            max_slippage_pct: 1.0,
         }
     }
 }
@@ -481,7 +556,7 @@ impl Default for EdgeThresholds {
         Self {
             cold: 0.20,
             warm: 0.35,
-            hot:  0.55,
+            hot: 0.55,
             cold_until: 0.05,
             warm_until: 0.30,
         }
@@ -491,8 +566,12 @@ impl Default for EdgeThresholds {
 impl EdgeThresholds {
     /// ML confidence'a göre ilgili katmanın eşiğini döner.
     pub fn for_confidence(&self, ml_confidence: f64) -> f64 {
-        if ml_confidence < self.cold_until { self.cold }
-        else if ml_confidence < self.warm_until { self.warm }
-        else { self.hot }
+        if ml_confidence < self.cold_until {
+            self.cold
+        } else if ml_confidence < self.warm_until {
+            self.warm
+        } else {
+            self.hot
+        }
     }
 }

@@ -17,10 +17,10 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use super::walk_forward::WfCrossCheck;
 use crate::core::types::Candle;
 use crate::persistence::reader::read_candles_market;
 use crate::robot::sr_detector::{SrDetector, SrDetectorConfig, SrZone, ZoneType};
-use super::walk_forward::WfCrossCheck;
 
 /// Kesitsel sıralama EKSENİ (sinyal kaynağı). Hepsinde "yüksek skor = long bacak" olacak şekilde
 /// normalize edilir (düşük-uç long isteyen eksenlerde işaret ters) → sıralama/select_books/ağırlık
@@ -118,9 +118,9 @@ impl Default for XsConfig {
             rebalance_every: 1, // her bar (geri-uyumlu); yavaş sinyalde XS_REBALANCE>1 ile churn kıs
             exit_buffer: 0,     // band yok (saf top-k); >0 ile rank-histerezisi turnover'ı kısar
             leverage: 1.0,      // risk-hedefleme; Sharpe/t-invariant
-            wf_window: 30,    // ~aylık pencere (1d) → tutarlılık binom kapısı
+            wf_window: 30,      // ~aylık pencere (1d) → tutarlılık binom kapısı
             bars_per_year: 365.0,
-            sr_tilt: 0.0,       // S/R eğimi KAPALI (opt-in; default = close-only eski yol birebir)
+            sr_tilt: 0.0, // S/R eğimi KAPALI (opt-in; default = close-only eski yol birebir)
             sr_band_pct: 3.0,
             sr_min_strength: 0.0,
             sr_window: 120,
@@ -136,22 +136,26 @@ pub struct XsResult {
     pub total_return: f64,   // bileşik net getiri (maliyet sonrası)
     pub ann_return: f64,
     pub ann_sharpe: f64,
-    pub win_rate: f64,       // pozitif-getirili bar oranı
-    pub mean_ret: f64,       // bar başı ortalama net getiri
+    pub win_rate: f64, // pozitif-getirili bar oranı
+    pub mean_ret: f64, // bar başı ortalama net getiri
     pub std_ret: f64,
-    pub t_stat: f64,         // mean / (std/√N) — tek-yanlı (H0: getiri≤0), OTOKORELASYON DÜZELTMESİZ
-    pub nw_t_stat: f64,      // Newey-West HAC t — band/kadans tutuşu otokorelasyon → naif t'yi şişirir; bu düzeltir
-    pub nw_lag: usize,       // kullanılan Bartlett bant-genişliği (truncation lag)
+    pub t_stat: f64, // mean / (std/√N) — tek-yanlı (H0: getiri≤0), OTOKORELASYON DÜZELTMESİZ
+    pub nw_t_stat: f64, // Newey-West HAC t — band/kadans tutuşu otokorelasyon → naif t'yi şişirir; bu düzeltir
+    pub nw_lag: usize,  // kullanılan Bartlett bant-genişliği (truncation lag)
     pub avg_turnover: f64,
-    pub wf: WfCrossCheck,    // pencere-tutarlılığı → window_significance() binom p-değeri
+    pub wf: WfCrossCheck, // pencere-tutarlılığı → window_significance() binom p-değeri
 }
 
 impl XsResult {
     /// Naif t-stat'ı normal-yaklaşımla p-değerine çevirir (büyük N; H0: ortalama getiri ≤ 0).
     /// Otokorelasyon düzeltmesi YOK → örtüşen/tutulan getiride İYİMSER (şişmiş). Karşılaştırma için.
-    pub fn t_pvalue(&self) -> f64 { one_sided_normal_sf(self.t_stat) }
+    pub fn t_pvalue(&self) -> f64 {
+        one_sided_normal_sf(self.t_stat)
+    }
     /// Newey-West HAC t-stat'ın tek-yanlı p-değeri — DÜRÜST anlamlılık (otokorelasyona dayanıklı).
-    pub fn nw_t_pvalue(&self) -> f64 { one_sided_normal_sf(self.nw_t_stat) }
+    pub fn nw_t_pvalue(&self) -> f64 {
+        one_sided_normal_sf(self.nw_t_stat)
+    }
 }
 
 /// Std normal üst-kuyruk P(Z≥z) — Abramowitz-Stegun 7.1.26 erf yaklaşımı (saf, bağımlılıksız).
@@ -186,10 +190,19 @@ pub fn evaluate_xs(closes: &[Vec<Option<f64>>], cfg: &XsConfig) -> XsResult {
 /// OHLC matrisi alır. `ohlc=None` → close-only (evaluate_xs ile BİREBİR, sıfır regresyon); `Some` +
 /// sr_tilt>0 → compute_weights sıralama-öncesi S/R eğimini uygular.
 pub fn evaluate_xs_with_ohlc(
-    closes: &[Vec<Option<f64>>], ohlc: Option<&[Vec<Option<Candle>>]>, cfg: &XsConfig,
+    closes: &[Vec<Option<f64>>],
+    ohlc: Option<&[Vec<Option<Candle>>]>,
+    cfg: &XsConfig,
 ) -> XsResult {
-    let n_sym = if closes.is_empty() { 0 } else { closes[0].len() };
-    let mut res = XsResult { symbols_used: n_sym, ..Default::default() };
+    let n_sym = if closes.is_empty() {
+        0
+    } else {
+        closes[0].len()
+    };
+    let mut res = XsResult {
+        symbols_used: n_sym,
+        ..Default::default()
+    };
     let (rets, turnovers) = xs_returns(closes, ohlc, cfg);
     finalize_metrics(&mut res, &rets, &turnovers, cfg);
     res
@@ -198,7 +211,9 @@ pub fn evaluate_xs_with_ohlc(
 /// SAF: kesitsel portföyün bar-bar NET getiri + turnover serisini üretir (metriklerden ayrı →
 /// WF gibi çağrılar OOS dilimlerinin HAM getirisini birleştirebilir). evaluate_xs bunu sarar.
 fn xs_returns(
-    closes: &[Vec<Option<f64>>], ohlc: Option<&[Vec<Option<Candle>>]>, cfg: &XsConfig,
+    closes: &[Vec<Option<f64>>],
+    ohlc: Option<&[Vec<Option<Candle>>]>,
+    cfg: &XsConfig,
 ) -> (Vec<f64>, Vec<f64>) {
     let n_bars = closes.len();
     let n_sym = if n_bars > 0 { closes[0].len() } else { 0 };
@@ -208,9 +223,9 @@ fn xs_returns(
 
     let rb = cfg.rebalance_every.max(1);
     let mut prev_w = vec![0.0_f64; n_sym]; // mevcut hedef (turnover referansı)
-    let mut prev_long: HashSet<usize> = HashSet::new();  // mevcut long kitabı (histerezis için)
+    let mut prev_long: HashSet<usize> = HashSet::new(); // mevcut long kitabı (histerezis için)
     let mut prev_short: HashSet<usize> = HashSet::new();
-    let mut step = 0usize;                 // POZİSYON kurulduktan sonra ilerleyen kadans saati
+    let mut step = 0usize; // POZİSYON kurulduktan sonra ilerleyen kadans saati
     let mut rets: Vec<f64> = Vec::new();
     let mut turnovers: Vec<f64> = Vec::new();
 
@@ -221,7 +236,9 @@ fn xs_returns(
         let mut changed = false;
         if is_rebalance {
             // No-trade band: MEVCUT kitabı (prev_long/short) histerezisle koruyarak yeni hedef.
-            if let Some((tw, longs, shorts)) = compute_weights(closes, ohlc, t, cfg, &prev_long, &prev_short) {
+            if let Some((tw, longs, shorts)) =
+                compute_weights(closes, ohlc, t, cfg, &prev_long, &prev_short)
+            {
                 w = tw;
                 prev_long = longs;
                 prev_short = shorts;
@@ -263,37 +280,59 @@ fn xs_returns(
 
 /// SAF: bir sembolün t'de biten `lb`-bar penceresindeki bar-bar getirileri (Option; eksik/≤0 → None).
 /// Uzunluk = lb. `window_returns_opt` Beta market-hizalamasında ve vol/max'ta ortak kullanılır.
-fn window_returns_opt(closes: &[Vec<Option<f64>>], t: usize, lb: usize, j: usize) -> Vec<Option<f64>> {
+fn window_returns_opt(
+    closes: &[Vec<Option<f64>>],
+    t: usize,
+    lb: usize,
+    j: usize,
+) -> Vec<Option<f64>> {
     let start = (t + 1).saturating_sub(lb);
-    (start..=t).map(|b| {
-        if b == 0 { return None; }
-        match (closes[b][j], closes[b - 1][j]) {
-            (Some(c1), Some(c0)) if c0 > 0.0 && c1 > 0.0 => Some(c1 / c0 - 1.0),
-            _ => None,
-        }
-    }).collect()
+    (start..=t)
+        .map(|b| {
+            if b == 0 {
+                return None;
+            }
+            match (closes[b][j], closes[b - 1][j]) {
+                (Some(c1), Some(c0)) if c0 > 0.0 && c1 > 0.0 => Some(c1 / c0 - 1.0),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// SAF: popülasyon std (BB konvansiyonuyla aynı). <2 örnek → 0.
 fn stddev(v: &[f64]) -> f64 {
     let n = v.len();
-    if n < 2 { return 0.0; }
+    if n < 2 {
+        return 0.0;
+    }
     let m = v.iter().sum::<f64>() / n as f64;
     (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n as f64).sqrt()
 }
 
 /// SAF: hizalı (rj, rm) Option çiftlerinden β = cov(rj,rm)/var(rm). Ortak nokta <2 veya var(rm)=0 → None.
 fn beta_paired(rj: &[Option<f64>], rm: &[Option<f64>]) -> Option<f64> {
-    let pairs: Vec<(f64, f64)> = rj.iter().zip(rm)
-        .filter_map(|(a, b)| match (a, b) { (Some(x), Some(y)) => Some((*x, *y)), _ => None })
+    let pairs: Vec<(f64, f64)> = rj
+        .iter()
+        .zip(rm)
+        .filter_map(|(a, b)| match (a, b) {
+            (Some(x), Some(y)) => Some((*x, *y)),
+            _ => None,
+        })
         .collect();
     let n = pairs.len();
-    if n < 2 { return None; }
+    if n < 2 {
+        return None;
+    }
     let mx = pairs.iter().map(|p| p.0).sum::<f64>() / n as f64;
     let my = pairs.iter().map(|p| p.1).sum::<f64>() / n as f64;
     let cov = pairs.iter().map(|(x, y)| (x - mx) * (y - my)).sum::<f64>() / n as f64;
     let var = pairs.iter().map(|(_, y)| (y - my).powi(2)).sum::<f64>() / n as f64;
-    if var <= 0.0 { None } else { Some(cov / var) }
+    if var <= 0.0 {
+        None
+    } else {
+        Some(cov / var)
+    }
 }
 
 /// SAF: t anında her sembol için kesitsel sinyal `(idx, skor)` — yüksek skor = LONG bacak. Eksene göre
@@ -308,7 +347,9 @@ fn build_signals(closes: &[Vec<Option<f64>>], t: usize, cfg: &XsConfig) -> Vec<(
             let mut sig = Vec::with_capacity(n_sym);
             for (j, (now, past)) in closes[t].iter().zip(&closes[t - lb]).enumerate() {
                 if let (Some(c0), Some(cl)) = (now, past) {
-                    if *cl > 0.0 && *c0 > 0.0 { sig.push((j, c0 / cl - 1.0)); }
+                    if *cl > 0.0 && *c0 > 0.0 {
+                        sig.push((j, c0 / cl - 1.0));
+                    }
                 }
             }
             sig
@@ -317,8 +358,13 @@ fn build_signals(closes: &[Vec<Option<f64>>], t: usize, cfg: &XsConfig) -> Vec<(
             // −realized_vol(lb): düşük-vol uca yüksek skor → long.
             let mut sig = Vec::with_capacity(n_sym);
             for j in 0..n_sym {
-                let vals: Vec<f64> = window_returns_opt(closes, t, lb, j).into_iter().flatten().collect();
-                if vals.len() >= 2 { sig.push((j, -stddev(&vals))); }
+                let vals: Vec<f64> = window_returns_opt(closes, t, lb, j)
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                if vals.len() >= 2 {
+                    sig.push((j, -stddev(&vals)));
+                }
             }
             sig
         }
@@ -326,7 +372,10 @@ fn build_signals(closes: &[Vec<Option<f64>>], t: usize, cfg: &XsConfig) -> Vec<(
             // −max(günlük getiri, lb): "piyango" (yüksek aşırı-getiri) düşük skor → short.
             let mut sig = Vec::with_capacity(n_sym);
             for j in 0..n_sym {
-                let vals: Vec<f64> = window_returns_opt(closes, t, lb, j).into_iter().flatten().collect();
+                let vals: Vec<f64> = window_returns_opt(closes, t, lb, j)
+                    .into_iter()
+                    .flatten()
+                    .collect();
                 if !vals.is_empty() {
                     let mx = vals.iter().cloned().fold(f64::MIN, f64::max);
                     sig.push((j, -mx));
@@ -337,15 +386,27 @@ fn build_signals(closes: &[Vec<Option<f64>>], t: usize, cfg: &XsConfig) -> Vec<(
         XsSignal::Beta => {
             // β = sepet-ortalaması (eşit-ağırlık) market getirisine regresyon → −β long (BAB).
             let wr: Vec<Vec<Option<f64>>> = (0..n_sym)
-                .map(|j| window_returns_opt(closes, t, lb, j)).collect();
+                .map(|j| window_returns_opt(closes, t, lb, j))
+                .collect();
             // Market[pos] = pencere pozisyonunda mevcut sembollerin ortalama getirisi.
-            let mkt: Vec<Option<f64>> = (0..lb).map(|pos| {
-                let xs: Vec<f64> = wr.iter().filter_map(|r| r.get(pos).copied().flatten()).collect();
-                if xs.is_empty() { None } else { Some(xs.iter().sum::<f64>() / xs.len() as f64) }
-            }).collect();
+            let mkt: Vec<Option<f64>> = (0..lb)
+                .map(|pos| {
+                    let xs: Vec<f64> = wr
+                        .iter()
+                        .filter_map(|r| r.get(pos).copied().flatten())
+                        .collect();
+                    if xs.is_empty() {
+                        None
+                    } else {
+                        Some(xs.iter().sum::<f64>() / xs.len() as f64)
+                    }
+                })
+                .collect();
             let mut sig = Vec::with_capacity(n_sym);
             for (j, rj) in wr.iter().enumerate() {
-                if let Some(b) = beta_paired(rj, &mkt) { sig.push((j, -b)); }
+                if let Some(b) = beta_paired(rj, &mkt) {
+                    sig.push((j, -b));
+                }
             }
             sig
         }
@@ -356,12 +417,20 @@ fn build_signals(closes: &[Vec<Option<f64>>], t: usize, cfg: &XsConfig) -> Vec<(
 /// Sinyal `build_signals` ile eksene göre üretilir (yüksek=long); reversal'da ters çevrilir.
 /// `select_books` rank-histerezisiyle mevcut kitabı korur (no-trade band). long Σ=+1, short Σ=−1.
 fn compute_weights(
-    closes: &[Vec<Option<f64>>], ohlc: Option<&[Vec<Option<Candle>>]>, t: usize, cfg: &XsConfig,
-    prev_long: &HashSet<usize>, prev_short: &HashSet<usize>,
+    closes: &[Vec<Option<f64>>],
+    ohlc: Option<&[Vec<Option<Candle>>]>,
+    t: usize,
+    cfg: &XsConfig,
+    prev_long: &HashSet<usize>,
+    prev_short: &HashSet<usize>,
 ) -> Option<(Vec<f64>, HashSet<usize>, HashSet<usize>)> {
     let n_sym = closes[t].len();
     let mut sig: Vec<(usize, f64)> = build_signals(closes, t, cfg);
-    let need = if cfg.long_short { 2 * cfg.top_k } else { cfg.top_k };
+    let need = if cfg.long_short {
+        2 * cfg.top_k
+    } else {
+        cfg.top_k
+    };
     if sig.len() < need {
         return None;
     }
@@ -373,13 +442,26 @@ fn compute_weights(
         let detector = SrDetector::new(SrDetectorConfig::default());
         let dir = if cfg.momentum { 1.0 } else { -1.0 };
         for (j, s) in sig.iter_mut() {
-            let price = match closes[t][*j] { Some(p) if p > 0.0 => p, _ => continue };
+            let price = match closes[t][*j] {
+                Some(p) if p > 0.0 => p,
+                _ => continue,
+            };
             let window = collect_sym_window(ohlc, t, *j, cfg.sr_window);
-            if window.len() < 2 { continue; }
+            if window.len() < 2 {
+                continue;
+            }
             let zones = detector.detect(&window);
-            if zones.is_empty() { continue; }
+            if zones.is_empty() {
+                continue;
+            }
             let lean_long = (*s * dir) >= 0.0;
-            let opp = sr_opposition(&zones, price, lean_long, cfg.sr_band_pct, cfg.sr_min_strength);
+            let opp = sr_opposition(
+                &zones,
+                price,
+                lean_long,
+                cfg.sr_band_pct,
+                cfg.sr_min_strength,
+            );
             *s *= 1.0 - cfg.sr_tilt * opp; // karşıtlık büyükse skor 0'a çekilir → uçtan geri düşer
         }
     }
@@ -407,10 +489,19 @@ fn compute_weights(
 
 /// SAF: `ohlc` matrisinden sembol `j` için t'de biten son `window` barlık BİTİŞİK mum dizisini toplar
 /// (None'ları atlar → hizalama boşlukları S/R'yi bozmaz). Look-ahead'siz (yalnız ≤t; t barı kapalı).
-fn collect_sym_window(ohlc: &[Vec<Option<Candle>>], t: usize, j: usize, window: usize) -> Vec<Candle> {
+fn collect_sym_window(
+    ohlc: &[Vec<Option<Candle>>],
+    t: usize,
+    j: usize,
+    window: usize,
+) -> Vec<Candle> {
     let lo = (t + 1).saturating_sub(window.max(1));
     (lo..=t)
-        .filter_map(|b| ohlc.get(b).and_then(|row| row.get(j)).and_then(|c| c.clone()))
+        .filter_map(|b| {
+            ohlc.get(b)
+                .and_then(|row| row.get(j))
+                .and_then(|c| c.clone())
+        })
         .collect()
 }
 
@@ -418,7 +509,13 @@ fn collect_sym_window(ohlc: &[Vec<Option<Candle>>], t: usize, j: usize, window: 
 /// engelde). long-eğilim → ÜSTteki DİRENÇ karşıt; short-eğilim → ALTtaki DESTEK karşıt. Engelin fiyata
 /// bakan kenarı kullanılır (direnç alt=price_low, destek üst=price_high); band içinde lineer
 /// (1 − mesafe%/band), band dışı 0, fiyat zone İÇİNDEyse 1. Yanlış taraftaki zone karşıt değil. Testli.
-fn sr_opposition(zones: &[SrZone], price: f64, lean_long: bool, band_pct: f64, min_strength: f64) -> f64 {
+fn sr_opposition(
+    zones: &[SrZone],
+    price: f64,
+    lean_long: bool,
+    band_pct: f64,
+    min_strength: f64,
+) -> f64 {
     if price <= 0.0 || band_pct <= 0.0 {
         return 0.0;
     }
@@ -454,31 +551,54 @@ fn sr_opposition(zones: &[SrZone], price: f64, lean_long: bool, band_pct: f64, m
 /// rank-histerezisiyle koruyarak hedef long/short sembol listelerini üretir → canlı motor bunu çağırıp
 /// hedef yönleri infaz eder. momentum=false → reversal (sinyal ters). Backtest ile BİT-AYNI seçim mantığı.
 pub fn xs_target_book(
-    signals: &[(String, f64)], top_k: usize, exit_buffer: usize, momentum: bool,
-    prev_long: &HashSet<String>, prev_short: &HashSet<String>,
+    signals: &[(String, f64)],
+    top_k: usize,
+    exit_buffer: usize,
+    momentum: bool,
+    prev_long: &HashSet<String>,
+    prev_short: &HashSet<String>,
 ) -> (Vec<String>, Vec<String>) {
     // sembol↔indeks köprüsü; sinyale göre GÜÇ-AZALAN sırala (reversal → ters), select_books ile aynı.
-    let mut idx_sig: Vec<(usize, f64)> =
-        signals.iter().enumerate().map(|(i, (_, s))| (i, *s)).collect();
+    let mut idx_sig: Vec<(usize, f64)> = signals
+        .iter()
+        .enumerate()
+        .map(|(i, (_, s))| (i, *s))
+        .collect();
     idx_sig.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     if !momentum {
         idx_sig.reverse();
     }
     let sym_of = |i: usize| signals[i].0.clone();
     let to_idx = |set: &HashSet<String>| -> HashSet<usize> {
-        signals.iter().enumerate().filter(|(_, (s, _))| set.contains(s)).map(|(i, _)| i).collect()
+        signals
+            .iter()
+            .enumerate()
+            .filter(|(_, (s, _))| set.contains(s))
+            .map(|(i, _)| i)
+            .collect()
     };
-    let (longs, shorts) =
-        select_books(&idx_sig, top_k, exit_buffer, &to_idx(prev_long), &to_idx(prev_short));
-    (longs.into_iter().map(sym_of).collect(), shorts.into_iter().map(&sym_of).collect())
+    let (longs, shorts) = select_books(
+        &idx_sig,
+        top_k,
+        exit_buffer,
+        &to_idx(prev_long),
+        &to_idx(prev_short),
+    );
+    (
+        longs.into_iter().map(sym_of).collect(),
+        shorts.into_iter().map(&sym_of).collect(),
+    )
 }
 
 /// RANK-HİSTEREZİSİ (no-trade band): tam-k long/short kitabı seçer ama MEVCUT üyeleri `k+buffer`
 /// dışına düşene dek TUTAR (marjinal daha-iyi aday için churn YOK). buffer=0 → saf top-k/bottom-k
 /// (eski davranış birebir). `sig` GÜÇ-AZALAN sıralı (baş=long edilecek uç). Saf → testli.
 pub(crate) fn select_books(
-    sig: &[(usize, f64)], k: usize, buffer: usize,
-    prev_long: &HashSet<usize>, prev_short: &HashSet<usize>,
+    sig: &[(usize, f64)],
+    k: usize,
+    buffer: usize,
+    prev_long: &HashSet<usize>,
+    prev_short: &HashSet<usize>,
 ) -> (Vec<usize>, Vec<usize>) {
     let n = sig.len();
     let k = k.min(n / 2);
@@ -488,27 +608,39 @@ pub(crate) fn select_books(
     let rank: HashMap<usize, usize> = sig.iter().enumerate().map(|(r, (i, _))| (*i, r)).collect();
 
     // LONG = baş (düşük rank). Önce k+buffer içinde kalan mevcut long'ları TUT, sonra en güçlülerden doldur.
-    let mut longs: Vec<usize> = prev_long.iter().copied()
+    let mut longs: Vec<usize> = prev_long
+        .iter()
+        .copied()
         .filter(|i| rank.get(i).is_some_and(|r| *r < k + buffer))
         .collect();
     longs.sort_by_key(|i| rank[i]);
     longs.truncate(k);
     for &(idx, _) in sig.iter() {
-        if longs.len() >= k { break; }
-        if !longs.contains(&idx) { longs.push(idx); }
+        if longs.len() >= k {
+            break;
+        }
+        if !longs.contains(&idx) {
+            longs.push(idx);
+        }
     }
 
     // SHORT = kuyruk (yüksek rank). Önce n−(k+buffer)..n içinde kalan mevcut short'ları TUT (long'lar hariç),
     // sonra en zayıflardan (yüksek rank) doldur.
     let short_keep = n.saturating_sub(k + buffer);
-    let mut shorts: Vec<usize> = prev_short.iter().copied()
+    let mut shorts: Vec<usize> = prev_short
+        .iter()
+        .copied()
         .filter(|i| rank.get(i).is_some_and(|r| *r >= short_keep) && !longs.contains(i))
         .collect();
     shorts.sort_by_key(|i| std::cmp::Reverse(rank[i]));
     shorts.truncate(k);
     for &(idx, _) in sig.iter().rev() {
-        if shorts.len() >= k { break; }
-        if !longs.contains(&idx) && !shorts.contains(&idx) { shorts.push(idx); }
+        if shorts.len() >= k {
+            break;
+        }
+        if !longs.contains(&idx) && !shorts.contains(&idx) {
+            shorts.push(idx);
+        }
     }
     (longs, shorts)
 }
@@ -517,16 +649,28 @@ pub(crate) fn select_books(
 /// L× ölçekler: mean/std/annRet L× → t_stat & Sharpe DEĞİŞMEZ (anlamlılık L-invariant). total_return
 /// bileşik (1+L·r) → L'de NONLİNEER: volatilite-sürüklenmesi (L² ile) burada yakalanır. win_rate L-invariant.
 fn finalize_metrics(res: &mut XsResult, rets: &[f64], turnovers: &[f64], cfg: &XsConfig) {
-    finalize_metrics_params(res, rets, turnovers, cfg.leverage, cfg.bars_per_year,
-        cfg.rebalance_every, cfg.wf_window);
+    finalize_metrics_params(
+        res,
+        rets,
+        turnovers,
+        cfg.leverage,
+        cfg.bars_per_year,
+        cfg.rebalance_every,
+        cfg.wf_window,
+    );
 }
 
 /// `finalize_metrics`'in config-bağımsız çekirdeği — herhangi bir NET-getiri serisini (kesitsel,
 /// BB-pool, vb.) AYNI metrik diline (Newey-West HAC + WF binom) döker. `hold_lag` = pozisyon tutuş
 /// ufku (NW bant-genişliği alt sınırı; XS'te rebalance_every). DRY: XS ve bb_pool ortak çağırır.
 pub(crate) fn finalize_metrics_params(
-    res: &mut XsResult, rets: &[f64], turnovers: &[f64],
-    leverage: f64, bars_per_year: f64, hold_lag: usize, wf_window: usize,
+    res: &mut XsResult,
+    rets: &[f64],
+    turnovers: &[f64],
+    leverage: f64,
+    bars_per_year: f64,
+    hold_lag: usize,
+    wf_window: usize,
 ) {
     let n = rets.len();
     res.bars = n;
@@ -548,8 +692,16 @@ pub(crate) fn finalize_metrics_params(
     // Bileşik: kaldıraçlı bar-getiri L·r → vol-sürüklenmesi (L>1'de büyüme ann.Ret'ten sapar).
     res.total_return = rets.iter().fold(1.0, |acc, r| acc * (1.0 + lev * r)) - 1.0;
     res.ann_return = mean * bars_per_year;
-    res.ann_sharpe = if std > 0.0 { mean / std * bars_per_year.sqrt() } else { 0.0 };
-    res.t_stat = if std > 0.0 { mean / (std / (n as f64).sqrt()) } else { 0.0 };
+    res.ann_sharpe = if std > 0.0 {
+        mean / std * bars_per_year.sqrt()
+    } else {
+        0.0
+    };
+    res.t_stat = if std > 0.0 {
+        mean / (std / (n as f64).sqrt())
+    } else {
+        0.0
+    };
     // Newey-West HAC: band/kadans pozisyonu birkaç bar tuttuğundan getiriler otokorelasyonlu →
     // naif t şişer. Bant-genişliği NW(1994) plug-in kuralı, tutuş ufkuyla (hold_lag) ALTTAN
     // sınırlanır. Kaldıraç-invariant (μ,γ ortak ölçeklenir) → base rets üzerinde hesaplanır.
@@ -603,8 +755,19 @@ fn windowed_consistency(rets: &[f64], window: usize) -> WfCrossCheck {
     }
     let gains: f64 = rets.iter().filter(|r| **r > 0.0).sum();
     let losses: f64 = rets.iter().filter(|r| **r < 0.0).map(|r| r.abs()).sum();
-    let pooled_pf = if losses > 0.0 { gains / losses } else if gains > 0.0 { 999.0 } else { 0.0 };
-    WfCrossCheck { windows, profitable_windows: profitable, pooled_pf, trades: rets.len() }
+    let pooled_pf = if losses > 0.0 {
+        gains / losses
+    } else if gains > 0.0 {
+        999.0
+    } else {
+        0.0
+    };
+    WfCrossCheck {
+        windows,
+        profitable_windows: profitable,
+        pooled_pf,
+        trades: rets.len(),
+    }
 }
 
 /// DB'den sepet kapanışlarını ORTAK timestamp ızgarasına hizalar (union grid, eksik = None →
@@ -614,9 +777,14 @@ pub fn align_closes(cfg: &XsConfig) -> Vec<Vec<Option<f64>>> {
     let mut per_sym: Vec<BTreeMap<i64, f64>> = Vec::with_capacity(cfg.symbols.len());
     let mut grid: BTreeMap<i64, ()> = BTreeMap::new();
     for sym in &cfg.symbols {
-        let candles =
-            read_candles_market(&cfg.db_path, sym, &cfg.interval, &cfg.market, cfg.candle_limit)
-                .unwrap_or_default();
+        let candles = read_candles_market(
+            &cfg.db_path,
+            sym,
+            &cfg.interval,
+            &cfg.market,
+            cfg.candle_limit,
+        )
+        .unwrap_or_default();
         let mut m = BTreeMap::new();
         for c in &candles {
             let ts = c.timestamp.timestamp_millis();
@@ -638,9 +806,14 @@ pub fn align_ohlc(cfg: &XsConfig) -> Vec<Vec<Option<Candle>>> {
     let mut per_sym: Vec<BTreeMap<i64, Candle>> = Vec::with_capacity(cfg.symbols.len());
     let mut grid: BTreeMap<i64, ()> = BTreeMap::new();
     for sym in &cfg.symbols {
-        let candles =
-            read_candles_market(&cfg.db_path, sym, &cfg.interval, &cfg.market, cfg.candle_limit)
-                .unwrap_or_default();
+        let candles = read_candles_market(
+            &cfg.db_path,
+            sym,
+            &cfg.interval,
+            &cfg.market,
+            cfg.candle_limit,
+        )
+        .unwrap_or_default();
         let mut m = BTreeMap::new();
         for c in &candles {
             let ts = c.timestamp.timestamp_millis();
@@ -671,10 +844,23 @@ pub fn run_xs_momentum(cfg: &XsConfig) -> XsResult {
 /// Eksenler-arası BİRLEŞİK portföyü (ör. momentum+carry) ölçmek için pub sarmalayıcı —
 /// finalize_metrics_params'ın dışa açık yüzü. `hold_lag` = NW bant-genişliği alt sınırı (rebalance).
 pub fn series_metrics(
-    rets: &[f64], turnovers: &[f64], leverage: f64, bars_per_year: f64, hold_lag: usize, wf_window: usize,
+    rets: &[f64],
+    turnovers: &[f64],
+    leverage: f64,
+    bars_per_year: f64,
+    hold_lag: usize,
+    wf_window: usize,
 ) -> XsResult {
     let mut res = XsResult::default();
-    finalize_metrics_params(&mut res, rets, turnovers, leverage, bars_per_year, hold_lag, wf_window);
+    finalize_metrics_params(
+        &mut res,
+        rets,
+        turnovers,
+        leverage,
+        bars_per_year,
+        hold_lag,
+        wf_window,
+    );
     res
 }
 
@@ -732,8 +918,13 @@ pub fn evaluate_xs_walkforward(
         // 1) IS'te en iyi adayı seç (IS Sharpe; n sabitken t-stat ile aynı sıralama).
         let mut best: Option<((usize, bool), f64)> = None;
         for &(lb, mom) in &wf.candidates {
-            let cfg = XsConfig { lookback: lb, momentum: mom, ..base.clone() };
-            let is_res = evaluate_xs_with_ohlc(&closes[is_lo..oos_start], osl(is_lo, oos_start), &cfg);
+            let cfg = XsConfig {
+                lookback: lb,
+                momentum: mom,
+                ..base.clone()
+            };
+            let is_res =
+                evaluate_xs_with_ohlc(&closes[is_lo..oos_start], osl(is_lo, oos_start), &cfg);
             if is_res.bars > 0 && best.is_none_or(|(_, s)| is_res.ann_sharpe > s) {
                 best = Some(((lb, mom), is_res.ann_sharpe));
             }
@@ -745,11 +936,31 @@ pub fn evaluate_xs_walkforward(
         // 2) seçileni OOS'a UYGULA (lookback lead-in dahil dilim, getiri yalnız OOS bölgesinde).
         let lead = sel.0.min(oos_start);
         let seg_hi = (oos_start + wf.oos_bars).min(n);
-        let cfg = XsConfig { lookback: sel.0, momentum: sel.1, ..base.clone() };
-        let (rets, turns) = xs_returns(&closes[oos_start - lead..seg_hi], osl(oos_start - lead, seg_hi), &cfg);
-        let oos_mean = if rets.is_empty() { 0.0 } else { rets.iter().sum::<f64>() / rets.len() as f64 };
-        let is_sharpe = evaluate_xs_with_ohlc(&closes[is_lo..oos_start], osl(is_lo, oos_start),
-            &XsConfig { lookback: sel.0, momentum: sel.1, ..base.clone() }).ann_sharpe;
+        let cfg = XsConfig {
+            lookback: sel.0,
+            momentum: sel.1,
+            ..base.clone()
+        };
+        let (rets, turns) = xs_returns(
+            &closes[oos_start - lead..seg_hi],
+            osl(oos_start - lead, seg_hi),
+            &cfg,
+        );
+        let oos_mean = if rets.is_empty() {
+            0.0
+        } else {
+            rets.iter().sum::<f64>() / rets.len() as f64
+        };
+        let is_sharpe = evaluate_xs_with_ohlc(
+            &closes[is_lo..oos_start],
+            osl(is_lo, oos_start),
+            &XsConfig {
+                lookback: sel.0,
+                momentum: sel.1,
+                ..base.clone()
+            },
+        )
+        .ann_sharpe;
         oos_rets.extend(rets);
         oos_turn.extend(turns);
         selections.push(sel);
@@ -757,9 +968,17 @@ pub fn evaluate_xs_walkforward(
         oos_start += wf.oos_bars;
     }
 
-    let mut oos = XsResult { symbols_used: n_sym, ..Default::default() };
+    let mut oos = XsResult {
+        symbols_used: n_sym,
+        ..Default::default()
+    };
     finalize_metrics(&mut oos, &oos_rets, &oos_turn, base);
-    XsWfResult { oos, windows: selections.len(), selections, is_oos_pairs }
+    XsWfResult {
+        oos,
+        windows: selections.len(),
+        selections,
+        is_oos_pairs,
+    }
 }
 
 /// DB-YÜKLEYEN WF sürümü: hizala → `evaluate_xs_walkforward`.
@@ -803,16 +1022,36 @@ mod tests {
         }
         let cfg = XsConfig {
             symbols: vec!["A".into(), "B".into(), "C".into()],
-            lookback: 2, top_k: 1, fee_rate: 0.0, momentum: true, long_short: true,
-            wf_window: 3, ..Default::default()
+            lookback: 2,
+            top_k: 1,
+            fee_rate: 0.0,
+            momentum: true,
+            long_short: true,
+            wf_window: 3,
+            ..Default::default()
         };
         let r = evaluate_xs(&closes, &cfg);
         assert!(r.bars > 0, "rebalance üretilmeli");
-        assert!(r.mean_ret > 0.0, "kalıcı momentum → pozitif ortalama spread");
-        assert!(r.t_stat > 0.0 && r.win_rate > 0.9, "her bar long-A/short-C kazanır");
+        assert!(
+            r.mean_ret > 0.0,
+            "kalıcı momentum → pozitif ortalama spread"
+        );
+        assert!(
+            r.t_stat > 0.0 && r.win_rate > 0.9,
+            "her bar long-A/short-C kazanır"
+        );
         // reversal AYNI veride simetrik NEGATİF olmalı (mekanizma yön-duyarlı)
-        let rev = evaluate_xs(&closes, &XsConfig { momentum: false, ..cfg.clone() });
-        assert!(rev.mean_ret < 0.0, "reversal aynı trend-veride kaybeder (yön simetrisi)");
+        let rev = evaluate_xs(
+            &closes,
+            &XsConfig {
+                momentum: false,
+                ..cfg.clone()
+            },
+        );
+        assert!(
+            rev.mean_ret < 0.0,
+            "reversal aynı trend-veride kaybeder (yön simetrisi)"
+        );
     }
 
     // Maliyet turnover'a bağlı: sıfır-fee kârlı kurulum, yüksek fee'de net NEGATİFE döner.
@@ -829,13 +1068,30 @@ mod tests {
         ];
         let base = XsConfig {
             symbols: vec!["A".into(), "B".into()],
-            lookback: 1, top_k: 1, momentum: true, long_short: true, wf_window: 2,
-            fee_rate: 0.0, ..Default::default()
+            lookback: 1,
+            top_k: 1,
+            momentum: true,
+            long_short: true,
+            wf_window: 2,
+            fee_rate: 0.0,
+            ..Default::default()
         };
         let free = evaluate_xs(&closes, &base);
-        let costly = evaluate_xs(&closes, &XsConfig { fee_rate: 0.05, ..base.clone() });
-        assert!(costly.total_return < free.total_return, "fee turnover üzerinden getiriyi aşındırır");
-        assert!(costly.avg_turnover > 0.0, "yer değiştiren sepet → pozitif turnover");
+        let costly = evaluate_xs(
+            &closes,
+            &XsConfig {
+                fee_rate: 0.05,
+                ..base.clone()
+            },
+        );
+        assert!(
+            costly.total_return < free.total_return,
+            "fee turnover üzerinden getiriyi aşındırır"
+        );
+        assert!(
+            costly.avg_turnover > 0.0,
+            "yer değiştiren sepet → pozitif turnover"
+        );
     }
 
     // 🌙 Swap (tutma maliyeti) turnover'dan BAĞIMSIZ: sabit kitap (düşük turnover) tutulsa bile
@@ -854,16 +1110,36 @@ mod tests {
         ];
         let base = XsConfig {
             symbols: vec!["A".into(), "B".into()],
-            lookback: 1, top_k: 1, momentum: true, long_short: true, wf_window: 2,
-            fee_rate: 0.0, rebalance_every: 3, ..Default::default()
+            lookback: 1,
+            top_k: 1,
+            momentum: true,
+            long_short: true,
+            wf_window: 2,
+            fee_rate: 0.0,
+            rebalance_every: 3,
+            ..Default::default()
         };
         let no_swap = evaluate_xs(&closes, &base);
-        let with_swap = evaluate_xs(&closes, &XsConfig { swap_rate_per_bar: 0.01, ..base.clone() });
-        assert!(with_swap.total_return < no_swap.total_return,
-            "swap tutulan pozisyonu her bar aşındırır");
+        let with_swap = evaluate_xs(
+            &closes,
+            &XsConfig {
+                swap_rate_per_bar: 0.01,
+                ..base.clone()
+            },
+        );
+        assert!(
+            with_swap.total_return < no_swap.total_return,
+            "swap tutulan pozisyonu her bar aşındırır"
+        );
         // Kavramsal fark: AYNI oranda fee yalnız giriş turnover'ında bir kez ödenir; swap kitap
         // tutuldukça HER bar → stabil (düşük-turnover) kitapta swap fee'den daha çok aşındırır.
-        let with_fee = evaluate_xs(&closes, &XsConfig { fee_rate: 0.01, ..base.clone() });
+        let with_fee = evaluate_xs(
+            &closes,
+            &XsConfig {
+                fee_rate: 0.01,
+                ..base.clone()
+            },
+        );
         assert!(with_swap.total_return < with_fee.total_return,
             "stabil kitapta swap (her-bar) fee'den (turnover-bir-kez) daha çok aşındırmalı: swap={} fee={}",
             with_swap.total_return, with_fee.total_return);
@@ -876,18 +1152,42 @@ mod tests {
         let mut closes = Vec::new();
         for i in 0..18 {
             // A ve B sırayla lider olur → her bar rank flip (maksimum churn)
-            if i % 2 == 0 { closes.push(vec![Some(101.0), Some(100.0)]); }
-            else { closes.push(vec![Some(100.0), Some(101.0)]); }
+            if i % 2 == 0 {
+                closes.push(vec![Some(101.0), Some(100.0)]);
+            } else {
+                closes.push(vec![Some(100.0), Some(101.0)]);
+            }
         }
         let base = XsConfig {
             symbols: vec!["A".into(), "B".into()],
-            lookback: 1, top_k: 1, momentum: true, long_short: true, wf_window: 3,
-            fee_rate: 0.001, ..Default::default()
+            lookback: 1,
+            top_k: 1,
+            momentum: true,
+            long_short: true,
+            wf_window: 3,
+            fee_rate: 0.001,
+            ..Default::default()
         };
-        let daily = evaluate_xs(&closes, &XsConfig { rebalance_every: 1, ..base.clone() });
-        let held = evaluate_xs(&closes, &XsConfig { rebalance_every: 3, ..base.clone() });
-        assert!(held.avg_turnover < daily.avg_turnover,
-            "kadans büyüdükçe ortalama turnover düşer ({} < {})", held.avg_turnover, daily.avg_turnover);
+        let daily = evaluate_xs(
+            &closes,
+            &XsConfig {
+                rebalance_every: 1,
+                ..base.clone()
+            },
+        );
+        let held = evaluate_xs(
+            &closes,
+            &XsConfig {
+                rebalance_every: 3,
+                ..base.clone()
+            },
+        );
+        assert!(
+            held.avg_turnover < daily.avg_turnover,
+            "kadans büyüdükçe ortalama turnover düşer ({} < {})",
+            held.avg_turnover,
+            daily.avg_turnover
+        );
     }
 
     // windowed_consistency edge_scan'le aynı WfCrossCheck → window_significance() uygulanabilir.
@@ -899,7 +1199,10 @@ mod tests {
         assert_eq!(wf.windows, 3);
         assert_eq!(wf.profitable_windows, 3, "üç pencerenin toplamı da pozitif");
         assert!(wf.pooled_pf > 1.0, "net kârlı seri → PF>1");
-        assert!((wf.window_significance() - 0.125).abs() < 1e-9, "3/3 → 0.5³ = 0.125");
+        assert!(
+            (wf.window_significance() - 0.125).abs() < 1e-9,
+            "3/3 → 0.5³ = 0.125"
+        );
     }
 
     // NO-TRADE BAND: histerezis mevcut pozisyonu marjinal daha-iyi aday için churn ETMEZ.
@@ -911,12 +1214,16 @@ mod tests {
         let empty = HashSet::new();
         // buffer=0 → saf top-2: incumbent 12 churn'lenir, kitap {10,11}.
         let (l0, _) = select_books(&sig, 2, 0, &held_long, &empty);
-        assert!(l0.contains(&10) && l0.contains(&11) && !l0.contains(&12),
-            "band yok (buffer=0) → eski top-k davranışı: incumbent churn'lenir");
+        assert!(
+            l0.contains(&10) && l0.contains(&11) && !l0.contains(&12),
+            "band yok (buffer=0) → eski top-k davranışı: incumbent churn'lenir"
+        );
         // buffer=1 → 12 (rank2<3) TUTULUR; kalan slot en güçlü (10) ile dolar → {12,10}, 11 ALINMAZ.
         let (l1, _) = select_books(&sig, 2, 1, &held_long, &empty);
-        assert!(l1.contains(&12) && l1.contains(&10) && !l1.contains(&11),
-            "band: incumbent (rank2) tutulur, marjinal daha-iyi (11) için churn YOK");
+        assert!(
+            l1.contains(&12) && l1.contains(&10) && !l1.contains(&11),
+            "band: incumbent (rank2) tutulur, marjinal daha-iyi (11) için churn YOK"
+        );
     }
 
     // Band turnover'ı kısar: dalgalanan sıralamada buffer>0, buffer=0'dan az turnover öder ama kazancı korur.
@@ -924,20 +1231,44 @@ mod tests {
     fn buffer_cuts_turnover_on_noisy_ranking() {
         // 3 sembol, sıralama bar-bar gürültülü oynar → buffer churn'ü emer.
         let mut closes = Vec::new();
-        let mut a = 100.0; let mut b = 100.0; let mut c = 100.0;
+        let mut a = 100.0;
+        let mut b = 100.0;
+        let mut c = 100.0;
         for i in 0..40 {
             closes.push(vec![Some(a), Some(b), Some(c)]);
             // A genel yukarı trend + gürültü; B,C zayıf → sıralama uçlarda gürültüyle takas olur
-            a *= 1.02; b *= if i % 2 == 0 { 1.005 } else { 0.995 }; c *= 0.99;
+            a *= 1.02;
+            b *= if i % 2 == 0 { 1.005 } else { 0.995 };
+            c *= 0.99;
         }
         let base = XsConfig {
             symbols: vec!["A".into(), "B".into(), "C".into()],
-            top_k: 1, lookback: 2, fee_rate: 0.001, wf_window: 5, ..Default::default()
+            top_k: 1,
+            lookback: 2,
+            fee_rate: 0.001,
+            wf_window: 5,
+            ..Default::default()
         };
-        let no_band = evaluate_xs(&closes, &XsConfig { exit_buffer: 0, ..base.clone() });
-        let band = evaluate_xs(&closes, &XsConfig { exit_buffer: 1, ..base.clone() });
-        assert!(band.avg_turnover <= no_band.avg_turnover,
-            "band turnover'ı azaltır ({} ≤ {})", band.avg_turnover, no_band.avg_turnover);
+        let no_band = evaluate_xs(
+            &closes,
+            &XsConfig {
+                exit_buffer: 0,
+                ..base.clone()
+            },
+        );
+        let band = evaluate_xs(
+            &closes,
+            &XsConfig {
+                exit_buffer: 1,
+                ..base.clone()
+            },
+        );
+        assert!(
+            band.avg_turnover <= no_band.avg_turnover,
+            "band turnover'ı azaltır ({} ≤ {})",
+            band.avg_turnover,
+            no_band.avg_turnover
+        );
     }
 
     // NEWEY-WEST: pozitif otokorelasyon naif t'yi şişirir → HAC t onu deflate eder.
@@ -946,7 +1277,9 @@ mod tests {
         // periyodiksiz beyaz gürültü (LCG) → IID; MA(3) düzleştirme lag-1,2 POZİTİF otokorelasyon yaratır.
         let mut seed = 12345u64;
         let mut nz = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 40) as f64 / (1u64 << 24) as f64 - 0.5 // ~[-0.5,0.5], ortalama~0, periyodiksiz
         };
         let raw: Vec<f64> = (0..600).map(|_| nz()).collect();
@@ -955,57 +1288,108 @@ mod tests {
         let i0 = newey_west_tstat(&iid, 0);
         let i8 = newey_west_tstat(&iid, 8);
         assert!(i0 > 0.0, "mean>0 → pozitif t");
-        assert!((i8 - i0).abs() / i0 < 0.30, "IID'de NW ≈ naif (otokorelasyon yok): {} vs {}", i8, i0);
+        assert!(
+            (i8 - i0).abs() / i0 < 0.30,
+            "IID'de NW ≈ naif (otokorelasyon yok): {} vs {}",
+            i8,
+            i0
+        );
         // MA(3) düzleştirme → pozitif kalıcılık → NW t naif'ten KÜÇÜK.
-        let ma: Vec<f64> = (2..raw.len()).map(|t| 0.01 + 0.03 * (raw[t] + raw[t - 1] + raw[t - 2]) / 3.0).collect();
+        let ma: Vec<f64> = (2..raw.len())
+            .map(|t| 0.01 + 0.03 * (raw[t] + raw[t - 1] + raw[t - 2]) / 3.0)
+            .collect();
         let m0 = newey_west_tstat(&ma, 0);
         let m8 = newey_west_tstat(&ma, 8);
         assert!(m0 > 0.0 && m8 > 0.0, "mean>0 → pozitif t");
-        assert!(m8 < m0 * 0.95, "pozitif otokorelasyon (MA) → NW t naif t'den KÜÇÜK ({} < {})", m8, m0);
+        assert!(
+            m8 < m0 * 0.95,
+            "pozitif otokorelasyon (MA) → NW t naif t'den KÜÇÜK ({} < {})",
+            m8,
+            m0
+        );
     }
 
     // KALDIRAÇ: getiriyi/büyümeyi ölçekler ama t-stat'ı (anlamlılığı) DEĞİŞTİRMEZ.
     #[test]
     fn leverage_scales_growth_not_tstat() {
         // VOLATİL trend (std>0 → t-stat sonlu): A yukarı-eğilimli ama bar-bar dalgalı, C tersi.
-        let mut a = 100.0; let mut c = 100.0; let mut closes = Vec::new();
+        let mut a = 100.0;
+        let mut c = 100.0;
+        let mut closes = Vec::new();
         for i in 0..40 {
             closes.push(vec![Some(a), Some(100.0), Some(c)]);
             let up = if i % 2 == 0 { 1.05 } else { 1.01 }; // ort. yukarı, dalgalı → varyans gerçek
-            a *= up; c *= 2.0 - up;
+            a *= up;
+            c *= 2.0 - up;
         }
         let base = XsConfig {
             symbols: vec!["A".into(), "B".into(), "C".into()],
-            top_k: 1, lookback: 2, fee_rate: 0.0, wf_window: 5, ..Default::default()
+            top_k: 1,
+            lookback: 2,
+            fee_rate: 0.0,
+            wf_window: 5,
+            ..Default::default()
         };
         let r1 = evaluate_xs(&closes, &base);
-        let r3 = evaluate_xs(&closes, &XsConfig { leverage: 3.0, ..base.clone() });
+        let r3 = evaluate_xs(
+            &closes,
+            &XsConfig {
+                leverage: 3.0,
+                ..base.clone()
+            },
+        );
         assert!(r1.std_ret > 0.0, "test verisi volatil (std>0) olmalı");
         let rel = (r1.t_stat - r3.t_stat).abs() / r1.t_stat.abs().max(1.0);
-        assert!(rel < 1e-9, "kaldıraç t-stat'ı DEĞİŞTİRMEZ (anlamlılık L-invariant): {} vs {}", r1.t_stat, r3.t_stat);
-        assert!((r3.mean_ret - 3.0 * r1.mean_ret).abs() < 1e-9, "ortalama getiri tam L× ölçeklenir");
-        assert!(r3.total_return > r1.total_return, "bileşik büyüme L ile artar (pozitif edge'de)");
+        assert!(
+            rel < 1e-9,
+            "kaldıraç t-stat'ı DEĞİŞTİRMEZ (anlamlılık L-invariant): {} vs {}",
+            r1.t_stat,
+            r3.t_stat
+        );
+        assert!(
+            (r3.mean_ret - 3.0 * r1.mean_ret).abs() < 1e-9,
+            "ortalama getiri tam L× ölçeklenir"
+        );
+        assert!(
+            r3.total_return > r1.total_return,
+            "bileşik büyüme L ile artar (pozitif edge'de)"
+        );
     }
 
     // CANLI hedef-kitap: sembol-anahtarlı sarmalayıcı backtest seçimiyle aynı sonucu verir.
     #[test]
     fn xs_target_book_symbol_keyed() {
         let sig = vec![
-            ("A".to_string(), 0.5), ("B".into(), 0.3), ("C".into(), 0.1),
-            ("D".into(), -0.2), ("E".into(), -0.4),
+            ("A".to_string(), 0.5),
+            ("B".into(), 0.3),
+            ("C".into(), 0.1),
+            ("D".into(), -0.2),
+            ("E".into(), -0.4),
         ];
         let empty = HashSet::new();
         // momentum top_k=2: long en güçlü {A,B}, short en zayıf {E,D}.
         let (l, s) = xs_target_book(&sig, 2, 0, true, &empty, &empty);
-        assert!(l.contains(&"A".to_string()) && l.contains(&"B".to_string()), "long = en güçlü 2");
-        assert!(s.contains(&"E".to_string()) && s.contains(&"D".to_string()), "short = en zayıf 2");
+        assert!(
+            l.contains(&"A".to_string()) && l.contains(&"B".to_string()),
+            "long = en güçlü 2"
+        );
+        assert!(
+            s.contains(&"E".to_string()) && s.contains(&"D".to_string()),
+            "short = en zayıf 2"
+        );
         // reversal: long/short yer değiştirir.
         let (lr, sr) = xs_target_book(&sig, 2, 0, false, &empty, &empty);
-        assert!(lr.contains(&"E".to_string()) && sr.contains(&"A".to_string()), "reversal → ters kitap");
+        assert!(
+            lr.contains(&"E".to_string()) && sr.contains(&"A".to_string()),
+            "reversal → ters kitap"
+        );
         // histerezis: C (rank2) mevcut long ve buffer=1 → top-2 dışında olsa da TUTULUR.
         let held: HashSet<String> = ["C".to_string()].into_iter().collect();
         let (lh, _) = xs_target_book(&sig, 2, 1, true, &held, &empty);
-        assert!(lh.contains(&"C".to_string()), "band: incumbent C (rank2<k+buffer=3) tutulur");
+        assert!(
+            lh.contains(&"C".to_string()),
+            "band: incumbent C (rank2<k+buffer=3) tutulur"
+        );
     }
 
     // WF: kalıcı momentum trendinde IS momentum'u seçer, OOS POZİTİF döner (look-ahead'siz).
@@ -1022,39 +1406,68 @@ mod tests {
         }
         let base = XsConfig {
             symbols: vec!["A".into(), "B".into(), "C".into()],
-            top_k: 1, fee_rate: 0.0, long_short: true, wf_window: 10, ..Default::default()
+            top_k: 1,
+            fee_rate: 0.0,
+            long_short: true,
+            wf_window: 10,
+            ..Default::default()
         };
         let wf = XsWfConfig {
-            is_bars: 40, oos_bars: 20,
+            is_bars: 40,
+            oos_bars: 20,
             candidates: vec![(3, true), (3, false), (7, true), (7, false)], // mom + rev adayları
         };
         let r = evaluate_xs_walkforward(&closes, None, &base, &wf);
         assert!(r.windows >= 2, "birden çok OOS penceresi üretilmeli");
-        assert!(r.oos.bars > 0 && r.oos.mean_ret > 0.0, "OOS getiri pozitif (trend kör-test'te sürer)");
-        assert!(r.selections.iter().all(|(_, mom)| *mom),
-            "kalıcı trendde her pencere MOMENTUM seçmeli (reversal değil)");
+        assert!(
+            r.oos.bars > 0 && r.oos.mean_ret > 0.0,
+            "OOS getiri pozitif (trend kör-test'te sürer)"
+        );
+        assert!(
+            r.selections.iter().all(|(_, mom)| *mom),
+            "kalıcı trendde her pencere MOMENTUM seçmeli (reversal değil)"
+        );
     }
 
     // Yetersiz veri / dejenere giriş → boş ama panik-yok sonuç.
     #[test]
     fn evaluate_xs_guards_degenerate_input() {
-        let cfg = XsConfig { symbols: vec!["A".into()], lookback: 5, ..Default::default() };
+        let cfg = XsConfig {
+            symbols: vec!["A".into()],
+            lookback: 5,
+            ..Default::default()
+        };
         assert_eq!(evaluate_xs(&[], &cfg).bars, 0, "boş matris → 0 bar");
         let short = vec![vec![Some(1.0), Some(1.0)]; 3];
-        assert_eq!(evaluate_xs(&short, &cfg).bars, 0, "lookback'ten kısa → 0 bar");
+        assert_eq!(
+            evaluate_xs(&short, &cfg).bars,
+            0,
+            "lookback'ten kısa → 0 bar"
+        );
     }
 
     // ─── S/R EĞİMİ ───
     fn zone(zt: ZoneType, low: f64, high: f64, strength: f64) -> SrZone {
         SrZone {
-            price_low: low, price_high: high, midpoint: (low + high) / 2.0,
-            zone_type: zt, strength, touch_count: 3, vol_weight: 1.0,
+            price_low: low,
+            price_high: high,
+            midpoint: (low + high) / 2.0,
+            zone_type: zt,
+            strength,
+            touch_count: 3,
+            vol_weight: 1.0,
         }
     }
     fn cdl(close: f64) -> Candle {
         Candle {
-            timestamp: chrono::Utc::now(), open: close, high: close, low: close,
-            close, volume: 1.0, symbol: "X".into(), interval: "1d".into(),
+            timestamp: chrono::Utc::now(),
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 1.0,
+            symbol: "X".into(),
+            interval: "1d".into(),
         }
     }
 
@@ -1067,20 +1480,40 @@ mod tests {
         assert!((sr_opposition(&near, 100.0, true, band, 0.0) - (1.0 - 1.0 / 3.0)).abs() < 1e-6);
         // band dışı direnç (10%) → 0.
         let far = vec![zone(ZoneType::Resistance, 110.0, 111.0, 5.0)];
-        assert_eq!(sr_opposition(&far, 100.0, true, band, 0.0), 0.0, "uzak direnç karşıtlık yok");
+        assert_eq!(
+            sr_opposition(&far, 100.0, true, band, 0.0),
+            0.0,
+            "uzak direnç karşıtlık yok"
+        );
         // fiyat direnç İÇİNDE → 1.0 (en güçlü engel).
         let inside = vec![zone(ZoneType::Resistance, 99.5, 100.5, 5.0)];
-        assert_eq!(sr_opposition(&inside, 100.0, true, band, 0.0), 1.0, "zone içinde tam karşıtlık");
+        assert_eq!(
+            sr_opposition(&inside, 100.0, true, band, 0.0),
+            1.0,
+            "zone içinde tam karşıtlık"
+        );
         // long-eğilime ALTtaki destek karşıt DEĞİL.
         let sup = vec![zone(ZoneType::Support, 98.0, 99.0, 5.0)];
-        assert_eq!(sr_opposition(&sup, 100.0, true, band, 0.0), 0.0, "long'a destek karşıt değil");
+        assert_eq!(
+            sr_opposition(&sup, 100.0, true, band, 0.0),
+            0.0,
+            "long'a destek karşıt değil"
+        );
         // short-eğilim: ALTtaki destek karşıt. [98,99] → dist=1% → ≈0.667.
         assert!((sr_opposition(&sup, 100.0, false, band, 0.0) - (1.0 - 1.0 / 3.0)).abs() < 1e-6);
         // KIRILMIŞ direnç (fiyatın altında) long'a karşıt değil.
         let broken = vec![zone(ZoneType::Resistance, 98.0, 99.0, 5.0)];
-        assert_eq!(sr_opposition(&broken, 100.0, true, band, 0.0), 0.0, "altta kalan direnç karşıt değil");
+        assert_eq!(
+            sr_opposition(&broken, 100.0, true, band, 0.0),
+            0.0,
+            "altta kalan direnç karşıt değil"
+        );
         // güç-eşiği: zayıf zone elenir.
-        assert_eq!(sr_opposition(&near, 100.0, true, band, 9.0), 0.0, "min_strength altı zone sayılmaz");
+        assert_eq!(
+            sr_opposition(&near, 100.0, true, band, 9.0),
+            0.0,
+            "min_strength altı zone sayılmaz"
+        );
     }
 
     // collect_sym_window: None'ları atlar, son `window` barı toplar, look-ahead'siz (>t dahil değil).
@@ -1090,13 +1523,16 @@ mod tests {
         let ohlc: Vec<Vec<Option<Candle>>> = vec![
             vec![Some(cdl(10.0)), Some(cdl(20.0))],
             vec![Some(cdl(11.0)), None],
-            vec![None,            Some(cdl(22.0))],
+            vec![None, Some(cdl(22.0))],
             vec![Some(cdl(13.0)), Some(cdl(23.0))],
             vec![Some(cdl(14.0)), Some(cdl(24.0))],
         ];
         // t=3, window=3 → barlar 1..=3, sembol 0: bar2 None → [11.0, 13.0].
         let w = collect_sym_window(&ohlc, 3, 0, 3);
-        assert_eq!(w.iter().map(|c| c.close).collect::<Vec<_>>(), vec![11.0, 13.0]);
+        assert_eq!(
+            w.iter().map(|c| c.close).collect::<Vec<_>>(),
+            vec![11.0, 13.0]
+        );
         // t=2 → bar 4'ü (gelecek) ASLA içermez (look-ahead yok).
         let w2 = collect_sym_window(&ohlc, 2, 1, 10);
         assert!(w2.iter().all(|c| c.close <= 22.0), "gelecek bar sızmamalı");
@@ -1115,17 +1551,35 @@ mod tests {
         }
         let cfg = XsConfig {
             symbols: vec!["A".into(), "B".into(), "C".into()],
-            top_k: 1, lookback: 5, fee_rate: 0.001, ..Default::default()
+            top_k: 1,
+            lookback: 5,
+            fee_rate: 0.001,
+            ..Default::default()
         };
         let base = evaluate_xs(&closes, &cfg);
         // ohlc=None → birebir.
         let none = evaluate_xs_with_ohlc(&closes, None, &cfg);
         assert_eq!(base.bars, none.bars);
-        assert_eq!(base.total_return.to_bits(), none.total_return.to_bits(), "None → birebir");
+        assert_eq!(
+            base.total_return.to_bits(),
+            none.total_return.to_bits(),
+            "None → birebir"
+        );
         // Some(ohlc) ama sr_tilt=0 → eğim bloğu atlanır → yine birebir (ohlc içeriği önemsiz).
         let dummy: Vec<Vec<Option<Candle>>> = vec![vec![None, None, None]; closes.len()];
-        let tilt0 = evaluate_xs_with_ohlc(&closes, Some(&dummy), &XsConfig { sr_tilt: 0.0, ..cfg.clone() });
-        assert_eq!(base.total_return.to_bits(), tilt0.total_return.to_bits(), "sr_tilt=0 → birebir");
+        let tilt0 = evaluate_xs_with_ohlc(
+            &closes,
+            Some(&dummy),
+            &XsConfig {
+                sr_tilt: 0.0,
+                ..cfg.clone()
+            },
+        );
+        assert_eq!(
+            base.total_return.to_bits(),
+            tilt0.total_return.to_bits(),
+            "sr_tilt=0 → birebir"
+        );
         assert_eq!(base.t_stat.to_bits(), tilt0.t_stat.to_bits());
     }
 
@@ -1134,7 +1588,9 @@ mod tests {
     /// closes matrisi: her sembol kendi fiyat serisi (hepsi Some).
     fn closes_of(series: &[Vec<f64>]) -> Vec<Vec<Option<f64>>> {
         let n = series[0].len();
-        (0..n).map(|t| series.iter().map(|s| Some(s[t])).collect()).collect()
+        (0..n)
+            .map(|t| series.iter().map(|s| Some(s[t])).collect())
+            .collect()
     }
 
     #[test]
@@ -1143,11 +1599,18 @@ mod tests {
         let a: Vec<f64> = (0..40).map(|i| 100.0 + 0.2 * (i as f64).sin()).collect();
         let b: Vec<f64> = (0..40).map(|i| 100.0 + 5.0 * (i as f64).sin()).collect();
         let m = closes_of(&[a, b]);
-        let cfg = XsConfig { signal: XsSignal::LowVol, lookback: 20, ..Default::default() };
+        let cfg = XsConfig {
+            signal: XsSignal::LowVol,
+            lookback: 20,
+            ..Default::default()
+        };
         let sig = build_signals(&m, 39, &cfg);
         let sa = sig.iter().find(|(j, _)| *j == 0).unwrap().1;
         let sb = sig.iter().find(|(j, _)| *j == 1).unwrap().1;
-        assert!(sa > sb, "sakin sembol (A) daha yüksek skor almalı: A={sa} B={sb}");
+        assert!(
+            sa > sb,
+            "sakin sembol (A) daha yüksek skor almalı: A={sa} B={sb}"
+        );
     }
 
     #[test]
@@ -1157,11 +1620,18 @@ mod tests {
         let mut b = a.clone();
         b[20] *= 1.30; // %30 spike
         let m = closes_of(&[a, b]);
-        let cfg = XsConfig { signal: XsSignal::MaxLottery, lookback: 15, ..Default::default() };
+        let cfg = XsConfig {
+            signal: XsSignal::MaxLottery,
+            lookback: 15,
+            ..Default::default()
+        };
         let sig = build_signals(&m, 25, &cfg);
         let sa = sig.iter().find(|(j, _)| *j == 0).unwrap().1;
         let sb = sig.iter().find(|(j, _)| *j == 1).unwrap().1;
-        assert!(sa > sb, "piyango sembolü (B) daha düşük skor almalı: A={sa} B={sb}");
+        assert!(
+            sa > sb,
+            "piyango sembolü (B) daha düşük skor almalı: A={sa} B={sb}"
+        );
     }
 
     #[test]
@@ -1179,11 +1649,18 @@ mod tests {
             b.push(pb);
         }
         let m = closes_of(&[a, b]);
-        let cfg = XsConfig { signal: XsSignal::Beta, lookback: 30, ..Default::default() };
+        let cfg = XsConfig {
+            signal: XsSignal::Beta,
+            lookback: 30,
+            ..Default::default()
+        };
         let sig = build_signals(&m, 59, &cfg);
         let sa = sig.iter().find(|(j, _)| *j == 0).unwrap().1;
         let sb = sig.iter().find(|(j, _)| *j == 1).unwrap().1;
-        assert!(sa > sb, "düşük-β sembol (A) daha yüksek skor almalı: A={sa} B={sb}");
+        assert!(
+            sa > sb,
+            "düşük-β sembol (A) daha yüksek skor almalı: A={sa} B={sb}"
+        );
     }
 
     #[test]
@@ -1192,10 +1669,17 @@ mod tests {
         let a: Vec<f64> = (0..30).map(|i| 100.0 * 1.01_f64.powi(i)).collect(); // güçlü yukarı
         let b: Vec<f64> = (0..30).map(|i| 100.0 * 0.99_f64.powi(i)).collect(); // aşağı
         let m = closes_of(&[a, b]);
-        let cfg = XsConfig { signal: XsSignal::Momentum, lookback: 10, ..Default::default() };
+        let cfg = XsConfig {
+            signal: XsSignal::Momentum,
+            lookback: 10,
+            ..Default::default()
+        };
         let sig = build_signals(&m, 29, &cfg);
         let sa = sig.iter().find(|(j, _)| *j == 0).unwrap().1;
         let sb = sig.iter().find(|(j, _)| *j == 1).unwrap().1;
-        assert!(sa > 0.0 && sb < 0.0 && sa > sb, "momentum: yukarı + / aşağı −");
+        assert!(
+            sa > 0.0 && sb < 0.0 && sa > sb,
+            "momentum: yukarı + / aşağı −"
+        );
     }
 }

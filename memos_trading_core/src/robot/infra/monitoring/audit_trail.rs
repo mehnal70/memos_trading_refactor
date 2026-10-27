@@ -28,6 +28,13 @@ impl AuditTrail {
         AUDIT_LOG.get_or_init(|| Mutex::new(Vec::with_capacity(1000)))
     }
 
+    fn lock_log() -> std::sync::MutexGuard<'static, Vec<AuditEntry>> {
+        match Self::get_log().lock() {
+            Ok(guard) => guard,
+            Err(poison) => poison.into_inner(),
+        }
+    }
+
     /// Audit log kaydı ekle - Performans: Gereksiz kopyalamadan kaçınır.
     pub fn log(username: &str, action: &str, resource: &str, ip: &str, result: &str, details: &Value) {
         let entry = AuditEntry {
@@ -48,7 +55,7 @@ impl AuditTrail {
     /// Audit loglarını filtrele - Performans: Referans döndürerek bellek kopyalamasını (cloning) önler.
     /// Not: Lock tutulduğu sürece veri okunabilir, bu yüzden sonuçları kopyalayıp dönmek (vec collect) güvenlidir.
     pub fn search(user: Option<&str>, action: Option<&str>, result: Option<&str>) -> Vec<AuditEntry> {
-        let log = Self::get_log().lock().unwrap();
+        let log = Self::lock_log();
         
         log.iter()
             .filter(|e| {
@@ -62,6 +69,6 @@ impl AuditTrail {
 
     /// Tüm audit loglarını getir
     pub fn all() -> Vec<AuditEntry> {
-        Self::get_log().lock().unwrap().clone()
+        Self::lock_log().clone()
     }
 }

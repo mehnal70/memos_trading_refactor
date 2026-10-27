@@ -41,9 +41,16 @@ impl TwelveDataFetcher {
     /// Bot TF'ini Twelve Data interval token'ına çevir.
     pub fn td_interval(interval: &str) -> &str {
         match interval {
-            "1m" => "1min", "5m" => "5min", "15m" => "15min", "30m" => "30min",
-            "1h" => "1h", "2h" => "2h", "4h" => "4h",
-            "1d" => "1day", "1w" => "1week", "1M" => "1month",
+            "1m" => "1min",
+            "5m" => "5min",
+            "15m" => "15min",
+            "30m" => "30min",
+            "1h" => "1h",
+            "2h" => "2h",
+            "4h" => "4h",
+            "1d" => "1day",
+            "1w" => "1week",
+            "1M" => "1month",
             other => other,
         }
     }
@@ -69,12 +76,19 @@ impl TwelveDataFetcher {
 
     /// Twelve Data `time_series` yanıtını `Candle`'a parse et — SAF (ağsız test). `out_symbol`
     /// üretilen mumun çıplak sembolü. `values` en-yeni-başta → artan sıraya çevrilir.
-    pub fn parse_time_series(body: &str, out_symbol: &str, interval: &str) -> Result<Vec<Candle>, String> {
+    pub fn parse_time_series(
+        body: &str,
+        out_symbol: &str,
+        interval: &str,
+    ) -> Result<Vec<Candle>, String> {
         let v: serde_json::Value =
             serde_json::from_str(body).map_err(|e| format!("TwelveData JSON parse: {e}"))?;
         // Hata gövdesi: {"code":..,"message":..,"status":"error"}
         if v.get("status").and_then(|s| s.as_str()) == Some("error") {
-            let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("bilinmeyen");
+            let msg = v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("bilinmeyen");
             return Err(format!("TwelveData hata [{out_symbol}]: {msg}"));
         }
         let values = v
@@ -96,7 +110,11 @@ impl TwelveDataFetcher {
             } else {
                 continue;
             };
-            let pf = |key: &str| row.get(key).and_then(|x| x.as_str()).and_then(|s| s.parse::<f64>().ok());
+            let pf = |key: &str| {
+                row.get(key)
+                    .and_then(|x| x.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+            };
             let (open, high, low, close) = match (pf("open"), pf("high"), pf("low"), pf("close")) {
                 (Some(o), Some(h), Some(l), Some(c)) => (o, h, l, c),
                 _ => continue,
@@ -123,7 +141,12 @@ impl TwelveDataFetcher {
     /// `time_series` çek. `td_symbol` TD-doğal sembol (EUR/USD vb.), `exchange` opsiyonel borsa
     /// (BIST). `out_symbol` üretilen mumun çıplak sembolü. `outputsize` ≤5000.
     pub async fn fetch_daily(
-        &self, td_symbol: &str, exchange: Option<&str>, out_symbol: &str, interval: &str, outputsize: usize,
+        &self,
+        td_symbol: &str,
+        exchange: Option<&str>,
+        out_symbol: &str,
+        interval: &str,
+        outputsize: usize,
     ) -> Result<Vec<Candle>, String> {
         let mut url = format!(
             "{TD_BASE}/time_series?symbol={}&interval={}&outputsize={}&format=JSON&apikey={}",
@@ -135,9 +158,14 @@ impl TwelveDataFetcher {
         if let Some(ex) = exchange {
             url.push_str(&format!("&exchange={ex}"));
         }
-        let body = self.client.get(&url).send().await
+        let body = self
+            .client
+            .get(&url)
+            .send()
+            .await
             .map_err(|e| format!("TwelveData bağlantı [{out_symbol}]: {e}"))?
-            .text().await
+            .text()
+            .await
             .map_err(|e| format!("TwelveData gövde [{out_symbol}]: {e}"))?;
         Self::parse_time_series(&body, out_symbol, interval)
     }
@@ -154,9 +182,15 @@ impl MarketFetcher for TwelveDataFetcher {
         "twelvedata"
     }
 
-    async fn fetch_latest(&self, symbol: &str, interval: &str, limit: usize) -> Result<Vec<Candle>, String> {
+    async fn fetch_latest(
+        &self,
+        symbol: &str,
+        interval: &str,
+        limit: usize,
+    ) -> Result<Vec<Candle>, String> {
         // Genel yüzey: symbol TD-doğal varsayılır, exchange yok.
-        self.fetch_daily(symbol, None, symbol, interval, limit.clamp(1, 5000)).await
+        self.fetch_daily(symbol, None, symbol, interval, limit.clamp(1, 5000))
+            .await
     }
 }
 
@@ -169,11 +203,26 @@ mod tests {
     fn interval_and_symbol_mapping() {
         assert_eq!(TwelveDataFetcher::td_interval("1d"), "1day");
         assert_eq!(TwelveDataFetcher::td_interval("1h"), "1h");
-        assert_eq!(TwelveDataFetcher::td_symbol("bist", "THYAO"), ("THYAO".into(), Some("BIST")));
-        assert_eq!(TwelveDataFetcher::td_symbol("forex", "EURUSD"), ("EUR/USD".into(), None));
-        assert_eq!(TwelveDataFetcher::td_symbol("commodity", "XAUUSD"), ("XAU/USD".into(), None));
-        assert_eq!(TwelveDataFetcher::td_symbol("forex", "EUR/USD"), ("EUR/USD".into(), None));
-        assert_eq!(TwelveDataFetcher::td_symbol("usequity", "AAPL"), ("AAPL".into(), None));
+        assert_eq!(
+            TwelveDataFetcher::td_symbol("bist", "THYAO"),
+            ("THYAO".into(), Some("BIST"))
+        );
+        assert_eq!(
+            TwelveDataFetcher::td_symbol("forex", "EURUSD"),
+            ("EUR/USD".into(), None)
+        );
+        assert_eq!(
+            TwelveDataFetcher::td_symbol("commodity", "XAUUSD"),
+            ("XAU/USD".into(), None)
+        );
+        assert_eq!(
+            TwelveDataFetcher::td_symbol("forex", "EUR/USD"),
+            ("EUR/USD".into(), None)
+        );
+        assert_eq!(
+            TwelveDataFetcher::td_symbol("usequity", "AAPL"),
+            ("AAPL".into(), None)
+        );
     }
 
     #[test]

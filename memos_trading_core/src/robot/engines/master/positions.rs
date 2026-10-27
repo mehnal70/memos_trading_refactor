@@ -1,9 +1,10 @@
 // src/robot/engines/master/positions.rs — Pozisyon açılışı (scalp-swing + paper) + blok kapısı.
 // Faz 2 modülerleştirme: exit/kapanış yolu positions_close.rs'e ayrıldı (davranış birebir).
 use super::*;
+use crate::core::model::TradingMode;
+use crate::core::types::Exchange;
 
 impl Engine {
-
     /// ScalpSwing A2: alt-kanal fırsat avcısı. cfg.scalp_enabled/swing_enabled
     /// gate'ler ile ScalpEngine/SwingEngine fırsat üretir, en yüksek skoru
     /// SlotGuard'dan geçirir ve uygunsa open_paper_position'a Some(TradeType)
@@ -18,27 +19,40 @@ impl Engine {
         regime_directional: bool,
     ) -> bool {
         use crate::robot::scalp_swing::{
-            ScalpEngine, SwingEngine, SlotGuard, OpenSlot, ScalpSwingConfig,
+            OpenSlot, ScalpEngine, ScalpSwingConfig, SlotGuard, SwingEngine,
         };
 
         // 1) cfg + mevcut açık pozisyonların kanal-bazlı slot'larını topla.
         //    Hem cfg hem slots tek kısa mutex skopunda alınır.
         let (cfg, existing_slots): (ScalpSwingConfig, Vec<OpenSlot>) = {
-            let st = match state.lock() { Ok(s) => s, Err(_) => return false };
+            let st = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
             let cfg = match st.brain.scalp_swing_config.read().ok() {
                 Some(c) => c.clone(),
                 None => return false,
             };
-            if !cfg.scalp_enabled && !cfg.swing_enabled { return false; }
-            let slots = st.finance.live_positions.read().ok().map(|m| {
-                m.values().filter_map(|p| {
-                    p.kind.map(|kind| OpenSlot {
-                        symbol: p.symbol.clone(),
-                        trade_type: kind,
-                        is_long: p.is_long,
-                    })
-                }).collect::<Vec<_>>()
-            }).unwrap_or_default();
+            if !cfg.scalp_enabled && !cfg.swing_enabled {
+                return false;
+            }
+            let slots = st
+                .finance
+                .live_positions
+                .read()
+                .ok()
+                .map(|m| {
+                    m.values()
+                        .filter_map(|p| {
+                            p.kind.map(|kind| OpenSlot {
+                                symbol: p.symbol.clone(),
+                                trade_type: kind,
+                                is_long: p.is_long,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             (cfg, slots)
         };
 
@@ -58,25 +72,139 @@ impl Engine {
             return false; // savunma
         }
         let (scalp_ok, swing_ok) = match regime {
-            MarketRegime::Ranging | MarketRegime::LowVolatility => (true,  false),
+            MarketRegime::Ranging | MarketRegime::LowVolatility => (true, false),
             MarketRegime::StrongUptrend | MarketRegime::StrongDowntrend => (false, true),
             _ => (true, true),
         };
 
+        let scalp_interval = cfg.scalp_interval.clone();
+        let swing_interval = cfg.swing_interval.clone();
+        let load_interval_candles = |interval: &str, min_needed: usize| -> Vec<Candle> {
+            let st = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            };
+            let mut bars =
+                st.fleet
+                    .opportunity_cache
+                    .get_latest(symbol, interval, min_needed.max(120));
+            if bars.len() < min_needed {
+                // Kilit zaten tutuluyor → read_candles_routed (state.lock) DEADLOCK olur;
+                // route guard üzerinden yapılır. Global config.market yerine venue namespace.
+                let db_bars = match st.venue_registry.route(symbol) {
+                    Some((v, bare)) => {
+                        let (ex, mk) = v.storage_namespace();
+                        crate::persistence::reader::read_candles_ns(
+                            &st.config.db_path,
+                            bare,
+                            interval,
+                            ex,
+                            mk,
+                            min_needed.max(120),
+                        )
+                        .unwrap_or_default()
+                    }
+                    None => crate::persistence::reader::read_candles_market(
+                        &st.config.db_path,
+                        symbol,
+                        interval,
+                        &st.config.market,
+                        min_needed.max(120),
+                    )
+                    .unwrap_or_default(),
+                };
+                if db_bars.len() > bars.len() {
+                    bars = db_bars;
+                }
+            }
+            bars
+        };
+        let scalp_candles = load_interval_candles(&scalp_interval, 30);
+        let swing_candles = load_interval_candles(&swing_interval, 60);
+
         let scalp_opp = if cfg.scalp_enabled && scalp_ok {
-            ScalpEngine::evaluate(candles, cfg.scalp_min_score)
-        } else { None };
+            ScalpEngine::evaluate(&scalp_candles, cfg.scalp_min_score)
+        } else {
+            None
+        };
         let swing_opp = if cfg.swing_enabled && swing_ok {
-            SwingEngine::evaluate(candles, cfg.swing_min_adx, cfg.swing_min_score)
-        } else { None };
+            SwingEngine::evaluate(&swing_candles, cfg.swing_min_adx, cfg.swing_min_score)
+        } else {
+            None
+        };
+
+        // 🧠 5m ve 15m fırsat-hafızaları: scalp ve swing için ayrı rolling snapshot bias'ı.
+        let (mem5m_snapshot, mem5m_weight, mem15m_snapshot, mem15m_weight) = {
+            let st = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+
+            let mem5m_snapshot = if st.tuning.scalp_swing_mem5m_enable {
+                crate::robot::data_pipeline::MemoryOpportunitySnapshot::from_candles(
+                    symbol,
+                    &scalp_interval,
+                    &scalp_candles,
+                )
+                .filter(|s| s.bars >= st.tuning.scalp_swing_mem5m_min_bars)
+            } else {
+                None
+            };
+            let mem15m_snapshot = if st.tuning.scalp_swing_mem15m_enable {
+                crate::robot::data_pipeline::MemoryOpportunitySnapshot::from_candles(
+                    symbol,
+                    &swing_interval,
+                    &swing_candles,
+                )
+                .filter(|s| s.bars >= st.tuning.scalp_swing_mem15m_min_bars)
+            } else {
+                None
+            };
+
+            (
+                mem5m_snapshot,
+                st.tuning.scalp_swing_mem5m_bias_weight,
+                mem15m_snapshot,
+                st.tuning.scalp_swing_mem15m_bias_weight,
+            )
+        };
+        let adjusted_score =
+            |opp: &crate::robot::scalp_swing::TradeOpportunity,
+             snapshot: Option<&crate::robot::data_pipeline::MemoryOpportunitySnapshot>,
+             weight: f64|
+             -> f64 {
+                let bias = snapshot
+                    .map(|snap| {
+                        let b = match opp.trade_type {
+                            crate::robot::scalp_swing::TradeType::Scalp => snap.scalp_bias,
+                            crate::robot::scalp_swing::TradeType::Swing => snap.swing_bias,
+                            crate::robot::scalp_swing::TradeType::Regular => 0.0,
+                        };
+                        if opp.is_long {
+                            b
+                        } else {
+                            -b
+                        }
+                    })
+                    .unwrap_or(0.0);
+                opp.score + (weight * bias.clamp(-1.0, 1.0))
+            };
 
         // 3) En yüksek skoru seç (Scalp ve Swing eşit ise Scalp önce —
         //    kısa-vade fırsat sermayeyi daha az bağlar).
         let opp = match (scalp_opp, swing_opp) {
-            (Some(a), Some(b)) => if a.score >= b.score { a } else { b },
-            (Some(a), None)    => a,
-            (None,    Some(b)) => b,
-            (None,    None)    => return false,
+            (Some(a), Some(b)) => {
+                let a_score = adjusted_score(&a, mem5m_snapshot.as_ref(), mem5m_weight);
+                let b_score = adjusted_score(&b, mem15m_snapshot.as_ref(), mem15m_weight);
+                if a_score >= b_score {
+                    a
+                } else {
+                    b
+                }
+            }
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => return false,
         };
 
         // 🧭 Rejim-yön kapısı (opt-in): ScalpSwing yönü de rejimle hizalı olmalı —
@@ -87,25 +215,122 @@ impl Engine {
             && !crate::robot::logic::market_regime::regime_confirms_direction(regime, opp.is_long)
         {
             if log_throttle_should_emit(symbol, "scalp_regime_dir_block", 60) {
-                push_state_log(state, format!(
-                    "🧭 ScalpSwing {} {} ⇒ REDDEDİLDİ (rejim-yön teyidi yok, rejim={})",
-                    opp.trade_type.label(),
-                    if opp.is_long { "BUY" } else { "SELL" },
-                    regime.as_str(),
-                ));
+                push_state_log(
+                    state,
+                    format!(
+                        "🧭 ScalpSwing {} {} ⇒ REDDEDİLDİ (rejim-yön teyidi yok, rejim={})",
+                        opp.trade_type.label(),
+                        if opp.is_long { "BUY" } else { "SELL" },
+                        regime.as_str(),
+                    ),
+                );
+            }
+            return false;
+        }
+
+        // ⚖️ Blend çekirdeği (BLEND_FACTOR) aktifken ScalpSwing yalnız kontrollü overlay olarak
+        // açılır: net-delta ve overlay-slot limitleri aşılırsa fırsat reddedilir.
+        let blend_overlay_block_reason = {
+            let st = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            let top_k = st
+                .brain
+                .parameters
+                .read()
+                .ok()
+                .map(|p| p.blend_live.top_k)
+                .unwrap_or(0);
+            let (blend_long, blend_short, overlay_long, overlay_short, overlay_open) = st
+                .finance
+                .live_positions
+                .read()
+                .ok()
+                .map(|m| {
+                    let mut bl = 0usize;
+                    let mut bs = 0usize;
+                    let mut ol = 0usize;
+                    let mut os = 0usize;
+                    let mut oo = 0usize;
+                    for p in m.values() {
+                        if p.trade_type == super::blend_live::BLEND_STRATEGY_TAG {
+                            if p.is_long {
+                                bl += 1;
+                            } else {
+                                bs += 1;
+                            }
+                        }
+                        if p.kind.is_some() {
+                            oo += 1;
+                            if p.is_long {
+                                ol += 1;
+                            } else {
+                                os += 1;
+                            }
+                        }
+                    }
+                    (bl, bs, ol, os, oo)
+                })
+                .unwrap_or((0, 0, 0, 0, 0));
+
+            let core_active = top_k > 0 && blend_long >= top_k && blend_short >= top_k;
+            if !core_active {
+                None
+            } else if !st.tuning.blend_overlay_enable {
+                Some("blend çekirdeği aktifken overlay kapalı (BLEND_OVERLAY_ENABLE=0)".to_string())
+            } else if overlay_open as u32 >= st.tuning.blend_overlay_max_open {
+                Some(format!(
+                    "blend overlay slot dolu ({}/{})",
+                    overlay_open, st.tuning.blend_overlay_max_open
+                ))
+            } else {
+                let signed = |is_long: bool| if is_long { 1 } else { -1 };
+                let projected_net_delta = (blend_long as i32 - blend_short as i32)
+                    + (overlay_long as i32 - overlay_short as i32)
+                    + signed(opp.is_long);
+                let max_net = st.tuning.blend_overlay_max_net_delta.max(0);
+                if projected_net_delta.abs() > max_net {
+                    Some(format!(
+                        "blend net-delta limiti aşılıyor (proj={} > lim={})",
+                        projected_net_delta.abs(),
+                        max_net
+                    ))
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(reason) = blend_overlay_block_reason {
+            if log_throttle_should_emit(symbol, "blend_overlay_block", 60) {
+                push_state_log(
+                    state,
+                    format!(
+                        "⚖️ ScalpSwing {} {} ⇒ REDDEDİLDİ ({})",
+                        opp.trade_type.label(),
+                        if opp.is_long { "BUY" } else { "SELL" },
+                        reason,
+                    ),
+                );
             }
             return false;
         }
 
         // 4) SlotGuard: kanal-bazlı kapasite + hedge engeli.
         let (ok, reason) = SlotGuard::can_open(
-            &existing_slots, symbol, opp.trade_type, opp.is_long,
-            cfg.max_scalp_per_symbol, cfg.max_swing_per_symbol,
+            &existing_slots,
+            symbol,
+            opp.trade_type,
+            opp.is_long,
+            cfg.max_scalp_per_symbol,
+            cfg.max_swing_per_symbol,
         );
         if !ok {
             log::debug!(
                 "ScalpSwing {} {} reddedildi: {}",
-                opp.trade_type.label(), symbol, reason,
+                opp.trade_type.label(),
+                symbol,
+                reason,
             );
             return false;
         }
@@ -118,7 +343,8 @@ impl Engine {
             crate::core::types::Signal::Sell
         };
         let strategy_name = format!(
-            "{}_{}", opp.trade_type.label(),
+            "{}_{}",
+            opp.trade_type.label(),
             if opp.is_long { "BUY" } else { "SELL" },
         );
         // Bu "deneme" logu sembol başına throttle'lanır: fırsat her cycle (500ms)
@@ -126,15 +352,151 @@ impl Engine {
         // taşırıyordu (84/100 satır). Gerçek açılış zaten open_paper_position'da
         // "🚀 [PAPER-...] açıldı" ile onaylanıyor → bu yalnız bağlam (score/reason).
         if log_throttle_should_emit(symbol, "scalp_open_attempt", 60) {
-            push_state_log(state, format!(
-                "⚡ ScalpSwing {} açılış: {} score={:.2} | {}",
-                opp.trade_type.label(), symbol, opp.score, opp.reason,
-            ));
+            push_state_log(
+                state,
+                format!(
+                    "⚡ ScalpSwing {} açılış: {} score={:.2} | {}",
+                    opp.trade_type.label(),
+                    symbol,
+                    opp.score,
+                    opp.reason,
+                ),
+            );
         }
         Self::open_paper_position(
-            state, symbol, &signal, candles, &strategy_name, Some(opp.trade_type), None,
-        ).await; // xs_sizing=None → ScalpSwing Kelly+resolve_leverage (mevcut davranış)
+            state,
+            symbol,
+            &signal,
+            candles,
+            &strategy_name,
+            Some(opp.trade_type),
+            None,
+        )
+        .await; // xs_sizing=None → ScalpSwing Kelly+resolve_leverage (mevcut davranış)
         true
+    }
+
+    /// ⚖️ Blend çekirdeği aktifken açık overlay (Scalp/Swing) bacağını gerekirse otomatik kapatır:
+    /// - max holding süresi aşıldıysa,
+    /// - net-delta limiti ihlalinde dengesiz yöndeki overlay bacağıysa.
+    pub(crate) async fn enforce_blend_overlay_rebalance_for_open_symbol(
+        state: &Arc<Mutex<AppState>>,
+        symbol: &str,
+        candles: &[Candle],
+    ) -> bool {
+        let decision: Option<String> = {
+            let st = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            let top_k = st
+                .brain
+                .parameters
+                .read()
+                .ok()
+                .map(|p| p.blend_live.top_k)
+                .unwrap_or(0);
+            let p = st
+                .finance
+                .live_positions
+                .read()
+                .ok()
+                .and_then(|m| m.get(symbol).cloned());
+            let p = match p {
+                Some(p) => p,
+                None => return false,
+            };
+            if p.kind.is_none() {
+                None
+            } else {
+                let (blend_long, blend_short, overlay_long, overlay_short) = st
+                    .finance
+                    .live_positions
+                    .read()
+                    .ok()
+                    .map(|m| {
+                        let mut bl = 0i32;
+                        let mut bs = 0i32;
+                        let mut ol = 0i32;
+                        let mut os = 0i32;
+                        for x in m.values() {
+                            if x.trade_type == super::blend_live::BLEND_STRATEGY_TAG {
+                                if x.is_long {
+                                    bl += 1;
+                                } else {
+                                    bs += 1;
+                                }
+                            }
+                            if x.kind.is_some() {
+                                if x.is_long {
+                                    ol += 1;
+                                } else {
+                                    os += 1;
+                                }
+                            }
+                        }
+                        (bl, bs, ol, os)
+                    })
+                    .unwrap_or((0, 0, 0, 0));
+                let core_active =
+                    top_k > 0 && blend_long >= top_k as i32 && blend_short >= top_k as i32;
+                if !core_active {
+                    None
+                } else {
+                    let now = chrono::Utc::now();
+                    let max_hold = st.tuning.blend_overlay_max_holding_secs;
+                    if max_hold > 0 {
+                        let opened_at = chrono::DateTime::parse_from_rfc3339(&p.opened_at)
+                            .ok()
+                            .map(|dt| dt.with_timezone(&chrono::Utc));
+                        if let Some(ts) = opened_at {
+                            let age = (now - ts).num_seconds().max(0) as u64;
+                            if age >= max_hold {
+                                Some(format!(
+                                    "overlay süre limiti doldu ({}sn >= {}sn)",
+                                    age, max_hold
+                                ))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                    .or_else(|| {
+                        let net = (blend_long - blend_short) + (overlay_long - overlay_short);
+                        let max_net = st.tuning.blend_overlay_max_net_delta.max(0);
+                        if net.abs() > max_net {
+                            let reducing = (net > 0 && p.is_long) || (net < 0 && !p.is_long);
+                            if reducing {
+                                Some(format!(
+                                    "overlay net-delta rebalance (|{}| > {})",
+                                    net, max_net
+                                ))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                }
+            }
+        };
+
+        if let Some(reason) = decision {
+            if log_throttle_should_emit(symbol, "blend_overlay_auto_close", 30) {
+                push_state_log(
+                    state,
+                    format!("⚖️ {} overlay kapatılıyor: {}", symbol, reason,),
+                );
+            }
+            Self::close_paper_position(state, symbol, candles, ExitReason::StrategySignal).await;
+            return true;
+        }
+        false
     }
 
     /// 🧬 FAZ F3: OTONOM POZİSYON AÇILIŞ MOTORU (Paper + Live dispatcher)
@@ -156,13 +518,43 @@ impl Engine {
         xs_sizing: Option<book_core::BookSizing>,
     ) {
         use crate::robot::risk::kelly::KellyCriterion;
-        let last_candle = match candles.last() { Some(c) => c, None => return };
+        let last_candle = match candles.last() {
+            Some(c) => c,
+            None => return,
+        };
 
         // blocked_symbols savunması: config'te listelenen semboller için yeni pozisyon
         // açılışı kısa-devre reddedilir. Mevcut açık pozisyonlar bu engelden etkilenmez
         // (execute_trade_cycle yetim pozisyon kuralı onları yönetmeye devam eder).
+        // RİSK HALT kapısı (Adım 4a): risk_gate kritik seviye mühürlediyse yeni pozisyon
+        // AÇILMAZ (paper+canlı). Mevcut pozisyonlar execute_trade_cycle ile normal yönetilir.
+        // Tek-nokta: her iki açılış yolu (scalp_swing + strateji) buradan geçer.
+        if Self::risk_halt_active(state) {
+            if log_throttle_should_emit(symbol, "risk_halt_block", 60) {
+                push_state_log(
+                    state,
+                    format!("🛑 {} açılış reddedildi: RISK-HALT aktif", symbol),
+                );
+            }
+            return;
+        }
+        if let Some(reason) = Self::live_entry_gate(state, symbol) {
+            if log_throttle_should_emit(symbol, "live_entry_gate", 300) {
+                push_state_log(
+                    state,
+                    format!("🛑 {} canlı açılış reddedildi: {}", symbol, reason),
+                );
+            }
+            return;
+        }
         if Self::is_symbol_blocked(state, symbol) {
-            push_state_log(state, format!("🚫 {} açılış reddedildi: blocked_symbols listesinde", symbol));
+            push_state_log(
+                state,
+                format!(
+                    "🚫 {} açılış reddedildi: blocked_symbols listesinde",
+                    symbol
+                ),
+            );
             return;
         }
 
@@ -174,10 +566,17 @@ impl Engine {
         // aynı cycle) bloklar ve bar-kadansı kapısı yüzünden bir sonraki bara kadar açtırmaz → bacak
         // bar boyu yanlış flat kalır. XS zaten Kelly+resolve_leverage'ı da bypass ediyor. [[project_xs_momentum]]
         let cooldown_block = state.lock().ok().and_then(|st| {
-            if xs_sizing.is_some() { return None; }
+            if xs_sizing.is_some() {
+                return None;
+            }
             let cd = st.tuning.reentry_cooldown_secs;
-            if cd == 0 { return None; }
-            st.finance.last_close_at.read().ok()
+            if cd == 0 {
+                return None;
+            }
+            st.finance
+                .last_close_at
+                .read()
+                .ok()
                 .and_then(|m| m.get(symbol).copied())
                 .map(|t| t.elapsed().as_secs())
                 .filter(|elapsed| *elapsed < cd)
@@ -185,9 +584,13 @@ impl Engine {
         });
         if let Some((elapsed, cd)) = cooldown_block {
             if log_throttle_should_emit(symbol, "reentry_cooldown", 30) {
-                push_state_log(state, format!(
-                    "⏳ {} açılış atlandı: re-entry cooldown ({}/{}sn)", symbol, elapsed, cd,
-                ));
+                push_state_log(
+                    state,
+                    format!(
+                        "⏳ {} açılış atlandı: re-entry cooldown ({}/{}sn)",
+                        symbol, elapsed, cd,
+                    ),
+                );
             }
             return;
         }
@@ -200,15 +603,21 @@ impl Engine {
         // REGIME_DIRECTIONAL Sell üretmesi) karşı da korur. Futures/coinm'de serbest.
         // Market sınıflandırması Market::from_label tek-kaynağından (string serpme yok).
         if !is_long {
-            let block = state.lock().ok().map(|st| (
-                !crate::core::types::Market::from_label(&st.config.market).allows_short(),
-                st.tuning.risk_block_log_cooldown_secs,
-            ));
+            let block = state.lock().ok().map(|st| {
+                (
+                    !crate::core::types::Market::from_label(&st.config.market).allows_short(),
+                    st.tuning.risk_block_log_cooldown_secs,
+                )
+            });
             if let Some((true, cooldown)) = block {
                 if log_throttle_should_emit(symbol, "spot_short_block", cooldown) {
-                    push_state_log(state, format!(
-                        "🚫 {} SHORT açılış atlandı: spot piyasa long-only (borrow yok)", symbol,
-                    ));
+                    push_state_log(
+                        state,
+                        format!(
+                            "🚫 {} SHORT açılış atlandı: spot piyasa long-only (borrow yok)",
+                            symbol,
+                        ),
+                    );
                 }
                 return;
             }
@@ -231,12 +640,53 @@ impl Engine {
             Ready(Option<OpenSlotGuard>),
             AlreadyOpen(u64),
             CapFull(u32, u32, u64),
+            VenueCapFull(crate::core::types::Exchange, u32, u32, u64),
+            VenueDailyLoss(crate::core::types::Exchange, f64, f64, u64),
         }
         let gate = {
-            let st = match state.lock() { Ok(s) => s, Err(_) => return };
+            let st = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
             let log_cd = st.tuning.risk_block_log_cooldown_secs;
-            let already_open = st.finance.live_positions.read()
-                .map(|m| m.contains_key(symbol)).unwrap_or(false);
+            let (bare_symbol, tagged_ex) = crate::robot::venue::registry::split_venue_tag(symbol);
+            let venue_ex =
+                tagged_ex.unwrap_or_else(|| crate::core::types::Exchange::classify(bare_symbol));
+            let directional_gate = |st: &AppState| {
+                let cap = if is_long {
+                    st.tuning.max_concurrent_longs
+                } else {
+                    st.tuning.max_concurrent_shorts
+                };
+                if cap == 0 {
+                    OpenGate::Ready(None)
+                } else {
+                    let counter = if is_long {
+                        &st.finance.pending_open_long
+                    } else {
+                        &st.finance.pending_open_short
+                    };
+                    let open_dir = st
+                        .finance
+                        .live_positions
+                        .read()
+                        .map(|m| m.values().filter(|p| p.is_long == is_long).count() as u32)
+                        .unwrap_or(0);
+                    let pending = counter.load(std::sync::atomic::Ordering::Relaxed);
+                    if concurrency_cap_reached(open_dir, pending, cap) {
+                        OpenGate::CapFull(open_dir + pending, cap, log_cd)
+                    } else {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        OpenGate::Ready(Some(OpenSlotGuard(std::sync::Arc::clone(counter))))
+                    }
+                }
+            };
+            let already_open = st
+                .finance
+                .live_positions
+                .read()
+                .map(|m| m.contains_key(symbol))
+                .unwrap_or(false);
             if already_open {
                 OpenGate::AlreadyOpen(log_cd)
             } else if xs_sizing.is_some() {
@@ -248,21 +698,90 @@ impl Engine {
                 // (sembol başına tek-pozisyon korunur). [[project_blend_live_failure]] [[project_xs_momentum]]
                 OpenGate::Ready(None)
             } else {
-                let cap = if is_long { st.tuning.max_concurrent_longs } else { st.tuning.max_concurrent_shorts };
-                if cap == 0 {
-                    OpenGate::Ready(None)
-                } else {
-                    let counter = if is_long { &st.finance.pending_open_long } else { &st.finance.pending_open_short };
-                    let open_dir = st.finance.live_positions.read()
-                        .map(|m| m.values().filter(|p| p.is_long == is_long).count() as u32)
+                let venue_cap = st
+                    .tuning
+                    .venue_max_concurrent_open
+                    .get(&venue_ex)
+                    .copied()
+                    .unwrap_or(0);
+                if venue_cap > 0 {
+                    let venue_open = st
+                        .finance
+                        .live_positions
+                        .read()
+                        .map(|m| {
+                            m.values()
+                                .filter(|p| {
+                                    let (pb, ptag) =
+                                        crate::robot::venue::registry::split_venue_tag(&p.symbol);
+                                    let px = ptag.unwrap_or_else(|| {
+                                        crate::core::types::Exchange::classify(pb)
+                                    });
+                                    px == venue_ex
+                                })
+                                .count() as u32
+                        })
                         .unwrap_or(0);
-                    let pending = counter.load(std::sync::atomic::Ordering::Relaxed);
-                    if concurrency_cap_reached(open_dir, pending, cap) {
-                        OpenGate::CapFull(open_dir + pending, cap, log_cd)
+                    if venue_open >= venue_cap {
+                        OpenGate::VenueCapFull(venue_ex, venue_open, venue_cap, log_cd)
                     } else {
-                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        OpenGate::Ready(Some(OpenSlotGuard(std::sync::Arc::clone(counter))))
+                        let venue_loss_pct = st
+                            .tuning
+                            .venue_daily_loss_pct
+                            .get(&venue_ex)
+                            .copied()
+                            .unwrap_or(0.0);
+                        if venue_loss_pct > 0.0 {
+                            let day_prefix = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                            let venue_daily_loss = st
+                                .finance
+                                .live_closed_trades
+                                .read()
+                                .map(|tr| {
+                                    tr.iter()
+                                        .filter(|t| {
+                                            let (tb, ttag) =
+                                                crate::robot::venue::registry::split_venue_tag(
+                                                    &t.symbol,
+                                                );
+                                            let tx = ttag.unwrap_or_else(|| {
+                                                crate::core::types::Exchange::classify(tb)
+                                            });
+                                            tx == venue_ex && t.closed_at.starts_with(&day_prefix)
+                                        })
+                                        .map(|t| {
+                                            let net = if t.net_pnl != 0.0 {
+                                                t.net_pnl
+                                            } else {
+                                                t.pnl - t.commission
+                                            };
+                                            if net < 0.0 {
+                                                -net
+                                            } else {
+                                                0.0
+                                            }
+                                        })
+                                        .sum::<f64>()
+                                })
+                                .unwrap_or(0.0);
+                            let venue_daily_limit =
+                                (st.finance.starting_capital * (venue_loss_pct / 100.0)).max(0.0);
+                            if venue_daily_limit > 0.0 && venue_daily_loss >= venue_daily_limit {
+                                OpenGate::VenueDailyLoss(
+                                    venue_ex,
+                                    venue_daily_loss,
+                                    venue_daily_limit,
+                                    log_cd,
+                                )
+                            } else {
+                                directional_gate(&st)
+                            }
+                        } else {
+                            directional_gate(&st)
+                        }
                     }
+                } else {
+                    directional_gate(&st)
                 }
             }
         };
@@ -279,10 +798,46 @@ impl Engine {
             }
             OpenGate::CapFull(total, cap, log_cd) => {
                 if log_throttle_should_emit(symbol, "concurrency_cap", log_cd) {
-                    push_state_log(state, format!(
-                        "🔢 {} {} açılış atlandı: eş-zamanlı tavan dolu ({}/{})",
-                        symbol, if is_long { "LONG" } else { "SHORT" }, total, cap,
-                    ));
+                    push_state_log(
+                        state,
+                        format!(
+                            "🔢 {} {} açılış atlandı: eş-zamanlı tavan dolu ({}/{})",
+                            symbol,
+                            if is_long { "LONG" } else { "SHORT" },
+                            total,
+                            cap,
+                        ),
+                    );
+                }
+                return;
+            }
+            OpenGate::VenueCapFull(ex, total, cap, log_cd) => {
+                if log_throttle_should_emit(symbol, "venue_concurrency_cap", log_cd) {
+                    push_state_log(
+                        state,
+                        format!(
+                            "🏛️ {} açılış atlandı: {} venue tavanı dolu ({}/{})",
+                            symbol,
+                            ex.as_str(),
+                            total,
+                            cap,
+                        ),
+                    );
+                }
+                return;
+            }
+            OpenGate::VenueDailyLoss(ex, loss, limit, log_cd) => {
+                if log_throttle_should_emit(symbol, "venue_daily_loss_cap", log_cd) {
+                    push_state_log(
+                        state,
+                        format!(
+                            "📉 {} açılış atlandı: {} günlük zarar limiti aşıldı (${:.2}/${:.2})",
+                            symbol,
+                            ex.as_str(),
+                            loss,
+                            limit,
+                        ),
+                    );
                 }
                 return;
             }
@@ -297,18 +852,41 @@ impl Engine {
         let candle_close = last_candle.close;
         // Entry fiyatı + price-sanity eşikleri tek lock skopunda okunur (eşikler
         // RuntimeTuning'den → per-open getenv yok).
-        let (entry, max_dev_pct, candle_freshness_secs) = {
+        let (entry, max_dev_pct, candle_freshness_secs, live_mode, live_price_age_secs) = {
             match state.lock() {
                 Ok(st) => {
-                    let e = st.fleet.live_price.read().ok()
+                    let e = st
+                        .fleet
+                        .live_price
+                        .read()
+                        .ok()
                         .and_then(|m| m.get(symbol).copied())
                         .filter(|&v| v > 0.0)
                         .unwrap_or(candle_close);
-                    (e, st.tuning.max_entry_price_dev_pct, st.tuning.candle_freshness_secs)
+                    let price_age = st
+                        .fleet
+                        .live_price_updated_at
+                        .read()
+                        .ok()
+                        .and_then(|m| m.get(symbol).copied())
+                        .map(|timestamp| (chrono::Utc::now() - timestamp).num_seconds());
+                    (
+                        e,
+                        st.tuning.max_entry_price_dev_pct,
+                        st.tuning.candle_freshness_secs,
+                        matches!(st.config.trading_mode, TradingMode::Live) && !st.live_dry_run,
+                        price_age,
+                    )
                 }
                 Err(_) => {
                     let d = RuntimeTuning::default();
-                    (candle_close, d.max_entry_price_dev_pct, d.candle_freshness_secs)
+                    (
+                        candle_close,
+                        d.max_entry_price_dev_pct,
+                        d.candle_freshness_secs,
+                        false,
+                        None,
+                    )
                 }
             }
         };
@@ -323,8 +901,39 @@ impl Engine {
         // referans olamaz → guard pas geçer, live_price tek doğru kaynak.
         // Eşik (candle_freshness_secs, max_dev_pct) RuntimeTuning'den geldi.
         let candle_fresh = candle_is_fresh_within(&last_candle.timestamp, candle_freshness_secs);
+        if live_mode && !candle_fresh {
+            push_state_log(
+                state,
+                format!(
+                    "🚫 {} canlı açılış reddedildi: candle verisi stale (izin verilen yaş: {} sn)",
+                    symbol, candle_freshness_secs
+                ),
+            );
+            return;
+        }
+        let live_price_max_age_secs = std::env::var("LIVE_PRICE_MAX_AGE_SECS")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(30);
+        if live_mode
+            && !matches!(live_price_age_secs, Some(age) if age >= 0 && age <= live_price_max_age_secs)
+        {
+            push_state_log(
+                state,
+                format!(
+                    "🚫 {} canlı açılış reddedildi: canlı fiyat yok veya stale (yaş={:?} sn, sınır={} sn)",
+                    symbol, live_price_age_secs, live_price_max_age_secs
+                ),
+            );
+            return;
+        }
         if candle_fresh && price_deviation_exceeds(entry, candle_close, max_dev_pct) {
             let dev_pct = price_deviation_pct(entry, candle_close);
+            let anomaly_msg = format!(
+                "price-sanity: {} entry={:.4} candle={:.4} dev=%{:.2}",
+                symbol, entry, candle_close, dev_pct,
+            );
             if let Ok(mut st) = state.lock() {
                 st.push_log(format!(
                     "🚫 {} açılış reddedildi: entry ${:.4} ↔ candle ${:.4} sapması %{:.2} > %{:.2} (stale price)",
@@ -335,13 +944,16 @@ impl Engine {
                     pipe.push_anomaly(
                         AnomalySeverity::Warning,
                         AnomalyKind::Custom,
-                        format!(
-                            "price-sanity: {} entry={:.4} candle={:.4} dev=%{:.2}",
-                            symbol, entry, candle_close, dev_pct,
-                        ),
+                        anomaly_msg.clone(),
                     );
                 }
             }
+            emit_pipeline_anomaly_event(
+                state,
+                crate::robot::data_pipeline::AnomalySeverity::Warning,
+                crate::robot::data_pipeline::AnomalyKind::Custom,
+                &anomaly_msg,
+            );
             return;
         }
         let atr = Self::calc_atr(candles, 14);
@@ -362,7 +974,10 @@ impl Engine {
             tp_pct: f64,
             sl_pct: f64,
             strategy_name: String,
-            live_executor: Option<Arc<crate::robot::engines::binance_executor::BinanceFuturesExecutor>>,
+            trading_mode: TradingMode,
+            real_execution_allowed: bool,
+            live_executor: Option<Arc<dyn crate::robot::venue::adapter::VenueAdapter>>,
+            live_venue: Option<Arc<dyn crate::robot::venue::adapter::VenueAdapter>>,
             live_dry_run: bool,
             live_max_notional: f64,
             atr_mult: f64,
@@ -373,7 +988,7 @@ impl Engine {
             limit_entry_fallback_market: bool,
         }
         let plan: Option<OpenPlan> = {
-            let mut st = state.lock().unwrap();
+            let mut st = lock_state_recover(state);
             st.fleet.phase = "Executing".into();
 
             let risk_appetite = st.finance.calculate_risk_appetite();
@@ -381,35 +996,84 @@ impl Engine {
             // Kelly pencereleri env-ayarlı (RuntimeTuning); closure'lardan önce lokal'e al.
             let kelly_loss_window = st.tuning.kelly_loss_streak_window;
             let kelly_stats_window = st.tuning.kelly_stats_window;
-            let loss_streak = st.finance.live_closed_trades.read()
-                .map(|tr| tr.iter().rev().take(kelly_loss_window).filter(|t| t.pnl < 0.0).count())
+            let loss_streak = st
+                .finance
+                .live_closed_trades
+                .read()
+                .map(|tr| {
+                    tr.iter()
+                        .rev()
+                        .take(kelly_loss_window)
+                        .filter(|t| t.pnl < 0.0)
+                        .count()
+                })
                 .unwrap_or(0);
-            let (wins, losses, sum_win, sum_loss) = st.finance.live_closed_trades.read().map(|tr| {
-                let mut w = 0u32; let mut l = 0u32; let mut sw = 0.0f64; let mut sl = 0.0f64;
-                for t in tr.iter().rev().take(kelly_stats_window) {
-                    if t.pnl > 0.0 { w += 1; sw += t.pnl; }
-                    else if t.pnl < 0.0 { l += 1; sl += -t.pnl; }
-                }
-                (w, l, sw, sl)
-            }).unwrap_or((0, 0, 0.0, 0.0));
+            let (wins, losses, sum_win, sum_loss) = st
+                .finance
+                .live_closed_trades
+                .read()
+                .map(|tr| {
+                    let mut w = 0u32;
+                    let mut l = 0u32;
+                    let mut sw = 0.0f64;
+                    let mut sl = 0.0f64;
+                    for t in tr.iter().rev().take(kelly_stats_window) {
+                        if t.pnl > 0.0 {
+                            w += 1;
+                            sw += t.pnl;
+                        } else if t.pnl < 0.0 {
+                            l += 1;
+                            sl += -t.pnl;
+                        }
+                    }
+                    (w, l, sw, sl)
+                })
+                .unwrap_or((0, 0, 0.0, 0.0));
             let total = (wins + losses) as f64;
-            let win_prob = if total > 0.0 { wins as f64 / total } else { 0.5 };
+            let win_prob = if total > 0.0 {
+                wins as f64 / total
+            } else {
+                0.5
+            };
             let avg_win = if wins > 0 { sum_win / wins as f64 } else { 1.0 };
-            let avg_loss = if losses > 0 { sum_loss / losses as f64 } else { 1.0 };
+            let avg_loss = if losses > 0 {
+                sum_loss / losses as f64
+            } else {
+                1.0
+            };
             let kelly = KellyCriterion::calculate(win_prob, avg_win, avg_loss);
 
-            let base_alloc = st.finance.equity * st.tuning.base_alloc_fraction * risk_appetite;
+            // SAFE-MODE çarpanı (Adım 4a): mühür aktifse tahsisat kısılır. Bayrak DOĞRUDAN
+            // guard'dan okunur — safe_mode_active() kilit alacağı için burada deadlock olurdu.
+            let safe_mult = if st
+                .guardian
+                .risk_safe_mode_until
+                .map(|u| chrono::Utc::now() < u)
+                .unwrap_or(false)
+            {
+                st.tuning.safe_mode_alloc_mult
+            } else {
+                1.0
+            };
+            let base_alloc =
+                st.finance.equity * st.tuning.base_alloc_fraction * risk_appetite * safe_mult;
             // EŞİT-AĞIRLIK (kesitsel mod): xs_sizing=Some → her bacak equity·alloc_frac (Kelly atlanır,
             // market-nötr kitabın 1/k dengesi korunur). None → Kelly dinamik ölçek (mevcut davranış).
             let full_alloc = match xs_sizing {
                 Some(s) => (st.finance.equity * s.alloc_frac).max(0.0),
-                None => kelly.calculate_dynamic_scale(base_alloc, loss_streak, ml_conf)
+                None => kelly
+                    .calculate_dynamic_scale(base_alloc, loss_streak, ml_conf)
                     .max(base_alloc * st.tuning.alloc_floor_fraction),
             };
             // KADEMELİ GİRİŞ (XS hariç): açılış yalnız İLK kademe (full·weight[0]); kalan kademeler
             // try_add_graded_tranche ile rejime-göre (pyramiding/averaging) eklenir. graded_target = tam
             // hedef sermaye (ek kademe boyutu bundan türetilir). xs_sizing=Some (kesitsel) → uygulanmaz.
-            let graded = st.brain.parameters.read().ok().map(|p| p.graded_entry.clone());
+            let graded = st
+                .brain
+                .parameters
+                .read()
+                .ok()
+                .map(|p| p.graded_entry.clone());
             let graded_target: Option<f64> = match (&xs_sizing, &graded) {
                 (None, Some(g)) if g.enabled && g.tranche_count() >= 2 => Some(full_alloc),
                 _ => None,
@@ -419,12 +1083,17 @@ impl Engine {
                 _ => full_alloc,
             };
             let qty_val = (alloc_capital / entry).max(0.0);
-            if qty_val <= 0.0 { return; }
+            if qty_val <= 0.0 {
+                return;
+            }
 
             // Faz 2 c4: TP/SL artık rejim-bazlı override'a açık. Store'da o rejim için
             // patch varsa onun trade_risk'i, yoksa base trade_risk kullanılır.
             // HyperOpt rejim-aware tuning yaptıkça (Faz 3'te) patch'leri besleyecek.
-            let (tp_pct, sl_pct) = st.brain.parameters.read()
+            let (tp_pct, sl_pct) = st
+                .brain
+                .parameters
+                .read()
                 .map(|p| {
                     let tr = p.trade_risk_for(regime.as_str());
                     (tr.take_profit_pct, tr.stop_loss_pct)
@@ -440,21 +1109,46 @@ impl Engine {
                 tp_pct.max(0.1)
             };
             let (stop_loss, take_profit) = if is_long {
-                (entry * (1.0 - sl_pct / 100.0), entry * (1.0 + tp_pct / 100.0))
+                (
+                    entry * (1.0 - sl_pct / 100.0),
+                    entry * (1.0 + tp_pct / 100.0),
+                )
             } else {
-                (entry * (1.0 + sl_pct / 100.0), entry * (1.0 - tp_pct / 100.0))
+                (
+                    entry * (1.0 + sl_pct / 100.0),
+                    entry * (1.0 - tp_pct / 100.0),
+                )
             };
             // ATR-trail mult: sembol×interval noise floor + strateji niyetine bağlı target_pct.
             // Aynı resolve zinciri check_exit_conditions ile birebir → open/exit tutarlı.
-            let default_mult = st.brain.best_params.get("pos_atr_trail_mult").copied().unwrap_or(2.0);
+            let default_mult = st
+                .brain
+                .best_params
+                .get("pos_atr_trail_mult")
+                .copied()
+                .unwrap_or(2.0);
             let interval_for_resolve = st.config.interval.clone();
             // Rejim-farkında: per-rejim trail A/B hedefi target_trail_pct_resolved'a girer.
-            let atr_mult = st.brain.parameters.read().ok()
-                .map(|p| p.resolve_atr_mult_for_regime(
-                    symbol, &interval_for_resolve, strategy_name, default_mult, Some(regime.as_str())))
+            let atr_mult = st
+                .brain
+                .parameters
+                .read()
+                .ok()
+                .map(|p| {
+                    p.resolve_atr_mult_for_regime(
+                        symbol,
+                        &interval_for_resolve,
+                        strategy_name,
+                        default_mult,
+                        Some(regime.as_str()),
+                    )
+                })
                 .unwrap_or(default_mult);
-            let trailing_stop = if is_long { entry - atr * atr_mult }
-                                else       { entry + atr * atr_mult };
+            let trailing_stop = if is_long {
+                entry - atr * atr_mult
+            } else {
+                entry + atr * atr_mult
+            };
             // 🧊 KESİTSEL STOPSUZ: XS pozisyonları per-bacak stop KULLANMAZ — risk rank-rebalance +
             // rejim-gate + portföy devre kesici ile yönetilir (tek-bacak stop market-nötr dengeyi
             // bozar). Bu döngü XS'i zaten enforce etmiyordu; seviyeleri 0'la → TUI/bot/snapshot "—"
@@ -465,19 +1159,34 @@ impl Engine {
             } else {
                 (stop_loss, take_profit, trailing_stop)
             };
+            if xs_sizing.is_none() {
+                if let Err(err) = crate::robot::order_management::OrderValidator::with_defaults()
+                    .validate_risk_reward(entry, Some(stop_loss), Some(take_profit))
+                {
+                    st.push_log(format!("⛔ {} R/R doğrulamasını geçemedi: {}", symbol, err));
+                    return;
+                }
+            }
             // Otonom leverage: ParameterStore.resolve_leverage rejim/conf/win_rate/noise
             // ağırlıklı bir değer döndürür. LEVERAGE_ENABLED=false (default) ise 1.0
             // → spot davranış. Stats yoksa noise faktörü None ile devre dışı.
             let noise_floor_opt = st.brain.parameters.read().ok().and_then(|p| {
-                p.symbol_stats.get(&(symbol.to_string(), interval_for_resolve.clone()))
+                p.symbol_stats
+                    .get(&(symbol.to_string(), interval_for_resolve.clone()))
                     .map(|s| s.noise_floor_pct)
             });
             // KESİTSEL: sabit kaldıraç (rejim-değişken resolve_leverage bypass; marjinal nötr edge'de
             // mütevazı L — anlamlılık L-invariant). None → otonom resolve_leverage (mevcut davranış).
             let leverage_resolved = match xs_sizing {
                 Some(s) => s.leverage.max(1.0),
-                None => st.brain.parameters.read().ok()
-                    .map(|p| p.resolve_leverage(regime.as_str(), ml_conf, win_prob, noise_floor_opt))
+                None => st
+                    .brain
+                    .parameters
+                    .read()
+                    .ok()
+                    .map(|p| {
+                        p.resolve_leverage(regime.as_str(), ml_conf, win_prob, noise_floor_opt)
+                    })
                     .unwrap_or(1.0),
             };
             // strategy_name caller'dan geliyor — process_symbol_cycle StrategySelector ile
@@ -486,8 +1195,14 @@ impl Engine {
             let new_pos = PositionModel {
                 pos_id: pos_id_str.clone(),
                 symbol: symbol.to_string(),
-                entry_price: entry, current_price: entry,
-                qty: qty_val, leverage: leverage_resolved,
+                venue: st
+                    .venue_registry
+                    .for_symbol(symbol)
+                    .map(|venue| venue.venue_key()),
+                entry_price: entry,
+                current_price: entry,
+                qty: qty_val,
+                leverage: leverage_resolved,
                 market: st.config.market.clone(),
                 // Pozisyonun GERÇEK trade TF'i: mumlar per-symbol interval_c'den geldi
                 // (loop_core symbol_interval'i okur; seed Fix A 1d set edebilir). config.interval
@@ -495,7 +1210,11 @@ impl Engine {
                 // (eski/defaultlı candle) global'e düş.
                 interval: {
                     let civ = last_candle.interval.clone();
-                    if civ.is_empty() { st.config.interval.clone() } else { civ }
+                    if civ.is_empty() {
+                        st.config.interval.clone()
+                    } else {
+                        civ
+                    }
                 },
                 // trade_type artık stratejik etiket (önceki "LONG"/"SHORT" zaten
                 // is_long ile aynı bilgiyi tekrar ediyordu); UI "Strateji" sütununda
@@ -503,7 +1222,9 @@ impl Engine {
                 trade_type: strategy_name.to_string(),
                 is_long,
                 opened_at: chrono::Utc::now().to_rfc3339(),
-                stop_loss, take_profit, trailing_stop,
+                stop_loss,
+                take_profit,
+                trailing_stop,
                 max_favorable_price: entry,
                 breakeven_activated: false,
                 // A1+A2: ScalpSwing kanal mührü. None → Regular (klasik strateji
@@ -514,13 +1235,32 @@ impl Engine {
                 entry_commission: 0.0, // açılışta gerçek komisyon hesaplanınca mühürlenir (aşağıda)
             };
             Some(OpenPlan {
-                new_pos, alloc_capital, graded_target, qty_val,
-                kelly_fraction: kelly.kelly_fraction, risk_appetite, ml_conf,
-                tp_pct, sl_pct, strategy_name: strategy_name.to_string(),
+                new_pos,
+                alloc_capital,
+                graded_target,
+                qty_val,
+                kelly_fraction: kelly.kelly_fraction,
+                risk_appetite,
+                ml_conf,
+                tp_pct,
+                sl_pct,
+                strategy_name: strategy_name.to_string(),
+                trading_mode: st.config.trading_mode.clone(),
+                real_execution_allowed: crate::robot::robotic_loop::live_execution_is_armed()
+                    && !matches!(
+                        st.config.venue_profile,
+                        crate::core::types::VenueProfile::Paper
+                            | crate::core::types::VenueProfile::Demo
+                    ),
                 // Executor venue-farkında seçilir: sembolün venue'sü Binance ise canlı executor,
                 // değilse (data-only/paper/@bybit) None → paper yolu. Binance sembolde
                 // st.live_executor ile birebir aynı (registry onunla kuruldu). [[venue]]
-                live_executor: st.venue_registry.binance_executor_for(symbol),
+                live_executor: st
+                    .venue_registry
+                    .route(symbol)
+                    .filter(|(v, _)| v.execution_engine().is_some())
+                    .map(|(v, _)| Arc::clone(v)),
+                live_venue: st.venue_registry.route(symbol).map(|(v, _)| Arc::clone(v)),
                 live_dry_run: st.live_dry_run,
                 live_max_notional: st.live_max_notional_usd,
                 atr_mult,
@@ -531,10 +1271,28 @@ impl Engine {
                 limit_entry_fallback_market: st.tuning.limit_entry_fallback_market,
             })
         }; // st burada drop
-        let plan = match plan { Some(p) => p, None => return };
+        let plan = match plan {
+            Some(p) => p,
+            None => return,
+        };
 
         // 💱 LIVE Mode dispatcher (3 koşullu onay zinciri):
-        let live_executor = plan.live_executor.clone();
+        let trading_mode = plan.trading_mode.clone();
+        let live_executor =
+            if plan.real_execution_allowed && matches!(trading_mode, TradingMode::Live) {
+                plan.live_executor.clone()
+            } else {
+                if matches!(trading_mode, TradingMode::Live) {
+                    if let Ok(mut st2) = state.lock() {
+                        let profile = st2.config.venue_profile.as_str().to_string();
+                        st2.push_log(format!(
+                        "🟡 [PROFILE-GATE] {} gerçek emir engellendi (profile={}) → paper akışı",
+                        symbol, profile,
+                    ));
+                    }
+                }
+                None
+            };
         let live_dry_run = plan.live_dry_run;
         let live_max_notional = plan.live_max_notional;
         let alloc_capital = plan.alloc_capital;
@@ -546,6 +1304,7 @@ impl Engine {
         let tp_pct = plan.tp_pct;
         let sl_pct = plan.sl_pct;
         let strategy_name = plan.strategy_name.clone();
+        let live_venue = plan.live_venue.clone();
         let atr_mult = plan.atr_mult;
         let use_limit_entry = plan.use_limit_entry;
         let limit_entry_timeout_ms = plan.limit_entry_timeout_ms;
@@ -561,6 +1320,37 @@ impl Engine {
         // (new_pos) borsaya gönderilen değerle birebir eşleşsin diye mutable.
         let mut qty_val = qty_val;
         let mut new_pos = new_pos;
+        let protection_check = match state.lock() {
+            Ok(st) => match st.finance.live_positions.read() {
+                Ok(positions) => Ok(positions
+                    .values()
+                    .any(|position| position.stop_loss <= 0.0 && position.take_profit <= 0.0)),
+                Err(_) => Err("aktif pozisyon koruma kilidi okunamadı"),
+            },
+            Err(_) => Err("AppState kilidi alınamadı"),
+        };
+        let protection_gap = match protection_check {
+            Ok(gap) => gap,
+            Err(reason) if live_executor.is_some() && !live_dry_run => {
+                if let Ok(mut st2) = state.lock() {
+                    st2.push_log(format!(
+                        "🛡️ [PROTECTION-GATE] {} canlı açılışı engellendi: {}",
+                        symbol, reason
+                    ));
+                }
+                return;
+            }
+            Err(_) => false,
+        };
+        if live_executor.is_some() && !live_dry_run && protection_gap {
+            if let Ok(mut st2) = state.lock() {
+                st2.push_log(format!(
+                    "🛡️ [PROTECTION-GATE] {} canlı açılışı engellendi: mevcut pozisyonda broker-side SL/TP açığı var",
+                    symbol,
+                ));
+            }
+            return;
+        }
         if let Some(executor) = live_executor.as_ref() {
             let side = if is_long { "BUY" } else { "SELL" };
             // 🌍 Bölge/IP bloğu devre-kesici: borsa SİSTEMİK reddediyorsa (HTTP 451/403/-2015/
@@ -602,13 +1392,15 @@ impl Engine {
                         qty_val = rounded;
                         new_pos.qty = rounded;
                     }
-                    if let Ok(map) = executor.filters.read() {
-                        if let Some(f) = map.get(symbol) {
-                            let sl_r = f.round_price(new_pos.stop_loss);
-                            let tp_r = f.round_price(new_pos.take_profit);
-                            new_pos.stop_loss = sl_r;
-                            new_pos.take_profit = tp_r;
-                            new_pos.trailing_stop = f.round_price(new_pos.trailing_stop);
+                    for price in [
+                        &mut new_pos.stop_loss,
+                        &mut new_pos.take_profit,
+                        &mut new_pos.trailing_stop,
+                    ] {
+                        if *price > 0.0 {
+                            if let Ok(rounded) = executor.round_price(symbol, *price).await {
+                                *price = rounded;
+                            }
                         }
                     }
                 }
@@ -620,9 +1412,14 @@ impl Engine {
                         ));
                         st2.guardian.repair_log.push_back(format!(
                             "[{}] LOT_SIZE/MIN_NOTIONAL veto: {} {} ({})",
-                            chrono::Local::now().format("%H:%M:%S"), symbol, side, reason,
+                            chrono::Local::now().format("%H:%M:%S"),
+                            symbol,
+                            side,
+                            reason,
                         ));
-                        while st2.guardian.repair_log.len() > 100 { st2.guardian.repair_log.pop_front(); }
+                        while st2.guardian.repair_log.len() > 100 {
+                            st2.guardian.repair_log.pop_front();
+                        }
                     }
                     return;
                 }
@@ -630,7 +1427,11 @@ impl Engine {
 
             if live_dry_run {
                 if let Ok(mut st2) = state.lock() {
-                    let mode = if use_limit_entry { "LIMIT-MAKER" } else { "MARKET" };
+                    let mode = if use_limit_entry {
+                        "LIMIT-MAKER"
+                    } else {
+                        "MARKET"
+                    };
                     st2.push_log(format!(
                         "🟡 [LIVE-DRY-RUN] {} {} {:.4} @ {:.2} (${:.2}) [{}] → emir gönderilmedi",
                         symbol, side, qty_val, entry, alloc_capital, mode,
@@ -640,7 +1441,7 @@ impl Engine {
                 // 🎚️ Futures kaldıracını borsada set et (sizing varsayımıyla tutarlı, B#2).
                 // notional = teminat × kaldıraç → borsa-default kaldıraç farklıysa pozisyon
                 // boyutu varsayımı bozulur. Spot'ta no-op; set edilemezse açmadan VETO.
-                if !executor.is_spot {
+                if executor.market() != memos_venue_api::Market::Spot {
                     let lev = new_pos.leverage.round().max(1.0) as u32;
                     if let Err(e) = executor.set_leverage(symbol, lev).await {
                         if let Ok(mut st2) = state.lock() {
@@ -650,7 +1451,9 @@ impl Engine {
                             ));
                         }
                         // 🌍 Sistemik blok (bölge/IP/izin) ilk bu çağrıda görünebilir → devre-kesici.
-                        if e.is_exchange_block() { Self::trip_live_block(state, symbol, "set_leverage"); }
+                        if e.is_exchange_block() {
+                            Self::trip_live_block(state, symbol, "set_leverage");
+                        }
                         return;
                     }
                 }
@@ -659,55 +1462,79 @@ impl Engine {
                 // deneme dolmazsa limit_entry_fallback_market'a göre taker'a düşülür
                 // ya da trade atlanır. Kapalıysa eski davranış (doğrudan MARKET).
                 // Dönüş: dolmuş emir Value'su (orderId + maker yolunda avgPrice).
-                let entry_resp: std::result::Result<serde_json::Value, ()> = if use_limit_entry {
-                    match executor.place_smart_limit_entry(
-                        symbol, side, qty_val,
-                        limit_entry_timeout_ms, limit_entry_max_attempts, limit_entry_max_spread_bps,
-                    ).await {
-                        Ok(r) => { used_maker = true; Ok(r) }
-                        Err(e) => {
-                            if limit_entry_fallback_market {
-                                if let Ok(mut st2) = state.lock() {
-                                    st2.push_log(format!(
-                                        "↩️ [LIVE-MAKER→MARKET] {} {} maker dolmadı ({:?}) → taker fallback",
-                                        symbol, side, e,
-                                    ));
+                let entry_resp: std::result::Result<memos_venue_api::OrderReceipt, ()> =
+                    if use_limit_entry {
+                        executor
+                            .smart_limit_entry(
+                                symbol,
+                                memos_venue_api::OrderSide::from_long(is_long),
+                                qty_val,
+                                limit_entry_timeout_ms,
+                                limit_entry_max_attempts,
+                                limit_entry_max_spread_bps,
+                                limit_entry_fallback_market,
+                            )
+                            .await
+                            .map(|(receipt, maker)| {
+                                used_maker = maker;
+                                receipt
+                            })
+                            .map_err(|e| {
+                                if e.is_exchange_block() {
+                                    Self::trip_live_block(state, symbol, "entry");
                                 }
-                                executor.place_market_order(symbol, side, qty_val).await.map_err(|me| {
-                                    if let Ok(mut st2) = state.lock() {
-                                        st2.push_log(format!(
-                                            "❌ [LIVE] {} {} fallback market hatası: {:?} — pozisyon kaydedilmedi",
-                                            symbol, side, me,
-                                        ));
-                                    }
-                                    if me.is_exchange_block() { Self::trip_live_block(state, symbol, "market_order(fallback)"); }
-                                })
-                            } else {
-                                if let Ok(mut st2) = state.lock() {
-                                    st2.push_log(format!(
-                                        "⏭️ [LIVE-MAKER] {} {} maker dolmadı ({:?}) → trade atlandı (fallback kapalı)",
-                                        symbol, side, e,
-                                    ));
+                                log::warn!("LIVE {} {} giriş hatası: {:?}", symbol, side, e);
+                            })
+                    } else {
+                        executor
+                            .submit_order(&memos_venue_api::OrderRequest::market(
+                                symbol,
+                                memos_venue_api::OrderSide::from_long(is_long),
+                                qty_val,
+                            ))
+                            .await
+                            .map_err(|e| {
+                                if e.is_exchange_block() {
+                                    Self::trip_live_block(state, symbol, "market_order");
                                 }
-                                Err(())
-                            }
-                        }
-                    }
-                } else {
-                    executor.place_market_order(symbol, side, qty_val).await.map_err(|e| {
-                        if let Ok(mut st2) = state.lock() {
-                            st2.push_log(format!(
-                                "❌ [LIVE] {} {} emir hatası: {:?} — pozisyon kaydedilmedi",
-                                symbol, side, e,
-                            ));
-                        }
-                        if e.is_exchange_block() { Self::trip_live_block(state, symbol, "market_order"); }
-                    })
-                };
+                                log::warn!("LIVE {} {} emir hatası: {:?}", symbol, side, e);
+                            })
+                    };
 
                 // Giriş emri başarısız (ve fallback yok / fallback de patladı) → paper'ı da çalıştırma.
-                let resp = match entry_resp { Ok(r) => r, Err(()) => return };
-                live_order_id = resp.get("orderId").map(|v| v.to_string());
+                let resp = match entry_resp {
+                    Ok(r) => r,
+                    Err(()) => return,
+                };
+                if !matches!(
+                    resp.status,
+                    memos_venue_api::OrderStatus::Filled
+                        | memos_venue_api::OrderStatus::PartiallyFilled
+                ) {
+                    Self::persist_uncertain_entry(
+                        state,
+                        symbol,
+                        side,
+                        qty_val,
+                        resp.filled_qty,
+                        resp.venue_order_id.clone(),
+                        format!("{:?}", resp.status),
+                        "entry sonucu kesin değil",
+                    );
+                    if let Ok(mut st2) = state.lock() {
+                        st2.push_alert(
+                            "LIVE-ENTRY-UNCERTAIN",
+                            crate::robot::infra::telegram_notifier::Severity::Critical,
+                            format!(
+                                "{} entry sonucu kesin değil veya kabul edilmedi: {:?}; retry yapılmayacak",
+                                symbol, resp.status
+                            ),
+                        );
+                    }
+                    Self::trip_live_block(state, symbol, "entry_uncertain");
+                    return;
+                }
+                live_order_id = resp.venue_order_id.clone();
                 // 🌍 Auto-probe başarısı: blok cooldown'u sonrası buradan geçen ilk emir GEÇTİ →
                 // devre-kesiciyi kapat (bayrak set değilse no-op).
                 Self::clear_live_block(state, symbol);
@@ -717,25 +1544,35 @@ impl Engine {
                 // (PnL ve borsa koruma emirleri gerçeğe otursun). Market yolunda futures
                 // yanıtı avgPrice taşımayabilir → entry referansı korunur (eski davranış).
                 if used_maker {
-                    let fill_price = resp.get("avgPrice")
-                        .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok())
-                        .filter(|&p| p > 0.0)
+                    let fill_price = (resp.avg_price > 0.0)
+                        .then_some(resp.avg_price)
                         .unwrap_or(entry);
                     if (fill_price - entry).abs() > f64::EPSILON {
                         new_pos.entry_price = fill_price;
                         new_pos.current_price = fill_price;
                         new_pos.max_favorable_price = fill_price;
-                        new_pos.stop_loss = if is_long { fill_price * (1.0 - sl_pct / 100.0) }
-                                            else        { fill_price * (1.0 + sl_pct / 100.0) };
-                        new_pos.take_profit = if is_long { fill_price * (1.0 + tp_pct / 100.0) }
-                                              else        { fill_price * (1.0 - tp_pct / 100.0) };
-                        new_pos.trailing_stop = if is_long { fill_price - atr * atr_mult }
-                                                else        { fill_price + atr * atr_mult };
-                        if let Ok(map) = executor.filters.read() {
-                            if let Some(f) = map.get(symbol) {
-                                new_pos.stop_loss = f.round_price(new_pos.stop_loss);
-                                new_pos.take_profit = f.round_price(new_pos.take_profit);
-                                new_pos.trailing_stop = f.round_price(new_pos.trailing_stop);
+                        new_pos.stop_loss = if is_long {
+                            fill_price * (1.0 - sl_pct / 100.0)
+                        } else {
+                            fill_price * (1.0 + sl_pct / 100.0)
+                        };
+                        new_pos.take_profit = if is_long {
+                            fill_price * (1.0 + tp_pct / 100.0)
+                        } else {
+                            fill_price * (1.0 - tp_pct / 100.0)
+                        };
+                        new_pos.trailing_stop = if is_long {
+                            fill_price - atr * atr_mult
+                        } else {
+                            fill_price + atr * atr_mult
+                        };
+                        for price in [
+                            &mut new_pos.stop_loss,
+                            &mut new_pos.take_profit,
+                            &mut new_pos.trailing_stop,
+                        ] {
+                            if let Ok(rounded) = executor.round_price(symbol, *price).await {
+                                *price = rounded;
                             }
                         }
                     }
@@ -745,7 +1582,12 @@ impl Engine {
                 if let Ok(mut st2) = state.lock() {
                     st2.push_log(format!(
                         "💱 [{}] {} {} {:.4} @ {:.2} (${:.2}) ✓ order={}",
-                        live_label, symbol, side, qty_val, new_pos.entry_price, alloc_capital,
+                        live_label,
+                        symbol,
+                        side,
+                        qty_val,
+                        new_pos.entry_price,
+                        alloc_capital,
                         live_order_id.as_deref().unwrap_or("?"),
                     ));
                 }
@@ -763,12 +1605,16 @@ impl Engine {
                 if pos_sl <= 0.0 && pos_tp <= 0.0 {
                     if let Ok(mut st2) = state.lock() {
                         if let Ok(mut map) = st2.finance.live_orders.write() {
-                            map.insert(symbol.to_string(), crate::core::model::LiveOrderRefs {
-                                entry_order_id: live_order_id.clone(),
-                                sl_order_id: None,
-                                tp_order_id: None,
-                                placed_at: chrono::Utc::now().to_rfc3339(),
-                            });
+                            map.insert(
+                                symbol.to_string(),
+                                crate::core::model::LiveOrderRefs {
+                                    entry_order_id: live_order_id.clone(),
+                                    sl_order_id: None,
+                                    tp_order_id: None,
+                                    placed_at: chrono::Utc::now().to_rfc3339(),
+                                    ..Default::default()
+                                },
+                            );
                         }
                         st2.push_log(format!(
                             "🛡️ [LIVE-PROTECT] {} stopsuz pozisyon → borsa SL/TP atlandı (risk kitap-düzeyinde)",
@@ -776,30 +1622,50 @@ impl Engine {
                         ));
                     }
                 } else {
-                    let (sl_res, tp_res) = executor.place_protection_orders(
-                        symbol, is_long, qty_val, pos_sl, pos_tp,
-                    ).await;
-                    let sl_id = sl_res.as_ref().ok()
-                        .and_then(|r| r.get("orderId").map(|v| v.to_string()));
-                    let tp_id = tp_res.as_ref().ok()
-                        .and_then(|r| r.get("orderId").map(|v| v.to_string()));
+                    let (sl_res, tp_res) = executor
+                        .place_protection_orders(symbol, is_long, qty_val, pos_sl, pos_tp)
+                        .await;
+                    let sl_id = sl_res.as_ref().ok().and_then(|r| r.venue_order_id.clone());
+                    let tp_id = tp_res.as_ref().ok().and_then(|r| r.venue_order_id.clone());
                     let sl_status = match &sl_res {
-                        Ok(_)  => format!("SL ✓ ({})", sl_id.as_deref().unwrap_or("?")),
+                        Ok(_) => format!("SL ✓ ({})", sl_id.as_deref().unwrap_or("?")),
                         Err(e) => format!("SL ❌ {:?}", e),
                     };
                     let tp_status = match &tp_res {
-                        Ok(_)  => format!("TP ✓ ({})", tp_id.as_deref().unwrap_or("?")),
+                        Ok(_) => format!("TP ✓ ({})", tp_id.as_deref().unwrap_or("?")),
                         Err(e) => format!("TP ❌ {:?}", e),
                     };
+                    let protection_failed =
+                        (pos_sl > 0.0 && sl_res.is_err()) || (pos_tp > 0.0 && tp_res.is_err());
+                    if protection_failed {
+                        let _ = executor.cancel_all(symbol).await;
+                        let close_result = executor.close_position(symbol).await;
+                        if let Ok(mut st2) = state.lock() {
+                            st2.push_alert(
+                                "LIVE-PROTECT-HARD-GATE",
+                                crate::robot::infra::telegram_notifier::Severity::Critical,
+                                format!(
+                                    "{} girişinden sonra broker-side protection doğrulanamadı ({}; {}) — pozisyon kapatma sonucu: {:?}",
+                                    symbol, sl_status, tp_status, close_result
+                                ),
+                            );
+                        }
+                        Self::trip_live_block(state, symbol, "protection_hard_gate");
+                        return;
+                    }
                     // Order ID eşlemesini state'e mühürle (cancel için audit trail).
                     if let Ok(mut st2) = state.lock() {
                         if let Ok(mut map) = st2.finance.live_orders.write() {
-                            map.insert(symbol.to_string(), crate::core::model::LiveOrderRefs {
-                                entry_order_id: live_order_id.clone(),
-                                sl_order_id: sl_id.clone(),
-                                tp_order_id: tp_id.clone(),
-                                placed_at: chrono::Utc::now().to_rfc3339(),
-                            });
+                            map.insert(
+                                symbol.to_string(),
+                                crate::core::model::LiveOrderRefs {
+                                    entry_order_id: live_order_id.clone(),
+                                    sl_order_id: sl_id.clone(),
+                                    tp_order_id: tp_id.clone(),
+                                    placed_at: chrono::Utc::now().to_rfc3339(),
+                                    ..Default::default()
+                                },
+                            );
                         }
                         st2.push_log(format!(
                             "🛡️ [LIVE-PROTECT] {} @ SL={:.4} TP={:.4} · {} · {}",
@@ -830,38 +1696,302 @@ impl Engine {
                             );
                             st2.guardian.repair_log.push_back(format!(
                                 "[{}] borsa SL hatası: {} → bot-tarafı yönetim (churn fix)",
-                                chrono::Local::now().format("%H:%M:%S"), symbol,
+                                chrono::Local::now().format("%H:%M:%S"),
+                                symbol,
                             ));
-                            while st2.guardian.repair_log.len() > 100 { st2.guardian.repair_log.pop_front(); }
+                            while st2.guardian.repair_log.len() > 100 {
+                                st2.guardian.repair_log.pop_front();
+                            }
                         }
                         // NOT: emergency-close + return KALDIRILDI → pozisyon normal kaydedilir (804+)
                         // ve bot-tarafı exit devreye girer (churn + izleme kopukluğu çözümü).
                         // 🌍 SL reddi sistemik blok (-2015/451) ise (yalnız -4120 endpoint değil) →
                         // devre-kesici: pozisyon korunur ama YENİ canlı girişler cooldown'da durur.
-                        if sl_res.as_ref().err().map(|e| e.is_exchange_block()).unwrap_or(false) {
+                        if sl_res
+                            .as_ref()
+                            .err()
+                            .map(|e| e.is_exchange_block())
+                            .unwrap_or(false)
+                        {
                             Self::trip_live_block(state, symbol, "place_protection_orders");
+                        }
+                    }
+                }
+            }
+        } else if matches!(trading_mode, TradingMode::Live)
+            && live_venue
+                .as_ref()
+                .map(|v| v.exchange() != Exchange::Binance)
+                .unwrap_or(false)
+        {
+            let venue = live_venue.as_ref().expect("live venue present");
+            let side = if is_long {
+                crate::robot::venue::types::OrderSide::Buy
+            } else {
+                crate::robot::venue::types::OrderSide::Sell
+            };
+            if alloc_capital > live_max_notional {
+                if let Ok(mut st2) = state.lock() {
+                    st2.push_log(format!(
+                        "🛑 LIVE veto: notional ${:.2} > tavan ${:.2} ({} {:?} iptal edildi)",
+                        alloc_capital, live_max_notional, symbol, side,
+                    ));
+                }
+                return;
+            }
+            if live_dry_run {
+                if let Ok(mut st2) = state.lock() {
+                    st2.push_log(format!(
+                        "🟡 [LIVE-DRY-RUN] {} {:?} {:.4} @ {:.2} (${:.2}) [{}:{}] → emir gönderilmedi",
+                        symbol,
+                        side,
+                        qty_val,
+                        entry,
+                        alloc_capital,
+                        venue.exchange().as_str(),
+                        venue.market().as_str(),
+                    ));
+                }
+            } else {
+                let lev = new_pos.leverage.round().max(1.0) as u32;
+                if let Err(e) = venue.set_leverage(symbol, lev).await {
+                    if let Ok(mut st2) = state.lock() {
+                        st2.push_log(format!(
+                            "⚠️ [LIVE->PAPER] {} leverage {}x set edilemedi ({:?}) — paper izlemeye düşüldü",
+                            symbol, lev, e,
+                        ));
+                    }
+                }
+
+                let req = crate::robot::venue::types::OrderRequest::market(symbol, side, qty_val);
+                match venue.submit_order(&req).await {
+                    Ok(receipt) => {
+                        if !matches!(
+                            receipt.status,
+                            crate::robot::venue::types::OrderStatus::Filled
+                                | crate::robot::venue::types::OrderStatus::PartiallyFilled
+                        ) {
+                            Self::persist_uncertain_entry(
+                                state,
+                                symbol,
+                                &format!("{:?}", side),
+                                qty_val,
+                                receipt.filled_qty,
+                                receipt.venue_order_id.clone(),
+                                format!("{:?}", receipt.status),
+                                "generic venue entry sonucu kesin değil",
+                            );
+                            if let Ok(mut st2) = state.lock() {
+                                st2.push_alert(
+                                    "LIVE-ENTRY-UNCERTAIN",
+                                    crate::robot::infra::telegram_notifier::Severity::Critical,
+                                    format!(
+                                        "{} generic venue entry sonucu kesin değil veya kabul edilmedi: {:?}; retry yapılmayacak",
+                                        symbol, receipt.status
+                                    ),
+                                );
+                            }
+                            Self::trip_live_block(state, symbol, "entry_uncertain");
+                            return;
+                        }
+                        live_order_id = receipt.venue_order_id.clone();
+                        let event_symbol = if symbol.contains('@') {
+                            symbol.to_string()
+                        } else {
+                            format!("{}@{}", symbol, venue.exchange().as_str())
+                        };
+                        let side_str = match side {
+                            crate::robot::venue::types::OrderSide::Buy => "BUY",
+                            crate::robot::venue::types::OrderSide::Sell => "SELL",
+                        };
+                        let status_str = match receipt.status {
+                            crate::robot::venue::types::OrderStatus::New => "NEW",
+                            crate::robot::venue::types::OrderStatus::PartiallyFilled => {
+                                "PARTIALLY_FILLED"
+                            }
+                            crate::robot::venue::types::OrderStatus::Filled => "FILLED",
+                            crate::robot::venue::types::OrderStatus::Canceled => "CANCELED",
+                            crate::robot::venue::types::OrderStatus::Rejected => "REJECTED",
+                            crate::robot::venue::types::OrderStatus::Unknown => "UNKNOWN",
+                        };
+                        let receipt_reason = receipt
+                            .raw
+                            .as_ref()
+                            .and_then(|raw| {
+                                raw.get("error")
+                                    .and_then(|v| v.as_str())
+                                    .or_else(|| raw.get("msg").and_then(|v| v.as_str()))
+                            })
+                            .unwrap_or("");
+                        emit_trade_event(state, || {
+                            crate::robot::infra::logger::TradeEvent::order_status(
+                                &event_symbol,
+                                status_str,
+                                side_str,
+                                live_order_id.as_deref().unwrap_or(""),
+                                if receipt.filled_qty > 0.0 {
+                                    receipt.filled_qty
+                                } else {
+                                    qty_val
+                                },
+                                receipt_reason,
+                            )
+                        });
+                        match receipt.status {
+                            crate::robot::venue::types::OrderStatus::Filled => {
+                                emit_trade_event(state, || {
+                                    crate::robot::infra::logger::TradeEvent::order_filled(
+                                        &event_symbol,
+                                        live_order_id.as_deref().unwrap_or(""),
+                                        false,
+                                    )
+                                });
+                            }
+                            crate::robot::venue::types::OrderStatus::PartiallyFilled => {
+                                let equity_snapshot =
+                                    state.lock().ok().map(|s| s.finance.equity).unwrap_or(0.0);
+                                let fill_pct = if qty_val > 0.0 {
+                                    (receipt.filled_qty / qty_val * 100.0).clamp(0.0, 100.0)
+                                } else {
+                                    0.0
+                                };
+                                let partial_price = if receipt.avg_price > 0.0 {
+                                    receipt.avg_price
+                                } else {
+                                    entry
+                                };
+                                emit_trade_event(state, || {
+                                    crate::robot::infra::logger::TradeEvent::order_partial(
+                                        &event_symbol,
+                                        side_str,
+                                        partial_price,
+                                        receipt.filled_qty,
+                                        receipt.filled_qty,
+                                        qty_val,
+                                        fill_pct,
+                                        equity_snapshot,
+                                    )
+                                });
+                            }
+                            _ => {}
+                        }
+                        if receipt.avg_price > 0.0 {
+                            new_pos.entry_price = receipt.avg_price;
+                            new_pos.current_price = receipt.avg_price;
+                            new_pos.max_favorable_price = receipt.avg_price;
+                        }
+                        if let Ok(mut st2) = state.lock() {
+                            st2.push_log(format!(
+                                "💱 [LIVE:{}] {} {:?} {:.4} @ {:.2} (${:.2}) ✓ order={}",
+                                venue.exchange().as_str(),
+                                symbol,
+                                side,
+                                qty_val,
+                                new_pos.entry_price,
+                                alloc_capital,
+                                live_order_id.as_deref().unwrap_or("?"),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        let event_symbol = if symbol.contains('@') {
+                            symbol.to_string()
+                        } else {
+                            format!("{}@{}", symbol, venue.exchange().as_str())
+                        };
+                        let side_str = match side {
+                            crate::robot::venue::types::OrderSide::Buy => "BUY",
+                            crate::robot::venue::types::OrderSide::Sell => "SELL",
+                        };
+                        emit_trade_event(state, || {
+                            crate::robot::infra::logger::TradeEvent::order_status(
+                                &event_symbol,
+                                "REJECTED",
+                                side_str,
+                                "",
+                                qty_val,
+                                &format!("{}", e),
+                            )
+                        });
+                        if let Ok(mut st2) = state.lock() {
+                            st2.push_log(format!(
+                                "⚠️ [LIVE->PAPER] {} {:?} emir hatası: {:?} — paper izlemeye düşüldü",
+                                symbol, side, e,
+                            ));
                         }
                     }
                 }
             }
         }
 
-        // Mutex'i geri al
-        let mut st = state.lock().unwrap();
-
-        let new_pos_for_log = new_pos.clone();
+        if live_executor.is_none()
+            && live_order_id.is_some()
+            && !live_dry_run
+            && (new_pos.stop_loss > 0.0 || new_pos.take_profit > 0.0)
         {
-            if let Ok(mut positions) = st.finance.live_positions.write() {
-                positions.insert(symbol.to_string(), new_pos);
+            if let Some(venue) = live_venue.as_ref() {
+                let (sl_res, tp_res) = venue
+                    .place_protection_orders(
+                        symbol,
+                        is_long,
+                        qty_val,
+                        new_pos.stop_loss,
+                        new_pos.take_profit,
+                    )
+                    .await;
+                let sl_id = sl_res.as_ref().ok().and_then(|r| r.venue_order_id.clone());
+                let tp_id = tp_res.as_ref().ok().and_then(|r| r.venue_order_id.clone());
+                let protection_failed = (new_pos.stop_loss > 0.0 && sl_res.is_err())
+                    || (new_pos.take_profit > 0.0 && tp_res.is_err());
+                if let Ok(st2) = state.lock() {
+                    if let Ok(mut map) = st2.finance.live_orders.write() {
+                        map.insert(
+                            symbol.to_string(),
+                            crate::core::model::LiveOrderRefs {
+                                entry_order_id: live_order_id.clone(),
+                                sl_order_id: sl_id,
+                                tp_order_id: tp_id,
+                                placed_at: chrono::Utc::now().to_rfc3339(),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+                if protection_failed {
+                    let _ = venue.cancel_all(symbol).await;
+                    let close_result = venue.close_position(symbol).await;
+                    if let Ok(mut st2) = state.lock() {
+                        st2.push_alert(
+                            "LIVE-PROTECT-HARD-GATE",
+                            crate::robot::infra::telegram_notifier::Severity::Critical,
+                            format!(
+                                "{} girişinden sonra generic venue protection doğrulanamadı (SL={:?}, TP={:?}) — pozisyon kapatma sonucu: {:?}",
+                                symbol, sl_res, tp_res, close_result
+                            ),
+                        );
+                    }
+                    Self::trip_live_block(state, symbol, "protection_hard_gate");
+                    return;
+                }
             }
         }
+
+        // Mutex'i geri al
+        let mut st = lock_state_recover(state);
+
+        let new_pos_for_log = new_pos.clone();
+        st.insert_live_position(symbol.to_string(), new_pos);
         // 🪜 Kademeli giriş durumu: açılış = 1. kademe (sayaç=1); tam hedef sermaye saklanır → ek
         // kademeler try_add_graded_tranche'de target·weight[k] ile boyutlanır. None → kademeli kapalı.
         if let Some(target) = plan.graded_target {
             if let Ok(mut m) = st.finance.graded_tranches.write() {
-                m.insert(symbol.to_string(), crate::robot::robotic_loop::GradedPosState {
-                    tranches_filled: 1, target_capital: target,
-                });
+                m.insert(
+                    symbol.to_string(),
+                    crate::robot::robotic_loop::GradedPosState {
+                        tranches_filled: 1,
+                        target_capital: target,
+                    },
+                );
             }
         }
 
@@ -881,19 +2011,24 @@ impl Engine {
             || strategy_name == crate::robot::engines::master::carry_live::CARRY_STRATEGY_TAG
             || strategy_name == crate::robot::engines::master::blend_live::BLEND_STRATEGY_TAG)
             && st.tuning.use_limit_entry;
-        let entry_commission_rate = if used_maker || xs_maker { st.tuning.maker_commission_rate }
-                                     else                     { st.tuning.commission_rate };
+        let entry_commission_rate = if used_maker || xs_maker {
+            st.tuning.maker_commission_rate
+        } else {
+            st.tuning.commission_rate
+        };
         let commission = alloc_capital * entry_commission_rate;
         if let Ok(mut costs) = st.finance.live_execution_costs.write() {
             costs.commission_usd += commission;
             costs.total_cost_usd += commission;
-            costs.trade_count    += 1;
+            costs.trade_count += 1;
         }
         st.finance.equity -= commission;
         // Per-trade NET P&L için giriş komisyonunu pozisyona mühürle (kapanışta
         // net_pnl = gross − entry_commission − exit_commission). Pozisyon 760'ta insert edildi.
         if let Ok(mut positions) = st.finance.live_positions.write() {
-            if let Some(p) = positions.get_mut(symbol) { p.entry_commission = commission; }
+            if let Some(p) = positions.get_mut(symbol) {
+                p.entry_commission = commission;
+            }
         }
 
         // IntelligenceHub.track_trade — kapanışta learn_from_exit ile eşleşecek.
@@ -901,9 +2036,13 @@ impl Engine {
             hub.track_trade(pos_id, regime, strategy_name.clone());
         }
 
-        let mode_tag = if live_order_id.is_some() { "LIVE" }
-                       else if live_executor.is_some() && live_dry_run { "DRY-RUN" }
-                       else { "PAPER" };
+        let mode_tag = if live_order_id.is_some() {
+            "LIVE"
+        } else if (live_executor.is_some() || live_venue.is_some()) && live_dry_run {
+            "DRY-RUN"
+        } else {
+            "PAPER"
+        };
         let pos_for_log = new_pos_for_log;
         st.push_log(format!(
             "🚀 [{}-{}] {} açıldı @ {:.2} | Qty={:.4} ${:.2} | SL={:.2} TP={:.2} Trail={:.2} (ATR={:.4} ×{:.1})",
@@ -922,8 +2061,13 @@ impl Engine {
             n.notify(
                 &format!("open-{symbol}"),
                 crate::robot::infra::telegram_notifier::Severity::Info,
-                &format!("📈 {symbol} {} açıldı @ {:.4} · {} · ×{:.1}",
-                    if is_long { "LONG" } else { "SHORT" }, entry, strategy_name, pos_for_log.leverage),
+                &format!(
+                    "📈 {symbol} {} açıldı @ {:.4} · {} · ×{:.1}",
+                    if is_long { "LONG" } else { "SHORT" },
+                    entry,
+                    strategy_name,
+                    pos_for_log.leverage
+                ),
             );
         }
         // 📝 Periyodik dosya logu: TRADE_OPEN. Logger Arc'ını lock altında clone'la,
@@ -933,7 +2077,12 @@ impl Engine {
         drop(st);
         if let Some(logger) = logger_for_event {
             let ev = crate::robot::infra::logger::TradeEvent::trade_open(
-                symbol, &strategy_name, is_long, entry, qty_val, equity_now,
+                symbol,
+                &strategy_name,
+                is_long,
+                entry,
+                qty_val,
+                equity_now,
                 pos_for_log.leverage,
             );
             let _ = logger.log_event(&ev);
@@ -961,9 +2110,133 @@ impl Engine {
     /// Case-insensitive karşılaştırma; lock alınamazsa false (savunmacı varsayılan
     /// — sistemi blocked-shaped failure'a sokmamak için kapı açık bırakılır).
     pub fn is_symbol_blocked(state: &Arc<Mutex<AppState>>, symbol: &str) -> bool {
-        state.lock().ok().map(|st| {
-            st.config.blocked_symbols.iter().any(|b| b.eq_ignore_ascii_case(symbol))
-        }).unwrap_or(false)
+        state
+            .lock()
+            .ok()
+            .map(|st| {
+                st.config
+                    .blocked_symbols
+                    .iter()
+                    .any(|b| b.eq_ignore_ascii_case(symbol))
+            })
+            .unwrap_or(false)
+    }
+
+    fn operator_live_trading_paused() -> Result<bool, String> {
+        let path = std::env::var("OPERATOR_CONTROLS_PATH")
+            .unwrap_or_else(|_| "data/operator_controls.json".into());
+        let path = std::path::Path::new(&path);
+        if !path.exists() {
+            return Ok(false);
+        }
+        let body = std::fs::read(path)
+            .map_err(|error| format!("operatör kontrol dosyası okunamadı: {error}"))?;
+        let controls: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|error| format!("operatör kontrol dosyası geçersiz JSON: {error}"))?;
+        Ok(controls
+            .get("live_trading_paused")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false))
+    }
+
+    /// Live giriş için account ve broker-side protection ön koşullarını tek noktada
+    /// değerlendirir. Paper ve live-dry-run akışları bu kapıdan etkilenmez.
+    fn live_entry_gate(state: &Arc<Mutex<AppState>>, symbol: &str) -> Option<String> {
+        let st = match state.lock() {
+            Ok(st) => st,
+            Err(_) => return Some("AppState kilidi alınamadı".to_string()),
+        };
+        if !matches!(st.config.trading_mode, TradingMode::Live) || st.live_dry_run {
+            return None;
+        }
+        if let Ok(uncertain) = st.finance.uncertain_orders.read() {
+            if let Some(order) = uncertain.get(symbol) {
+                return Some(format!(
+                    "çözülmemiş belirsiz emir mevcut (status={}, order_id={:?}); reconciliation/operator çözümü bekleniyor",
+                    order.status, order.broker_order_id
+                ));
+            }
+        } else {
+            return Some("belirsiz emir state kilidi okunamadı".into());
+        }
+        match Self::operator_live_trading_paused() {
+            Ok(true) => return Some("operatör canlı işlem pause kontrolü aktif".into()),
+            Ok(false) => {}
+            Err(error) => return Some(format!("operatör kontrolü doğrulanamadı: {error}")),
+        }
+        let (venue, _) = st.venue_registry.route(symbol)?;
+        if venue.execution_engine().is_none() {
+            return None;
+        }
+
+        let venue_key = venue.name();
+        let account = match st.venue_runtime.read() {
+            Ok(runtimes) => runtimes
+                .get(&venue_key)
+                .and_then(|runtime| runtime.account_snapshot.clone()),
+            Err(_) => {
+                return Some(format!("{} account snapshot kilidi okunamadı", venue_key));
+            }
+        };
+        let account_ready = account
+            .as_ref()
+            .map(|snapshot| {
+                snapshot.status == memos_venue_api::AccountSnapshotStatus::Fresh
+                    && snapshot.timestamp >= chrono::Utc::now() - chrono::Duration::seconds(600)
+                    && snapshot
+                        .equity
+                        .map(|equity| equity.is_finite() && equity > 0.0)
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if !account_ready {
+            return Some(format!(
+                "{} account snapshot fresh/positive equity olarak doğrulanamadı",
+                venue_key
+            ));
+        }
+
+        let exchange_key = venue.name();
+        let reconciliation = match st.venue_runtime.read() {
+            Ok(runtimes) => runtimes
+                .get(&exchange_key)
+                .map(|runtime| runtime.reconciliation_status.clone()),
+            Err(_) => {
+                return Some(format!(
+                    "{} pozisyon mutabakatı durumu okunamadı",
+                    venue_key
+                ));
+            }
+        };
+        if reconciliation.as_deref() != Some("MATCHED") {
+            return Some(format!(
+                "{} pozisyon mutabakatı doğrulanmadı ({})",
+                venue_key,
+                reconciliation.as_deref().unwrap_or("UNKNOWN")
+            ));
+        }
+
+        let suffix = format!("@{}", venue.exchange().as_str());
+        let unprotected = match st.finance.live_positions.read() {
+            Ok(positions) => positions.values().any(|position| {
+                position.symbol.ends_with(&suffix)
+                    && position.stop_loss <= 0.0
+                    && position.take_profit <= 0.0
+            }),
+            Err(_) => {
+                return Some(format!(
+                    "{} aktif pozisyon koruma kilidi okunamadı",
+                    venue_key
+                ));
+            }
+        };
+        if unprotected {
+            return Some(format!(
+                "{} venue'unda broker-side SL/TP olmayan aktif pozisyon var",
+                venue_key
+            ));
+        }
+        None
     }
 
     /// 🌍 Bölge/IP bloğu devre-kesici AKTİF mi? `Some(until)` ve `now < until` → canlı emir
@@ -971,10 +2244,108 @@ impl Engine {
     /// (tek deneme yapılır; başarı `clear_live_block`, blok `trip_live_block` ile yenilenir).
     /// Lock alınamazsa false (savunmacı: kapı açık).
     fn live_block_active(state: &Arc<Mutex<AppState>>) -> bool {
-        state.lock().ok()
+        state
+            .lock()
+            .ok()
             .and_then(|st| st.guardian.live_block_until)
             .map(|until| chrono::Utc::now() < until)
             .unwrap_or(false)
+    }
+
+    // ─── RİSK KAPISI YAPTIRIMI (Adım 4a) ───────────────────────────────────────
+    // ÖNCEDEN: risk_gate `halt`/`enter_safe_mode` üretiyordu ama loop_core bunları
+    // yalnız LOG ETİKETİ olarak kullanıp `return` ediyordu → kill-switch fiilen yoktu;
+    // sonraki cycle aynı sembolde yeniden deniyordu. Aşağıdaki dört fonksiyon o boşluğu
+    // kapatır. `live_block_*`'tan AYRI: o borsa reddi içindir ve başarılı emirde temizlenir.
+
+    /// Risk HALT aktif mi → yeni pozisyon açılmamalı. Lock alınamazsa false (savunmacı).
+    pub(crate) fn risk_halt_active(state: &Arc<Mutex<AppState>>) -> bool {
+        state
+            .lock()
+            .ok()
+            .and_then(|st| st.guardian.risk_halt_until)
+            .map(|until| chrono::Utc::now() < until)
+            .unwrap_or(false)
+    }
+
+    /// SAFE-MODE aktif mi → tahsisat kısılmalı.
+    pub(crate) fn safe_mode_active(state: &Arc<Mutex<AppState>>) -> bool {
+        state
+            .lock()
+            .ok()
+            .and_then(|st| st.guardian.risk_safe_mode_until)
+            .map(|until| chrono::Utc::now() < until)
+            .unwrap_or(false)
+    }
+
+    /// Risk HALT'ı mühürle. İlk triplemede (veya süresi dolmuş mühür yenilenirken) TEK
+    /// Critical alarm + repair_log; zaten aktifse sessiz (cycle spam yok).
+    /// `cooldown == 0` → yaptırım kapalı (no-op).
+    pub(crate) fn trip_risk_halt(state: &Arc<Mutex<AppState>>, reason: &str) {
+        if let Ok(mut st) = state.lock() {
+            let cooldown = st.tuning.risk_halt_cooldown_secs;
+            if cooldown == 0 {
+                return;
+            }
+            let was_active = st
+                .guardian
+                .risk_halt_until
+                .map(|u| chrono::Utc::now() < u)
+                .unwrap_or(false);
+            st.guardian.risk_halt_until =
+                Some(chrono::Utc::now() + chrono::Duration::seconds(cooldown as i64));
+            if !was_active {
+                st.push_alert(
+                    "RISK-HALT",
+                    crate::robot::infra::telegram_notifier::Severity::Critical,
+                    format!(
+                        "[RISK-HALT] Risk kapısı kritik seviye ({}) → YENİ pozisyon açılışı {}sn DURDURULDU. Mevcut pozisyonlar normal yönetiliyor (SL/TP/trailing).",
+                        reason, cooldown,
+                    ),
+                );
+                st.guardian.repair_log.push_back(format!(
+                    "[{}] RISK-HALT: {} → yeni giriş {}sn durdu",
+                    chrono::Utc::now().format("%H:%M:%S"),
+                    reason,
+                    cooldown,
+                ));
+            }
+        }
+    }
+
+    /// SAFE-MODE'u mühürle: tahsisat `safe_mode_alloc_mult` ile kısılır. İşlem DURMAZ.
+    pub(crate) fn trip_safe_mode(state: &Arc<Mutex<AppState>>, reason: &str) {
+        if let Ok(mut st) = state.lock() {
+            let cooldown = st.tuning.safe_mode_cooldown_secs;
+            if cooldown == 0 {
+                return;
+            }
+            let was_active = st
+                .guardian
+                .risk_safe_mode_until
+                .map(|u| chrono::Utc::now() < u)
+                .unwrap_or(false);
+            st.guardian.risk_safe_mode_until =
+                Some(chrono::Utc::now() + chrono::Duration::seconds(cooldown as i64));
+            if !was_active {
+                let mult = st.tuning.safe_mode_alloc_mult;
+                st.push_alert(
+                    "SAFE-MODE",
+                    crate::robot::infra::telegram_notifier::Severity::Warning,
+                    format!(
+                        "[SAFE-MODE] Risk kapısı uyarı seviyesi ({}) → pozisyon boyutu {}sn boyunca {:.2}× kısıldı.",
+                        reason, cooldown, mult,
+                    ),
+                );
+                st.guardian.repair_log.push_back(format!(
+                    "[{}] SAFE-MODE: {} → tahsisat {:.2}× ({}sn)",
+                    chrono::Utc::now().format("%H:%M:%S"),
+                    reason,
+                    mult,
+                    cooldown,
+                ));
+            }
+        }
     }
 
     /// 🌍 Devre-kesiciyi tetikle: `live_block_until`'i cooldown kadar ileri mühürle. İlk
@@ -984,9 +2355,14 @@ impl Engine {
     fn trip_live_block(state: &Arc<Mutex<AppState>>, symbol: &str, reason: &str) {
         if let Ok(mut st) = state.lock() {
             let cooldown = st.tuning.live_block_cooldown_secs;
-            if cooldown == 0 { return; }
-            let was_active = st.guardian.live_block_until
-                .map(|u| chrono::Utc::now() < u).unwrap_or(false);
+            if cooldown == 0 {
+                return;
+            }
+            let was_active = st
+                .guardian
+                .live_block_until
+                .map(|u| chrono::Utc::now() < u)
+                .unwrap_or(false);
             st.guardian.live_block_until =
                 Some(chrono::Utc::now() + chrono::Duration::seconds(cooldown as i64));
             if !was_active {
@@ -1000,9 +2376,14 @@ impl Engine {
                 );
                 st.guardian.repair_log.push_back(format!(
                     "[{}] LIVE-BLOCK: {} ({}) → canlı emir {}sn durdu (bölge/IP/izin)",
-                    chrono::Local::now().format("%H:%M:%S"), symbol, reason, cooldown,
+                    chrono::Local::now().format("%H:%M:%S"),
+                    symbol,
+                    reason,
+                    cooldown,
                 ));
-                while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
+                while st.guardian.repair_log.len() > 100 {
+                    st.guardian.repair_log.pop_front();
+                }
             }
         }
     }
@@ -1015,11 +2396,66 @@ impl Engine {
                 st.guardian.live_block_until = None;
                 st.guardian.repair_log.push_back(format!(
                     "[{}] LIVE-BLOCK temizlendi: {} auto-probe geçti → canlı emir yeniden açık",
-                    chrono::Local::now().format("%H:%M:%S"), symbol,
+                    chrono::Local::now().format("%H:%M:%S"),
+                    symbol,
                 ));
-                while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
-                st.push_log(format!("✅ [LIVE-BLOCK→CLEAR] {} borsa yeniden kabul ediyor", symbol));
+                while st.guardian.repair_log.len() > 100 {
+                    st.guardian.repair_log.pop_front();
+                }
+                st.push_log(format!(
+                    "✅ [LIVE-BLOCK→CLEAR] {} borsa yeniden kabul ediyor",
+                    symbol
+                ));
             }
+        }
+    }
+
+    fn persist_uncertain_entry(
+        state: &Arc<Mutex<AppState>>,
+        symbol: &str,
+        side: &str,
+        requested_quantity: f64,
+        filled_quantity: f64,
+        broker_order_id: Option<String>,
+        status: String,
+        reason: &str,
+    ) {
+        let (db_path, profile) = match state.lock() {
+            Ok(st) => (
+                st.config.state_db_path.clone(),
+                st.config.venue_profile.as_str().to_string(),
+            ),
+            Err(_) => return,
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let order = crate::core::model::UncertainOrderState {
+            symbol: symbol.to_owned(),
+            side: side.to_owned(),
+            requested_quantity,
+            filled_quantity,
+            broker_order_id,
+            status,
+            reason: reason.to_owned(),
+            created_at: now.clone(),
+            last_checked_at: now,
+            resolved_at: None,
+            healthy_reconcile_count: 0,
+        };
+        if let Ok(st) = state.lock() {
+            if let Ok(mut uncertain) = st.finance.uncertain_orders.write() {
+                uncertain.insert(symbol.to_owned(), order.clone());
+            }
+        }
+        let result = crate::persistence::open_db(&db_path).and_then(|conn| {
+            crate::persistence::writer::save_uncertain_order_for_profile(&conn, &profile, &order)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+        });
+        if let Err(error) = result {
+            log::error!(
+                "⚠️ [UNCERTAIN-ORDER] {} kalıcı state'e yazılamadı: {}",
+                symbol,
+                error
+            );
         }
     }
 }
@@ -1043,8 +2479,8 @@ impl Drop for OpenSlotGuard {
 #[cfg(test)]
 mod tests {
     use super::{concurrency_cap_reached, OpenSlotGuard};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn cap_reached_logic() {
@@ -1052,7 +2488,10 @@ mod tests {
         assert!(!concurrency_cap_reached(9, 9, 0), "cap=0 → her zaman false");
         assert!(!concurrency_cap_reached(1, 0, 2), "1 açık < 2");
         assert!(concurrency_cap_reached(2, 0, 2), "2 açık = cap → dolu");
-        assert!(concurrency_cap_reached(1, 1, 2), "1 açık + 1 uçuşta = cap → dolu");
+        assert!(
+            concurrency_cap_reached(1, 1, 2),
+            "1 açık + 1 uçuşta = cap → dolu"
+        );
         assert!(concurrency_cap_reached(3, 0, 2), "tavan aşılmışsa dolu");
     }
 
@@ -1063,8 +2502,117 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), 1);
         {
             let _g = OpenSlotGuard(Arc::clone(&counter));
-            assert_eq!(counter.load(Ordering::Relaxed), 1, "guard içindeyken rezervasyon durur");
+            assert_eq!(
+                counter.load(Ordering::Relaxed),
+                1,
+                "guard içindeyken rezervasyon durur"
+            );
         }
-        assert_eq!(counter.load(Ordering::Relaxed), 0, "drop → rezervasyon serbest");
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "drop → rezervasyon serbest"
+        );
+    }
+}
+
+#[cfg(test)]
+mod risk_enforcement_tests {
+    use super::*;
+    use crate::core::model::RoboticLoopConfig;
+
+    /// `AppState::new` MT5 listede olduğunda TCP portunu erken bağlar (registry.rs) →
+    /// senkron/tek-thread testte panikler. `VENUES=binance` MT5 kaydını devre dışı bırakır.
+    fn state() -> Arc<Mutex<AppState>> {
+        std::env::set_var("VENUES", "binance");
+        Arc::new(Mutex::new(AppState::new(RoboticLoopConfig::default())))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn risk_halt_starts_inactive_and_seals_on_trip() {
+        let st = state();
+        assert!(!Engine::risk_halt_active(&st), "başlangıçta halt olmamalı");
+        Engine::trip_risk_halt(&st, "Kritik Max DD aşıldı: 12.0%");
+        assert!(
+            Engine::risk_halt_active(&st),
+            "trip sonrası halt aktif olmalı"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn safe_mode_seals_independently_of_halt() {
+        let st = state();
+        Engine::trip_safe_mode(&st, "Günlük kayıp 2.4%");
+        assert!(Engine::safe_mode_active(&st), "safe-mode aktif olmalı");
+        assert!(
+            !Engine::risk_halt_active(&st),
+            "safe-mode HALT'ı tetiklememeli"
+        );
+    }
+
+    /// cooldown=0 → yaptırım kapalı (operatör kaçış kapısı). Sessizce no-op olmalı.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn zero_cooldown_disables_enforcement() {
+        let st = state();
+        if let Ok(mut g) = st.lock() {
+            // tuning bir Arc — mutasyon yok; klonlayıp yeniden mühürlüyoruz.
+            let mut t = (*g.tuning).clone();
+            t.risk_halt_cooldown_secs = 0;
+            t.safe_mode_cooldown_secs = 0;
+            g.tuning = std::sync::Arc::new(t);
+        }
+        Engine::trip_risk_halt(&st, "x");
+        Engine::trip_safe_mode(&st, "y");
+        assert!(!Engine::risk_halt_active(&st), "cooldown=0 → halt kapalı");
+        assert!(
+            !Engine::safe_mode_active(&st),
+            "cooldown=0 → safe-mode kapalı"
+        );
+    }
+
+    /// HALT mührü `live_block_until`'den AYRI olmalı: borsa-reddi devre-kesicisi
+    /// başarılı emirde temizlenir, drawdown halt'ı öyle temizlenmemeli.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn risk_halt_is_not_cleared_by_live_block_recovery() {
+        let st = state();
+        Engine::trip_risk_halt(&st, "DD");
+        Engine::clear_live_block(&st, "BTCUSDT");
+        assert!(
+            Engine::risk_halt_active(&st),
+            "clear_live_block RISK-HALT'ı kaldırmamalı"
+        );
+    }
+
+    /// SAFE-MODE çarpanı tahsisatı gerçekten kısmalı (positions.rs base_alloc aritmetiği).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn safe_mode_multiplier_reduces_allocation() {
+        let st = state();
+        let (equity, frac, mult) = {
+            let g = st.lock().unwrap();
+            (
+                g.finance.equity,
+                g.tuning.base_alloc_fraction,
+                g.tuning.safe_mode_alloc_mult,
+            )
+        };
+        let appetite = st.lock().unwrap().finance.calculate_risk_appetite();
+        let normal = equity * frac * appetite * 1.0;
+        Engine::trip_safe_mode(&st, "DD");
+        let active = st
+            .lock()
+            .ok()
+            .and_then(|g| g.guardian.risk_safe_mode_until)
+            .map(|u| chrono::Utc::now() < u)
+            .unwrap_or(false);
+        assert!(active);
+        let reduced = equity * frac * appetite * mult;
+        assert!(
+            reduced < normal,
+            "safe-mode tahsisatı kısmalı: {reduced} < {normal}"
+        );
+        assert!(
+            (reduced - normal * mult).abs() < 1e-9,
+            "çarpan birebir uygulanmalı"
+        );
     }
 }

@@ -24,7 +24,7 @@ pub struct FillResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartialFill {
     pub price: f64,
-    pub qty:   f64,
+    pub qty: f64,
     pub notional: f64,
 }
 
@@ -41,12 +41,22 @@ impl OrderBook {
     pub fn new(bids: Vec<BookLevel>, asks: Vec<BookLevel>) -> Self {
         let mid = if let (Some(b), Some(a)) = (bids.first(), asks.first()) {
             (b.price + a.price) / 2.0
-        } else { 0.0 };
-        Self { bids, asks, mid_price: mid }
+        } else {
+            0.0
+        };
+        Self {
+            bids,
+            asks,
+            mid_price: mid,
+        }
     }
 
-    pub fn fill_market_buy(&self, qty: f64) -> FillResult { self.fill_order(qty, &self.asks, true) }
-    pub fn fill_market_sell(&self, qty: f64) -> FillResult { self.fill_order(qty, &self.bids, false) }
+    pub fn fill_market_buy(&self, qty: f64) -> FillResult {
+        self.fill_order(qty, &self.asks, true)
+    }
+    pub fn fill_market_sell(&self, qty: f64) -> FillResult {
+        self.fill_order(qty, &self.bids, false)
+    }
 
     fn fill_order(&self, qty: f64, levels: &[BookLevel], is_buy: bool) -> FillResult {
         let mut remaining = qty;
@@ -55,25 +65,45 @@ impl OrderBook {
         let mut fills = Vec::new();
 
         for level in levels {
-            if remaining <= 1e-10 { break; }
+            if remaining <= 1e-10 {
+                break;
+            }
             let take = remaining.min(level.qty);
             let notional = take * level.price;
-            fills.push(PartialFill { price: level.price, qty: take, notional });
+            fills.push(PartialFill {
+                price: level.price,
+                qty: take,
+                notional,
+            });
             total_cost += notional;
             total_filled += take;
             remaining -= take;
         }
 
-        let avg_price = if total_filled > 0.0 { total_cost / total_filled } else { 0.0 };
+        let avg_price = if total_filled > 0.0 {
+            total_cost / total_filled
+        } else {
+            0.0
+        };
         let slippage = if self.mid_price > 0.0 && avg_price > 0.0 {
-            let diff = if is_buy { avg_price - self.mid_price } else { self.mid_price - avg_price };
+            let diff = if is_buy {
+                avg_price - self.mid_price
+            } else {
+                self.mid_price - avg_price
+            };
             (diff / self.mid_price) * 100.0
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         FillResult {
-            requested_qty: qty, filled_qty: total_filled, avg_fill_price: avg_price,
-            slippage_pct: slippage.max(0.0), unfilled_qty: remaining,
-            is_full_fill: remaining <= 1e-10, fills,
+            requested_qty: qty,
+            filled_qty: total_filled,
+            avg_fill_price: avg_price,
+            slippage_pct: slippage.max(0.0),
+            unfilled_qty: remaining,
+            is_full_fill: remaining <= 1e-10,
+            fills,
         }
     }
 }
@@ -92,10 +122,24 @@ pub struct SyntheticBookConfig {
 
 impl SyntheticBookConfig {
     pub fn liquid(mid_price: f64) -> Self {
-        Self { mid_price, depth_levels: 10, spread_pct: 0.02, tick_pct: 0.01, top_qty: 1.0, qty_multiplier: 1.5 }
+        Self {
+            mid_price,
+            depth_levels: 10,
+            spread_pct: 0.02,
+            tick_pct: 0.01,
+            top_qty: 1.0,
+            qty_multiplier: 1.5,
+        }
     }
     pub fn illiquid(mid_price: f64) -> Self {
-        Self { mid_price, depth_levels: 5, spread_pct: 0.15, tick_pct: 0.05, top_qty: 0.1, qty_multiplier: 1.3 }
+        Self {
+            mid_price,
+            depth_levels: 5,
+            spread_pct: 0.15,
+            tick_pct: 0.05,
+            top_qty: 0.1,
+            qty_multiplier: 1.3,
+        }
     }
 }
 
@@ -109,8 +153,14 @@ pub fn build_synthetic_book(cfg: &SyntheticBookConfig) -> OrderBook {
     let mut qty = cfg.top_qty;
 
     for i in 0..cfg.depth_levels {
-        asks.push(BookLevel { price: best_ask + i as f64 * tick, qty });
-        bids.push(BookLevel { price: best_bid - i as f64 * tick, qty });
+        asks.push(BookLevel {
+            price: best_ask + i as f64 * tick,
+            qty,
+        });
+        bids.push(BookLevel {
+            price: best_bid - i as f64 * tick,
+            qty,
+        });
         qty *= cfg.qty_multiplier;
     }
     OrderBook::new(bids, asks)
@@ -123,12 +173,24 @@ pub struct OrderBookSimulator {
 }
 
 impl OrderBookSimulator {
-    pub fn new(config: SyntheticBookConfig) -> Self { Self { config } }
-    pub fn update_price(&mut self, new_mid: f64) { self.config.mid_price = new_mid; }
-    pub fn simulate_buy(&self, qty: f64) -> FillResult { build_synthetic_book(&self.config).fill_market_buy(qty) }
-    pub fn simulate_sell(&self, qty: f64) -> FillResult { build_synthetic_book(&self.config).fill_market_sell(qty) }
+    pub fn new(config: SyntheticBookConfig) -> Self {
+        Self { config }
+    }
+    pub fn update_price(&mut self, new_mid: f64) {
+        self.config.mid_price = new_mid;
+    }
+    pub fn simulate_buy(&self, qty: f64) -> FillResult {
+        build_synthetic_book(&self.config).fill_market_buy(qty)
+    }
+    pub fn simulate_sell(&self, qty: f64) -> FillResult {
+        build_synthetic_book(&self.config).fill_market_sell(qty)
+    }
     pub fn simulate_buy_notional(&self, notional_usd: f64) -> FillResult {
-        let qty = if self.config.mid_price > 0.0 { notional_usd / self.config.mid_price } else { 0.0 };
+        let qty = if self.config.mid_price > 0.0 {
+            notional_usd / self.config.mid_price
+        } else {
+            0.0
+        };
         self.simulate_buy(qty)
     }
 }

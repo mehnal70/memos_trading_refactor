@@ -45,11 +45,13 @@ pub const NARROW_FACTOR: f64 = 0.9;
 pub const TARGET_MIN_PCT: f64 = 0.2;
 pub const TARGET_MAX_PCT: f64 = 5.0;
 /// Rate eşikleri — adjustment kararı için.
-pub const WIDEN_RATE_THRESHOLD: f64 = 0.50;  // >50% early → widen
+pub const WIDEN_RATE_THRESHOLD: f64 = 0.50; // >50% early → widen
 pub const NARROW_RATE_THRESHOLD: f64 = 0.20; // <20% early → narrow
 
 impl TrailFeedback {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Tek bir trailing outcome'ı işler. `was_early` = trail tetiklendi ama fiyat
     /// pozisyonun lehine geri döndü (sıkı trail). `base_target` = Phase B'den gelen
@@ -58,11 +60,17 @@ impl TrailFeedback {
     /// Döner: target_override değiştiyse Some(new_target), aksi None.
     pub fn record_outcome(&mut self, was_early: bool, base_target: f64) -> Option<f64> {
         self.total_count += 1;
-        if was_early { self.early_count += 1; }
+        if was_early {
+            self.early_count += 1;
+        }
 
         // Adjustment penceresi tamamlandı mı?
-        if self.total_count < FEEDBACK_WINDOW { return None; }
-        if !self.total_count.is_multiple_of(FEEDBACK_WINDOW) { return None; }
+        if self.total_count < FEEDBACK_WINDOW {
+            return None;
+        }
+        if !self.total_count.is_multiple_of(FEEDBACK_WINDOW) {
+            return None;
+        }
 
         let rate = self.early_count as f64 / self.total_count as f64;
         // Mevcut override (yoksa base'den başla).
@@ -73,11 +81,13 @@ impl TrailFeedback {
         } else if rate < NARROW_RATE_THRESHOLD {
             (current * NARROW_FACTOR).max(TARGET_MIN_PCT)
         } else {
-            return None;  // stable range, dokunma
+            return None; // stable range, dokunma
         };
 
         // No-op koruması (clamp aynı değeri verirse override yazma)
-        if (new_target - current).abs() < 1e-6 { return None; }
+        if (new_target - current).abs() < 1e-6 {
+            return None;
+        }
 
         let now = crate::core::time::now_epoch_secs();
         self.target_override = Some(new_target);
@@ -87,8 +97,11 @@ impl TrailFeedback {
 
     /// Early-exit oranı (0.0..=1.0). Diagnostik için.
     pub fn early_rate(&self) -> f64 {
-        if self.total_count == 0 { 0.0 }
-        else { self.early_count as f64 / self.total_count as f64 }
+        if self.total_count == 0 {
+            0.0
+        } else {
+            self.early_count as f64 / self.total_count as f64
+        }
     }
 }
 
@@ -96,11 +109,11 @@ impl TrailFeedback {
 /// processor 60sn sonra olgunluk kontrolü yapıp outcome belirler.
 #[derive(Debug, Clone)]
 pub struct PendingTrailObservation {
-    pub symbol:        String,
-    pub strategy:      String,
-    pub is_long:       bool,
-    pub exit_price:    f64,
-    pub exit_epoch:    u64,
+    pub symbol: String,
+    pub strategy: String,
+    pub is_long: bool,
+    pub exit_price: f64,
+    pub exit_epoch: u64,
 }
 
 impl PendingTrailObservation {
@@ -114,7 +127,9 @@ impl PendingTrailObservation {
     /// LONG'da exit sonrası fiyat yukarı recovery → early (trail çok sıkıydı).
     /// SHORT'ta exit sonrası fiyat aşağı recovery → early.
     pub fn evaluate(&self, current_price: f64) -> bool {
-        if self.exit_price <= 0.0 || current_price <= 0.0 { return false; }
+        if self.exit_price <= 0.0 || current_price <= 0.0 {
+            return false;
+        }
         if self.is_long {
             (current_price - self.exit_price) / self.exit_price > EARLY_EXIT_THRESHOLD
         } else {
@@ -136,8 +151,12 @@ mod tests {
         }
         assert_eq!(fb.total_count, FEEDBACK_WINDOW);
         assert_eq!(fb.early_count, FEEDBACK_WINDOW);
-        assert_eq!(fb.target_override, Some(1.2),
-            "1.0 × 1.2 = 1.2 widen, gerçek {:?}", fb.target_override);
+        assert_eq!(
+            fb.target_override,
+            Some(1.2),
+            "1.0 × 1.2 = 1.2 widen, gerçek {:?}",
+            fb.target_override
+        );
     }
 
     #[test]
@@ -147,8 +166,12 @@ mod tests {
         for _ in 0..FEEDBACK_WINDOW {
             fb.record_outcome(false, 1.0);
         }
-        assert_eq!(fb.target_override, Some(0.9),
-            "1.0 × 0.9 = 0.9 narrow, gerçek {:?}", fb.target_override);
+        assert_eq!(
+            fb.target_override,
+            Some(0.9),
+            "1.0 × 0.9 = 0.9 narrow, gerçek {:?}",
+            fb.target_override
+        );
     }
 
     #[test]
@@ -165,24 +188,32 @@ mod tests {
     fn record_outcome_clamps_at_max() {
         let mut fb = TrailFeedback::new();
         fb.target_override = Some(4.5); // zaten yüksek
-        // 20 early → ×1.2 = 5.4 → clamp 5.0
+                                        // 20 early → ×1.2 = 5.4 → clamp 5.0
         for _ in 0..FEEDBACK_WINDOW {
             fb.record_outcome(true, 1.0);
         }
-        assert_eq!(fb.target_override, Some(TARGET_MAX_PCT),
-            "MAX cap 5.0, gerçek {:?}", fb.target_override);
+        assert_eq!(
+            fb.target_override,
+            Some(TARGET_MAX_PCT),
+            "MAX cap 5.0, gerçek {:?}",
+            fb.target_override
+        );
     }
 
     #[test]
     fn record_outcome_clamps_at_min() {
         let mut fb = TrailFeedback::new();
         fb.target_override = Some(0.21); // floor'a yakın
-        // 20 right exit → ×0.9 = 0.189 → clamp 0.2
+                                         // 20 right exit → ×0.9 = 0.189 → clamp 0.2
         for _ in 0..FEEDBACK_WINDOW {
             fb.record_outcome(false, 1.0);
         }
-        assert_eq!(fb.target_override, Some(TARGET_MIN_PCT),
-            "MIN cap 0.2, gerçek {:?}", fb.target_override);
+        assert_eq!(
+            fb.target_override,
+            Some(TARGET_MIN_PCT),
+            "MIN cap 0.2, gerçek {:?}",
+            fb.target_override
+        );
     }
 
     #[test]
@@ -198,8 +229,11 @@ mod tests {
     #[test]
     fn evaluate_long_early_when_price_recovers_up() {
         let obs = PendingTrailObservation {
-            symbol: "ETHUSDT".into(), strategy: "SUPERTREND".into(),
-            is_long: true, exit_price: 2000.0, exit_epoch: 0,
+            symbol: "ETHUSDT".into(),
+            strategy: "SUPERTREND".into(),
+            is_long: true,
+            exit_price: 2000.0,
+            exit_epoch: 0,
         };
         // Fiyat exit'in 0.2% üstüne çıktı → early
         assert!(obs.evaluate(2004.0), "LONG +0.2% → early");
@@ -210,8 +244,11 @@ mod tests {
     #[test]
     fn evaluate_short_early_when_price_recovers_down() {
         let obs = PendingTrailObservation {
-            symbol: "ETHUSDT".into(), strategy: "SUPERTREND".into(),
-            is_long: false, exit_price: 2000.0, exit_epoch: 0,
+            symbol: "ETHUSDT".into(),
+            strategy: "SUPERTREND".into(),
+            is_long: false,
+            exit_price: 2000.0,
+            exit_epoch: 0,
         };
         // Fiyat exit'in 0.2% altına düştü → early (SHORT için kâr yönü)
         assert!(obs.evaluate(1996.0), "SHORT -0.2% → early");
@@ -222,11 +259,17 @@ mod tests {
     #[test]
     fn evaluate_rejects_zero_prices() {
         let obs = PendingTrailObservation {
-            symbol: "X".into(), strategy: "Y".into(),
-            is_long: true, exit_price: 0.0, exit_epoch: 0,
+            symbol: "X".into(),
+            strategy: "Y".into(),
+            is_long: true,
+            exit_price: 0.0,
+            exit_epoch: 0,
         };
         assert!(!obs.evaluate(100.0), "exit_price=0 → false (sentinel)");
-        let obs2 = PendingTrailObservation { exit_price: 100.0, ..obs };
+        let obs2 = PendingTrailObservation {
+            exit_price: 100.0,
+            ..obs
+        };
         assert!(!obs2.evaluate(0.0), "current=0 → false");
     }
 

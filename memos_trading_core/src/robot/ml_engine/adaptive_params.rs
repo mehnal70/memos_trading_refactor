@@ -129,41 +129,69 @@ pub struct AdaptiveTradeParams {
 
 // ── Serde default fonksiyonları ───────────────────────────────────────────────
 
-fn default_true()                    -> bool  { true }
-fn default_short_min_score()         -> f64   { 0.40 }
-fn default_short_loss_streak_pause() -> u32   { 5 }
-fn default_sl_atr_mult()             -> f64   { 1.0 }
-fn default_tp_atr_mult()             -> f64   { 1.2 }
-fn default_max_concurrent_shorts()   -> u32   { 2 }
-fn default_max_concurrent_longs()    -> u32   { 5 }
-fn default_max_trade_loss_pct()      -> f64   { 0.5 }
-fn default_adx_threshold()           -> f64   { 25.0 }
-fn default_futures_short_min_conf()  -> f64   { 0.45 }
-fn default_trailing_sl_activation_pct() -> f64 { 3.50 }
-fn default_adjust_every_n()          -> u32   { 20 }
-fn default_max_daily_sl()            -> u32   { 2 }
-fn default_max_consecutive_losses()  -> u32   { 8 }
+fn default_true() -> bool {
+    true
+}
+fn default_short_min_score() -> f64 {
+    0.40
+}
+fn default_short_loss_streak_pause() -> u32 {
+    5
+}
+fn default_sl_atr_mult() -> f64 {
+    1.0
+}
+fn default_tp_atr_mult() -> f64 {
+    1.2
+}
+fn default_max_concurrent_shorts() -> u32 {
+    2
+}
+fn default_max_concurrent_longs() -> u32 {
+    5
+}
+fn default_max_trade_loss_pct() -> f64 {
+    0.5
+}
+fn default_adx_threshold() -> f64 {
+    25.0
+}
+fn default_futures_short_min_conf() -> f64 {
+    0.45
+}
+fn default_trailing_sl_activation_pct() -> f64 {
+    3.50
+}
+fn default_adjust_every_n() -> u32 {
+    20
+}
+fn default_max_daily_sl() -> u32 {
+    2
+}
+fn default_max_consecutive_losses() -> u32 {
+    8
+}
 
 impl Default for AdaptiveTradeParams {
     fn default() -> Self {
         Self {
-            short_htf_block:            default_true(),
-            short_min_composite_score:  default_short_min_score(),
-            short_loss_streak_pause:    default_short_loss_streak_pause(),
-            sl_atr_multiplier:          default_sl_atr_mult(),
-            tp_atr_multiplier:          default_tp_atr_mult(),
-            max_concurrent_shorts:      default_max_concurrent_shorts(),
-            max_concurrent_longs:       default_max_concurrent_longs(),
-            max_trade_loss_pct:         default_max_trade_loss_pct(),
-            adx_trend_threshold:        default_adx_threshold(),
-            futures_short_min_conf:     default_futures_short_min_conf(),
+            short_htf_block: default_true(),
+            short_min_composite_score: default_short_min_score(),
+            short_loss_streak_pause: default_short_loss_streak_pause(),
+            sl_atr_multiplier: default_sl_atr_mult(),
+            tp_atr_multiplier: default_tp_atr_mult(),
+            max_concurrent_shorts: default_max_concurrent_shorts(),
+            max_concurrent_longs: default_max_concurrent_longs(),
+            max_trade_loss_pct: default_max_trade_loss_pct(),
+            adx_trend_threshold: default_adx_threshold(),
+            futures_short_min_conf: default_futures_short_min_conf(),
             trailing_sl_activation_pct: default_trailing_sl_activation_pct(),
-            long_htf_block:             default_true(),
-            max_daily_sl_per_symbol:    default_max_daily_sl(),
-            max_consecutive_losses:     default_max_consecutive_losses(),
-            last_adjusted_at:           String::new(),
-            adjust_every_n_trades:      default_adjust_every_n(),
-            short_loss_streak_current:  0,
+            long_htf_block: default_true(),
+            max_daily_sl_per_symbol: default_max_daily_sl(),
+            max_consecutive_losses: default_max_consecutive_losses(),
+            last_adjusted_at: String::new(),
+            adjust_every_n_trades: default_adjust_every_n(),
+            short_loss_streak_current: 0,
         }
     }
 }
@@ -205,18 +233,24 @@ impl AdaptiveTradeParams {
     /// - Stabilize olduysa → eşikleri normalize et
     pub fn auto_adjust(
         &mut self,
-        session_closed:    usize,
-        session_wins:      usize,
-        loss_streak:       usize,
-        session_rr:        f64,
+        session_closed: usize,
+        session_wins: usize,
+        loss_streak: usize,
+        session_rr: f64,
         short_loss_streak: u32,
         // Kazanan trade başına ortalama kâr % (ör. 1.2 = %1.2). TSL aktivasyon için.
-        avg_win_pct:       f64,
-        path:              &str,
+        avg_win_pct: f64,
+        path: &str,
     ) {
         // 0 = devre dışı anlamına gelir; 0 gelmişse config bozuk → fallback 20
-        let every_n = if self.adjust_every_n_trades == 0 { 20 } else { self.adjust_every_n_trades };
-        if session_closed == 0 || !session_closed.is_multiple_of(every_n as usize) { return; }
+        let every_n = if self.adjust_every_n_trades == 0 {
+            20
+        } else {
+            self.adjust_every_n_trades
+        };
+        if session_closed == 0 || !session_closed.is_multiple_of(every_n as usize) {
+            return;
+        }
 
         let win_rate = session_wins as f64 / session_closed as f64 * 100.0;
         let mut changed = false;
@@ -252,12 +286,16 @@ impl AdaptiveTradeParams {
                 // TP ulaşılamıyor → çarpanı küçült
                 let prev = self.tp_atr_multiplier;
                 self.tp_atr_multiplier = (self.tp_atr_multiplier - 0.1).max(0.8);
-                if self.tp_atr_multiplier != prev { changed = true; }
+                if self.tp_atr_multiplier != prev {
+                    changed = true;
+                }
             } else if win_rate >= 40.0 && self.tp_atr_multiplier < 2.0 {
                 // Kazanmalar oluyor ama kazanç küçük → hafifçe artır
                 let prev = self.tp_atr_multiplier;
                 self.tp_atr_multiplier = (self.tp_atr_multiplier + 0.1).min(2.0);
-                if self.tp_atr_multiplier != prev { changed = true; }
+                if self.tp_atr_multiplier != prev {
+                    changed = true;
+                }
             }
         }
 
@@ -265,7 +303,9 @@ impl AdaptiveTradeParams {
         if session_rr > 2.5 && self.tp_atr_multiplier > 1.5 {
             let prev = self.tp_atr_multiplier;
             self.tp_atr_multiplier = (self.tp_atr_multiplier - 0.1).max(1.2);
-            if self.tp_atr_multiplier != prev { changed = true; }
+            if self.tp_atr_multiplier != prev {
+                changed = true;
+            }
         }
 
         // ── 4. max_consecutive_losses: streak görülen maksimuma göre ayarla ──
@@ -305,11 +345,13 @@ impl AdaptiveTradeParams {
         }
 
         // ── 6. Ardışık SHORT kaybı — htf_block zorla aç ─────────────────────
-        if short_loss_streak >= self.short_loss_streak_pause && self.short_loss_streak_pause > 0
-            && !self.short_htf_block {
-                self.short_htf_block = true;
-                changed = true;
-            }
+        if short_loss_streak >= self.short_loss_streak_pause
+            && self.short_loss_streak_pause > 0
+            && !self.short_htf_block
+        {
+            self.short_htf_block = true;
+            changed = true;
+        }
         // SHORT streak temizlendi → htf_block geri kapat (win_rate makul ise)
         if short_loss_streak == 0 && win_rate > 40.0 && self.short_htf_block {
             self.short_htf_block = false;
@@ -392,7 +434,10 @@ mod tests {
 
     #[test]
     fn test_auto_adjust_tightens_on_low_win_rate() {
-        let mut p = AdaptiveTradeParams { adjust_every_n_trades: 20, ..Default::default() };
+        let mut p = AdaptiveTradeParams {
+            adjust_every_n_trades: 20,
+            ..Default::default()
+        };
         let prev_conf = p.futures_short_min_conf;
         p.auto_adjust(20, 5, 0, 1.0, 0, 0.0, "/tmp/adaptive_params_test.json");
         // win_rate = 25% < 30% → conf arttı

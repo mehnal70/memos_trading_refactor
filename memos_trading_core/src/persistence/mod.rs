@@ -19,15 +19,15 @@
 //! `PatternRepository` gibi trait'ler altında toplanacak — mock-based test yazımını
 //! kolaylaştırmak için.
 
+pub mod config;
 pub mod memory;
 pub mod reader;
 pub mod writer;
-pub mod config;
 
 // ── Yaygın kullanılan tipleri kolay erişim için re-export ────────────────────
-pub use memory::{DatabaseError, DatabaseEngine, MemoryDatabase};
 pub use crate::core::model::PositionModel as PortfolioPosition;
-pub use crate::core::model::{SymbolInfo, PaperTradingResult};
+pub use crate::core::model::{PaperTradingResult, SymbolInfo};
+pub use memory::{DatabaseEngine, DatabaseError, MemoryDatabase};
 pub use writer::DBWriter;
 
 /// Kanonik SQLite bağlantı açıcı — TÜM açılışlar buradan geçmeli (tek-nokta).

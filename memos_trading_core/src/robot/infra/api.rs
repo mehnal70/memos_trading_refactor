@@ -1,18 +1,18 @@
-    pub fn get_test_results() -> serde_json::Value {
-        use std::fs;
-        use std::path::Path;
-        let test_results_path = "../test_results.json";
-        if Path::new(test_results_path).exists() {
-            let data = fs::read_to_string(test_results_path).unwrap_or_else(|_| "[]".to_string());
-            serde_json::from_str(&data).unwrap_or_else(|_| serde_json::json!([]))
-        } else {
-            serde_json::json!([])
-        }
+pub fn get_test_results() -> serde_json::Value {
+    use std::fs;
+    use std::path::Path;
+    let test_results_path = "../test_results.json";
+    if Path::new(test_results_path).exists() {
+        let data = fs::read_to_string(test_results_path).unwrap_or_else(|_| "[]".to_string());
+        serde_json::from_str(&data).unwrap_or_else(|_| serde_json::json!([]))
+    } else {
+        serde_json::json!([])
     }
+}
 // robot/api.rs - REST/WS API/Servis Katmanı
 // Trade, portföy, sinyal, metrik, model ve kullanıcı işlemleri için endpointler
 
-use crate::core::types::{Trade, Signal};
+use crate::core::types::{Signal, Trade};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::robot::logic::portfolio::PortfolioMetrics;
 

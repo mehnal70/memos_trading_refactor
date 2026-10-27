@@ -1,0 +1,28 @@
+[Unit]
+Description=MT5 Self-Heal Runner (Memos)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=90
+WorkingDirectory=__REPO_DIR__
+ExecStart=/usr/bin/env bash __SCRIPT_PATH__ self-heal
+SuccessExitStatus=2
+Environment=MT5_SELF_HEAL_MAX_ATTEMPTS=1
+Environment=MT5_SELF_HEAL_POLICY=smart
+Environment=MT5_SELF_HEAL_REPAIR_MODE=auto
+Environment=MT5_SELF_HEAL_SOFT_WINDOW_UTC=21:10-21:35
+Environment=MT5_SELF_HEAL_FULL_WINDOW_UTC=21:35-21:45
+Environment=MT5_SELF_HEAL_REPAIR_DAYS_UTC=1,2,3,4,5,6,7
+Environment=MT5_SELF_HEAL_SOFT_DAYS_UTC=1,2,3,4,5,6,7
+Environment=MT5_SELF_HEAL_FULL_DAYS_UTC=2,5
+Environment=MT5_SELF_HEAL_REPAIR_COOLDOWN_SECS=21600
+Environment=MT5_SELF_HEAL_PORT_GUARD=1
+Environment=MT5_SELF_HEAL_AUTO_RESTART=0
+Environment=MT5_SELF_HEAL_RESTART_BUDGET=1
+Environment=MT5_SELF_HEAL_PORT_WAIT_SECS=20
+Environment=MT5_SELF_HEAL_FORCE_RESTART_ON_DEGRADED=0
+Environment=MT5_AUTO_REPAIR=0
+StandardOutput=append:__REPO_DIR__/logs/mt5-self-heal/systemd.log
+StandardError=append:__REPO_DIR__/logs/mt5-self-heal/systemd.log

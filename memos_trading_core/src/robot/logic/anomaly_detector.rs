@@ -12,8 +12,8 @@ pub struct AnomalyDetector {
 impl AnomalyDetector {
     #[inline]
     pub fn new() -> Self {
-        Self { 
-            blocked: Arc::new(AtomicBool::new(false)) 
+        Self {
+            blocked: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -27,7 +27,7 @@ impl AnomalyDetector {
 
             // Performans: Mesaj sadece bloklama gerçekleştiğinde oluşturulur (Allocation on demand)
             let msg = format!(
-                "Anomali tespit edildi: {} değeri {:.2} (eşik: {:.2})", 
+                "Anomali tespit edildi: {} değeri {:.2} (eşik: {:.2})",
                 event, value, threshold
             );
 
@@ -37,7 +37,7 @@ impl AnomalyDetector {
         }
     }
 
-    /// Sistem bloklu mu? 
+    /// Sistem bloklu mu?
     /// Acquire ordering, store edilen değerin tüm thread'lerde güncelliğini garanti eder.
     #[inline]
     pub fn is_blocked(&self) -> bool {

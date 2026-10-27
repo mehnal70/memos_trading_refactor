@@ -1,0 +1,11 @@
+[package]
+name = "memos_market_ibkr"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+memos_venue_api.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+async-trait = "0.1"

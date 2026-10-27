@@ -9,5 +9,5 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR" || exit 1
 # shellcheck source=scripts/lib_launchconf.sh
 . "$REPO_DIR/scripts/lib_launchconf.sh"
-load_launch_conf "$REPO_DIR/scripts/.launch.conf"
+load_launch_conf "${RTC_LAUNCH_CONF:-$REPO_DIR/scripts/.launch.conf}"
 exec "$@"

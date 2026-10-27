@@ -1,11 +1,11 @@
 // src/robot/data_pipeline/orchestrator.rs - Veri Akış Hattı Orkestratörü
 // Srivastava ATP - İşlevsel Çarklar Odası
 
-use crate::prelude::*;
 use super::cache::CandleCache;
-use super::synth::CandleSynth;
 use super::normalizer::DataNormalizer;
+use super::synth::CandleSynth;
 use super::validator::DataValidator;
+use crate::prelude::*;
 
 /// DataPipeline - Sistemin Veri Orkestratörü
 pub struct DataPipeline<'a> {
@@ -15,9 +15,9 @@ pub struct DataPipeline<'a> {
 
 impl<'a> DataPipeline<'a> {
     pub fn new(
-        max_size: usize, 
-        symbol: &str, 
-        callback: Box<dyn Fn(&Candle) + Send + Sync + 'a>
+        max_size: usize,
+        symbol: &str,
+        callback: Box<dyn Fn(&Candle) + Send + Sync + 'a>,
     ) -> Self {
         Self {
             cache: CandleCache::new(max_size),
@@ -28,21 +28,23 @@ impl<'a> DataPipeline<'a> {
     /// Senin belirttiğin HTF hiyerarşisi — Merkezi Otorite
     pub fn get_htf_interval(interval: &str) -> &'static str {
         match interval {
-            "1m" | "5m"   => "1h",
+            "1m" | "5m" => "1h",
             "15m" | "30m" => "4h",
-            "1h"          => "4h",
-            "4h" | "1d"   => "1d",
-            _             => "1d",
+            "1h" => "4h",
+            "4h" | "1d" => "1d",
+            _ => "1d",
         }
     }
 
     /// Tam Pipeline Akışı: Temizle -> Normalize Et -> Sentezle -> Önbelleğe Al
     /// Bu metod robotic_loop'taki veri işleme yükünü tamamen üzerine alır.
     pub fn process_tick(&mut self, incoming_1m: Vec<Candle>) -> Vec<Candle> {
-        if incoming_1m.is_empty() { return Vec::new(); }
+        if incoming_1m.is_empty() {
+            return Vec::new();
+        }
 
         // 1. Adım: Processor Mantığı (Temizle + Normalize + Valide)
-        // DataNormalizer::process_and_standardize hem temizliği hem normalizasyonu 
+        // DataNormalizer::process_and_standardize hem temizliği hem normalizasyonu
         // otonom birleştirir (Spike koruması dahil).
         let refined_1m = DataNormalizer::process_and_standardize(incoming_1m);
 
@@ -52,7 +54,11 @@ impl<'a> DataPipeline<'a> {
             // Validation: Sadece OHLC kurallarına uyan mumları içeri al
             if DataValidator::validate_ohlc(&candle).is_ok() {
                 self.cache.push_bulk(vec![candle.clone()]);
-                newly_formed.extend(self.synth.push_1m(&candle));
+                let formed = self.synth.push_1m(&candle);
+                if !formed.is_empty() {
+                    self.cache.push_synthesized(formed.clone());
+                    newly_formed.extend(formed);
+                }
             }
         }
 

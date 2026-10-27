@@ -19,9 +19,14 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR" || exit 1
 
 SESSION="${MEMOS_TUI_SESSION:-memos}"
-HEARTBEAT_LOG="logs/heartbeat.jsonl"
 ENGINE_PID_FILE="logs/.engine.pid"
 mkdir -p logs
+
+# Aktif profilin heartbeat dosyasini kullan; boylece status bayat root logunu okumaz.
+# shellcheck source=scripts/lib_launchconf.sh
+. "$REPO_DIR/scripts/lib_launchconf.sh" 2>/dev/null \
+    && load_launch_conf "$REPO_DIR/scripts/.launch.conf" 2>/dev/null || true
+HEARTBEAT_LOG="${HEARTBEAT_PATH:-logs/heartbeat.jsonl}"
 
 alive() { tmux has-session -t "$SESSION" 2>/dev/null; }
 
@@ -38,6 +43,14 @@ cmd_start() {
         exit 1
     fi
     if alive; then echo "ℹ️  TUI zaten çalışıyor (tmux '$SESSION'). 'attach' ya da 'restart'."; exit 0; fi
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        ss -ltn 2>/dev/null | grep -q ':9001' || break
+        sleep 1
+    done
+    if ss -ltn 2>/dev/null | grep -q ':9001'; then
+        echo "❌ MT5 bridge portu 9001 hâlâ kullanımda; yeni TUI başlatılmadı."
+        exit 1
+    fi
     # .launch.conf env'ini _engine_exec.sh içinden yükle → tmux oturumu interaktif çalıştırmayla
     # AYNI env'i alır (XS/graded/rejim ayarları daemon'da da geçerli). [[project_daemon_env_pending]]
     tmux new-session -d -s "$SESSION" "$REPO_DIR/scripts/_engine_exec.sh $REPO_DIR/$binary"

@@ -38,8 +38,7 @@ impl OpenPosition {
     pub fn update_price(&mut self, current_price: f64) {
         self.current_price = current_price;
         self.unrealized_pnl = (current_price - self.entry_price) * self.amount;
-        self.unrealized_pnl_pct = 
-            ((current_price - self.entry_price) / self.entry_price) * 100.0;
+        self.unrealized_pnl_pct = ((current_price - self.entry_price) / self.entry_price) * 100.0;
     }
 }
 
@@ -96,15 +95,15 @@ impl PaperTradingDashboard {
     pub fn add_trade(&mut self, trade: Trade) {
         self.state.last_trade = Some(trade.clone());
         self.trade_history.push(trade.clone());
-        
+
         // Trading metrics'i güncelle
         self.trading_metrics = TradingMetrics::from_trades(&self.trade_history);
-        
+
         // Balance güncelle
         if let Some(pnl) = trade.pnl {
             self.state.total_pnl += pnl;
         }
-        
+
         self.recalculate_metrics();
     }
 
@@ -171,8 +170,7 @@ impl PaperTradingDashboard {
     // Özel helpers
     fn recalculate_metrics(&mut self) {
         if self.state.initial_balance > 0.0 {
-            self.state.total_pnl_pct = 
-                (self.state.total_pnl / self.state.initial_balance) * 100.0;
+            self.state.total_pnl_pct = (self.state.total_pnl / self.state.initial_balance) * 100.0;
         }
         self.state.updated_at = Utc::now();
     }
@@ -223,7 +221,7 @@ mod tests {
     fn test_add_trade() {
         let mut dashboard = PaperTradingDashboard::new(10000.0);
         let trade = create_test_trade(Some(500.0));
-        
+
         dashboard.add_trade(trade);
         assert_eq!(dashboard.trade_history.len(), 1);
         assert_eq!(dashboard.state.total_pnl, 500.0);
@@ -234,7 +232,7 @@ mod tests {
     fn test_dashboard_json_conversion() {
         let mut dashboard = PaperTradingDashboard::new(10000.0);
         dashboard.add_trade(create_test_trade(Some(200.0)));
-        
+
         let json_data = dashboard.to_json_data();
         assert_eq!(json_data.initial_balance, 10000.0);
         assert_eq!(json_data.total_trades, 1);

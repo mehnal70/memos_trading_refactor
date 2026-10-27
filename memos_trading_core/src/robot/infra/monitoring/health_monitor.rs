@@ -118,11 +118,16 @@ impl AnomalyDetector for RobotHealthMonitor {
             return Some(AnomalyType::Custom("Döngü Kesintisi".to_string()));
         }
         if self.error_count > 10 {
-            return Some(AnomalyType::Custom(format!("Kritik Hata Seviyesi: {}", self.error_count)));
+            return Some(AnomalyType::Custom(format!(
+                "Kritik Hata Seviyesi: {}",
+                self.error_count
+            )));
         }
         if let Some(err) = &self.last_error {
             if err.contains("RateLimit") || err.contains("429") {
-                return Some(AnomalyType::Custom("Borsa Kısıtlaması (Rate Limit)".to_string()));
+                return Some(AnomalyType::Custom(
+                    "Borsa Kısıtlaması (Rate Limit)".to_string(),
+                ));
             }
         }
         None

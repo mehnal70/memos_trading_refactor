@@ -29,7 +29,10 @@ impl Engine {
     /// sinyali + bar-başına kadans (rebalance_min_bars=1) ile çağırır. Mod kapalı/sepet yetersiz → no-op.
     pub(crate) async fn process_xs_book(state: &Arc<Mutex<AppState>>) {
         let (cfg, tuning, db_path, lookback, closed_only) = {
-            let st = match state.lock() { Ok(s) => s, Err(_) => return };
+            let st = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
             let xs = match st.brain.parameters.read().ok().map(|p| p.xs_live.clone()) {
                 Some(x) if x.enabled && x.top_k >= 1 && x.symbols.len() >= 2 * x.top_k => x,
                 _ => return,
@@ -50,8 +53,13 @@ impl Engine {
                 tp_cooldown_secs: xs.tp_cooldown_secs,
                 rebalance_min_bars: 1, // momentum: bar-başına (bar-içi rank churn'ü kapanır)
             };
-            (cfg, Arc::clone(&st.tuning), st.config.db_path.clone(),
-             xs.lookback, st.tuning.signal_closed_bar_only)
+            (
+                cfg,
+                Arc::clone(&st.tuning),
+                st.config.db_path.clone(),
+                xs.lookback,
+                st.tuning.signal_closed_bar_only,
+            )
         };
 
         let interval_secs =
@@ -63,8 +71,14 @@ impl Engine {
         };
 
         Self::process_book(
-            state, &cfg, super::book_core::BookKind::Momentum, &tuning, &db_path, signal_source,
-        ).await;
+            state,
+            &cfg,
+            super::book_core::BookKind::Momentum,
+            &tuning,
+            &db_path,
+            signal_source,
+        )
+        .await;
     }
 }
 
@@ -72,14 +86,19 @@ impl Engine {
 /// blend_live ORTAK kullanır (DRY) → tek-kaynak momentum sinyali. Skoru olmayan sembol vec'e girmez.
 pub(crate) fn momentum_signals(
     candles_map: &std::collections::HashMap<String, Vec<Candle>>,
-    interval_secs: i64, closed_only: bool, lookback: usize,
+    interval_secs: i64,
+    closed_only: bool,
+    lookback: usize,
 ) -> Vec<(String, f64)> {
     let now = chrono::Utc::now();
-    candles_map.iter().filter_map(|(sym, c)| {
-        let sig_c = super::loop_core::closed_bar_window(c, interval_secs, closed_only, now);
-        let closes: Vec<f64> = sig_c.iter().map(|k| k.close).collect();
-        latest_signal(&closes, lookback).map(|s| (sym.clone(), s))
-    }).collect()
+    candles_map
+        .iter()
+        .filter_map(|(sym, c)| {
+            let sig_c = super::loop_core::closed_bar_window(c, interval_secs, closed_only, now);
+            let closes: Vec<f64> = sig_c.iter().map(|k| k.close).collect();
+            latest_signal(&closes, lookback).map(|s| (sym.clone(), s))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -89,6 +108,10 @@ mod xs_live_tests {
     #[test]
     fn latest_signal_basic() {
         assert!((latest_signal(&[100.0, 110.0, 121.0], 2).unwrap() - 0.21).abs() < 1e-9); // 121/100−1
-        assert_eq!(latest_signal(&[100.0, 110.0], 5), None, "yetersiz mum → None");
+        assert_eq!(
+            latest_signal(&[100.0, 110.0], 5),
+            None,
+            "yetersiz mum → None"
+        );
     }
 }

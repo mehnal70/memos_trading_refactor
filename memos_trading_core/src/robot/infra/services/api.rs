@@ -1,4 +1,6 @@
-use crate::robot::infra::monitoring::health_monitor::{HealthCheck, AnomalyDetector, HealthStatus, AnomalyType};
+use crate::robot::infra::monitoring::health_monitor::{
+    AnomalyDetector, AnomalyType, HealthCheck, HealthStatus,
+};
 
 pub struct APIHealthMonitor {
     pub last_status_code: Option<u16>,
@@ -16,9 +18,7 @@ impl HealthCheck for APIHealthMonitor {
             (Some(code @ 400..=499), _) => {
                 HealthStatus::Warning(format!("API istemci hatası: {}", code))
             }
-            (None, _) => {
-                HealthStatus::Warning("API yanıtı yok".to_string())
-            }
+            (None, _) => HealthStatus::Warning("API yanıtı yok".to_string()),
             // Diğer durumlar (2xx, 3xx vb.)
             _ => HealthStatus::Healthy,
         }
@@ -31,12 +31,13 @@ impl AnomalyDetector for APIHealthMonitor {
             // Durum kodu hatası varsa öncelikli olarak onu dön
             (Some(code @ 400..=599), _) => {
                 let prefix = if code >= 500 { "Sunucu" } else { "İstemci" };
-                Some(AnomalyType::ApiError(format!("{} hatası: {}", prefix, code)))
+                Some(AnomalyType::ApiError(format!(
+                    "{} hatası: {}",
+                    prefix, code
+                )))
             }
             // Durum kodu hatası yok ama spesifik bir hata metni varsa onu dön
-            (_, Some(err)) => {
-                Some(AnomalyType::ApiError(err.clone()))
-            }
+            (_, Some(err)) => Some(AnomalyType::ApiError(err.clone())),
             // Her şey normal
             _ => None,
         }

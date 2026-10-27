@@ -1,0 +1,25 @@
+# Venue-local engine template.
+#
+# Prepare and start one venue explicitly:
+#   systemctl --user enable --now memos-venue-engine@binance.service
+#   systemctl --user enable --now memos-venue-watchdog@binance.service
+#
+# Do not enable this template while the legacy memos-watchdog.service owns the
+# same rtc_headless process.
+
+[Unit]
+Description=Memos %i Venue Engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/memos/PycharmProjects/memos_trading_refactor
+ExecStart=/home/memos/PycharmProjects/memos_trading_refactor/scripts/venue_engine.sh run %i
+ExecStopPost=/usr/bin/rm -f /home/memos/PycharmProjects/memos_trading_refactor/logs/.venue-runtime/state/%i.engine.pid
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

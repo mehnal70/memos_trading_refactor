@@ -8,8 +8,8 @@
 // ÖNCELİKLE bayatlık + min-satır üzerinedir; gap eşiği gevşek default'lu (operatör
 // Faz 2 sonrası sıkabilir). Eşikler RuntimeTuning'den (env-ayarlı, [[feedback_config_externalization]]).
 
-use crate::core::types::Candle;
 use super::normalizer::DataNormalizer;
+use crate::core::types::Candle;
 
 /// Bir (sembol,interval,market) serisinin sağlık metrikleri.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -38,28 +38,39 @@ impl CandleHealth {
     pub fn from_candles(candles: &[Candle], interval: &str) -> Self {
         let rows = candles.len();
         if rows == 0 {
-            return Self { rows: 0, gap_pct: 100.0, stale_secs: i64::MAX };
+            return Self {
+                rows: 0,
+                gap_pct: 100.0,
+                stale_secs: i64::MAX,
+            };
         }
         let sec = DataNormalizer::parse_interval(interval).max(1) as i64;
-        let first = candles.first().map(|c| c.timestamp.timestamp()).unwrap_or(0);
+        let first = candles
+            .first()
+            .map(|c| c.timestamp.timestamp())
+            .unwrap_or(0);
         let last = candles.last().map(|c| c.timestamp.timestamp()).unwrap_or(0);
         let span = (last - first).max(0);
         let expected = (span / sec) + 1;
         let gap_pct = if expected > 0 {
             (1.0 - rows as f64 / expected as f64).clamp(0.0, 1.0) * 100.0
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let now = crate::core::time::now_epoch_secs() as i64;
         let stale_secs = (now - last).max(0);
-        Self { rows, gap_pct, stale_secs }
+        Self {
+            rows,
+            gap_pct,
+            stale_secs,
+        }
     }
 
     /// Kapı verdiği: tüm eşikleri geçiyor mu (rows ≥ min, gap ≤ max, stale ≤ N×interval).
     pub fn is_healthy(&self, th: &HealthThresholds, interval: &str) -> bool {
         let sec = DataNormalizer::parse_interval(interval).max(1) as i64;
         let max_stale = (th.max_stale_bars as i64).saturating_mul(sec);
-        self.rows >= th.min_rows
-            && self.gap_pct <= th.max_gap_pct
-            && self.stale_secs <= max_stale
+        self.rows >= th.min_rows && self.gap_pct <= th.max_gap_pct && self.stale_secs <= max_stale
     }
 }
 
@@ -71,14 +82,21 @@ mod tests {
     fn series(n: usize, interval_secs: i64, last_age_secs: i64) -> Vec<Candle> {
         let now = crate::core::time::now_epoch_secs() as i64;
         let last = now - last_age_secs;
-        (0..n).map(|i| {
-            let ts = last - (n as i64 - 1 - i as i64) * interval_secs;
-            Candle {
-                timestamp: Utc.timestamp_opt(ts, 0).single().unwrap(),
-                open: 1.0, high: 1.0, low: 1.0, close: 1.0, volume: 1.0,
-                symbol: "T".into(), interval: "1h".into(),
-            }
-        }).collect()
+        (0..n)
+            .map(|i| {
+                let ts = last - (n as i64 - 1 - i as i64) * interval_secs;
+                Candle {
+                    timestamp: Utc.timestamp_opt(ts, 0).single().unwrap(),
+                    open: 1.0,
+                    high: 1.0,
+                    low: 1.0,
+                    close: 1.0,
+                    volume: 1.0,
+                    symbol: "T".into(),
+                    interval: "1h".into(),
+                }
+            })
+            .collect()
     }
 
     #[test]
@@ -87,7 +105,11 @@ mod tests {
         let h = CandleHealth::from_candles(&c, "1h");
         assert_eq!(h.rows, 200);
         assert!(h.gap_pct < 1.0, "gapsiz → ~%0, gerçek {}", h.gap_pct);
-        let th = HealthThresholds { min_rows: 100, max_gap_pct: 90.0, max_stale_bars: 10 };
+        let th = HealthThresholds {
+            min_rows: 100,
+            max_gap_pct: 90.0,
+            max_stale_bars: 10,
+        };
         assert!(h.is_healthy(&th, "1h"));
     }
 
@@ -96,15 +118,27 @@ mod tests {
         // Son bar 50 bar-yaşında (50h) → max_stale_bars=10 eşiğini geçemez.
         let c = series(200, 3600, 50 * 3600);
         let h = CandleHealth::from_candles(&c, "1h");
-        let th = HealthThresholds { min_rows: 100, max_gap_pct: 90.0, max_stale_bars: 10 };
-        assert!(!h.is_healthy(&th, "1h"), "bayat seri reddedilmeli (stale={}s)", h.stale_secs);
+        let th = HealthThresholds {
+            min_rows: 100,
+            max_gap_pct: 90.0,
+            max_stale_bars: 10,
+        };
+        assert!(
+            !h.is_healthy(&th, "1h"),
+            "bayat seri reddedilmeli (stale={}s)",
+            h.stale_secs
+        );
     }
 
     #[test]
     fn sparse_series_rejected() {
         let c = series(30, 3600, 0); // 30 bar < min 100
         let h = CandleHealth::from_candles(&c, "1h");
-        let th = HealthThresholds { min_rows: 100, max_gap_pct: 90.0, max_stale_bars: 10 };
+        let th = HealthThresholds {
+            min_rows: 100,
+            max_gap_pct: 90.0,
+            max_stale_bars: 10,
+        };
         assert!(!h.is_healthy(&th, "1h"));
     }
 
@@ -113,7 +147,11 @@ mod tests {
         let h = CandleHealth::from_candles(&[], "1h");
         assert_eq!(h.rows, 0);
         assert_eq!(h.stale_secs, i64::MAX);
-        let th = HealthThresholds { min_rows: 1, max_gap_pct: 100.0, max_stale_bars: u64::MAX };
+        let th = HealthThresholds {
+            min_rows: 1,
+            max_gap_pct: 100.0,
+            max_stale_bars: u64::MAX,
+        };
         assert!(!h.is_healthy(&th, "1h"));
     }
 }

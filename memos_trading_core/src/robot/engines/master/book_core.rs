@@ -53,7 +53,8 @@ impl BookKind {
     }
     /// Portföy-düzeyi devre kesici / take-profit cooldown'u (bu kitaba özel state alanı).
     fn cb_lock<'a>(
-        &self, fin: &'a crate::robot::robotic_loop::FinanceVault,
+        &self,
+        fin: &'a crate::robot::robotic_loop::FinanceVault,
     ) -> &'a std::sync::RwLock<Option<std::time::Instant>> {
         match self {
             BookKind::Momentum => &fin.xs_circuit_breaker_until,
@@ -63,7 +64,8 @@ impl BookKind {
     }
     /// Son rank-rebalance edilen bar (bu kitaba özel state alanı) — kadans kapısı bununla sayar.
     fn bar_lock<'a>(
-        &self, fin: &'a crate::robot::robotic_loop::FinanceVault,
+        &self,
+        fin: &'a crate::robot::robotic_loop::FinanceVault,
     ) -> &'a std::sync::RwLock<Option<chrono::DateTime<chrono::Utc>>> {
         match self {
             BookKind::Momentum => &fin.xs_last_rebalance_bar,
@@ -145,7 +147,9 @@ pub(crate) fn book_drawdown_pct(open_pnl_sum: f64, equity: f64) -> f64 {
 /// SAF: iki bar-zaman-damgası arası geçen TAM bar sayısı (kadans kapısı için). interval_secs<=0 →
 /// farklıysa 1, aynıysa 0 (interval bilinmiyorsa "bir bar farkı" yeterli). Testli.
 pub(crate) fn bars_between(
-    cur: chrono::DateTime<chrono::Utc>, last: chrono::DateTime<chrono::Utc>, interval_secs: i64,
+    cur: chrono::DateTime<chrono::Utc>,
+    last: chrono::DateTime<chrono::Utc>,
+    interval_secs: i64,
 ) -> i64 {
     if interval_secs <= 0 {
         return if cur != last { 1 } else { 0 };
@@ -174,7 +178,10 @@ pub(crate) fn zscore_map(raw: &[(String, f64)]) -> HashMap<String, f64> {
 /// olan semboller döner (eksik faktör → harman tanımsız). Tek market-nötr kitap için sıralanabilir skor.
 /// Doğrulanmış optimal carry-ağırlıklı (w_carry≈0.6). [[project_funding_carry]] Testli.
 pub(crate) fn blend_zscores(
-    mom: &[(String, f64)], carry: &[(String, f64)], w_mom: f64, w_carry: f64,
+    mom: &[(String, f64)],
+    carry: &[(String, f64)],
+    w_mom: f64,
+    w_carry: f64,
 ) -> Vec<(String, f64)> {
     let zm = zscore_map(mom);
     let zc = zscore_map(carry);
@@ -191,7 +198,9 @@ pub(crate) fn blend_zscores(
 /// Hedefle aynı yön → no-op (tut). Yön değişimi → Close (flat) ya da Close+Open (flip). Kapanışlar
 /// listede AÇILIŞLARDAN ÖNCE gelir → flip'te önce kapat sonra aç (infaz bu sırayı korur).
 pub(crate) fn plan_actions(
-    longs: &[String], shorts: &[String], current: &HashMap<String, bool>,
+    longs: &[String],
+    shorts: &[String],
+    current: &HashMap<String, bool>,
 ) -> Vec<BookAction> {
     let long_set: HashSet<&String> = longs.iter().collect();
     let short_set: HashSet<&String> = shorts.iter().collect();
@@ -237,12 +246,17 @@ impl Engine {
         F: Fn(&HashMap<String, Vec<Candle>>) -> Vec<(String, f64)>,
     {
         let label = kind.label();
+        if let Ok(mut st) = state.lock() {
+            Self::bump_indicator_counters(&mut st, kind.tag(), "book_cycle_seen");
+        }
         let interval_secs =
             crate::robot::data_pipeline::DataNormalizer::parse_interval(&cfg.interval) as i64;
         // 🧊 STALE-FEED KAPISI: bayat-mumlu sembolü kitaba SOKMA (phantom-giriş koruması). Eşik
         // interval-farkında auto=2×bar (effective_stale_feed_age DRY); 0 → kapalı. [[project_stale_feed_gate]]
-        let stale_bound =
-            super::loop_core::effective_stale_feed_age(tuning.stale_feed_max_age_secs, interval_secs);
+        let stale_bound = super::loop_core::effective_stale_feed_age(
+            tuning.stale_feed_max_age_secs,
+            interval_secs,
+        );
 
         // 1) sepet sembollerinin son mumlarını yükle (eligibility + stale-feed kapısından geçenler) →
         // candles_map (TAM mum: fiyat referansı + execution + cur_bar + regime proxy). Sonra kesitsel
@@ -269,32 +283,72 @@ impl Engine {
         }
         let signals: Vec<(String, f64)> = signal_source(&candles_map);
         if signals.len() < 2 * cfg.top_k {
+            if let Ok(mut st) = state.lock() {
+                Self::bump_indicator_counters(&mut st, kind.tag(), "gated_insufficient_universe");
+            }
             log::debug!("📐 {}: yetersiz sinyal ({}/{} sembol geçerli, ≥{} gerek; interval={} lookback={}) → pas",
                 label, signals.len(), cfg.symbols.len(), 2 * cfg.top_k, cfg.interval, cfg.lookback);
             return;
         }
+        if let Ok(mut st) = state.lock() {
+            Self::bump_indicator_counters(&mut st, kind.tag(), "used");
+        }
 
         // 2) mevcut kitap + DEVRE KESİCİ girdileri (tek lock): açık pozisyon yönleri, açık bacakların
         //    toplam realize-olmamış PnL'i (mark-to-market), equity ve cooldown durumu.
-        let (current, open_pnl_sum, equity, cb_until): (HashMap<String, bool>, f64, f64, Option<std::time::Instant>) = {
-            let st = match state.lock() { Ok(s) => s, Err(_) => return };
-            let (cur, pnl) = st.finance.live_positions.read().ok()
+        let (current, open_pnl_sum, equity, cb_until): (
+            HashMap<String, bool>,
+            f64,
+            f64,
+            Option<std::time::Instant>,
+        ) = {
+            let st = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let (cur, pnl) = st
+                .finance
+                .live_positions
+                .read()
+                .ok()
                 .map(|p| {
-                    let cur: HashMap<String, bool> = cfg.symbols.iter()
-                        .filter_map(|s| p.get(s).map(|m| (s.clone(), m.is_long))).collect();
-                    let pnl: f64 = cfg.symbols.iter().filter_map(|s| p.get(s)).map(|m| m.calculate_pnl()).sum();
+                    let cur: HashMap<String, bool> = cfg
+                        .symbols
+                        .iter()
+                        .filter_map(|s| p.get(s).map(|m| (s.clone(), m.is_long)))
+                        .collect();
+                    let pnl: f64 = cfg
+                        .symbols
+                        .iter()
+                        .filter_map(|s| p.get(s))
+                        .map(|m| m.calculate_pnl())
+                        .sum();
                     (cur, pnl)
                 })
                 .unwrap_or_default();
             let cb_until = kind.cb_lock(&st.finance).read().ok().and_then(|c| *c);
             (cur, pnl, st.finance.equity, cb_until)
         };
-        let prev_long: HashSet<String> = current.iter().filter(|(_, l)| **l).map(|(s, _)| s.clone()).collect();
-        let prev_short: HashSet<String> = current.iter().filter(|(_, l)| !**l).map(|(s, _)| s.clone()).collect();
+        let prev_long: HashSet<String> = current
+            .iter()
+            .filter(|(_, l)| **l)
+            .map(|(s, _)| s.clone())
+            .collect();
+        let prev_short: HashSet<String> = current
+            .iter()
+            .filter(|(_, l)| !**l)
+            .map(|(s, _)| s.clone())
+            .collect();
 
         // 3) hedef kitap (backtest çekirdeği ile DRY) + saf aksiyon planı.
         let (mut longs, mut shorts) = crate::robot::backtester::xs_target_book(
-            &signals, cfg.top_k, cfg.exit_buffer, cfg.momentum, &prev_long, &prev_short);
+            &signals,
+            cfg.top_k,
+            cfg.exit_buffer,
+            cfg.momentum,
+            &prev_long,
+            &prev_short,
+        );
 
         // PORTFÖY-DÜZEYİ DEVRE KESİCİ (per-bacak stop YERİNE — bacak stopu market-nötr yapıyı bozar):
         // açık kitabın toplam realize-olmamış zararı equity'nin max_drawdown_pct'ini aşarsa TÜM kitabı
@@ -303,15 +357,22 @@ impl Engine {
         let in_cb_cooldown = cb_until.map(|u| cb_now < u).unwrap_or(false);
         let dd_pct = book_drawdown_pct(open_pnl_sum, equity);
         if cfg.max_drawdown_pct > 0.0 && dd_pct <= -cfg.max_drawdown_pct {
+            if let Ok(mut st) = state.lock() {
+                Self::bump_indicator_counters(&mut st, kind.tag(), "gated_portfolio_drawdown");
+            }
             if let Ok(st) = state.lock() {
                 if let Ok(mut cb) = kind.cb_lock(&st.finance).write() {
                     *cb = Some(cb_now + std::time::Duration::from_secs(cfg.cb_cooldown_secs));
                 }
                 if let Some(n) = st.notifier.as_ref() {
-                    n.notify(kind.cb_notify_key(),
+                    n.notify(
+                        kind.cb_notify_key(),
                         crate::robot::infra::telegram_notifier::Severity::Critical,
-                        &format!("🔌 {} DEVRE KESİCİ: kitap DD %{:.2} → FLAT + {}sn cooldown",
-                            label, dd_pct, cfg.cb_cooldown_secs));
+                        &format!(
+                            "🔌 {} DEVRE KESİCİ: kitap DD %{:.2} → FLAT + {}sn cooldown",
+                            label, dd_pct, cfg.cb_cooldown_secs
+                        ),
+                    );
                 }
             }
             let msg = format!(
@@ -322,10 +383,16 @@ impl Engine {
             longs.clear();
             shorts.clear();
         } else if in_cb_cooldown {
+            if let Ok(mut st) = state.lock() {
+                Self::bump_indicator_counters(&mut st, kind.tag(), "gated_circuit_cooldown");
+            }
             // Cooldown sürüyor → kitabı flat tut (felaket/kâr-al sonrası aceleci yeniden-giriş churn'ü önlenir).
             longs.clear();
             shorts.clear();
         } else if cfg.take_profit_pct > 0.0 && dd_pct >= cfg.take_profit_pct {
+            if let Ok(mut st) = state.lock() {
+                Self::bump_indicator_counters(&mut st, kind.tag(), "gated_take_profit_realize");
+            }
             // 💰 PORTFÖY-DÜZEYİ TAKE-PROFIT (devre kesicinin KÂR-tarafı simetrik ikizi). [[project_xs_momentum]]
             if let Ok(st) = state.lock() {
                 if let Ok(mut cb) = kind.cb_lock(&st.finance).write() {
@@ -350,12 +417,23 @@ impl Engine {
         // REJİM-GATE: market bellwether'ı (BTC, yoksa en derin sepet serisi) Volatile ise kitabı FLAT'a
         // çek. Tek-kaynak classify_regime [[feedback_autonomy_first]].
         if cfg.regime_gate {
-            let proxy = candles_map.get("BTCUSDT")
+            let proxy = candles_map
+                .get("BTCUSDT")
                 .or_else(|| candles_map.values().max_by_key(|c| c.len()));
             if let Some(pc) = proxy {
                 if regime_blocks_book(Self::classify_regime(pc)) {
+                    if let Ok(mut st) = state.lock() {
+                        Self::bump_indicator_counters(
+                            &mut st,
+                            kind.tag(),
+                            "gated_regime_volatility",
+                        );
+                    }
                     if !longs.is_empty() || !shorts.is_empty() {
-                        log::info!("📐 {} REJİM-GATE: Volatile → kitap FLAT'a çekiliyor (kriz koruması)", label);
+                        log::info!(
+                            "📐 {} REJİM-GATE: Volatile → kitap FLAT'a çekiliyor (kriz koruması)",
+                            label
+                        );
                     }
                     longs.clear();
                     shorts.clear();
@@ -368,19 +446,27 @@ impl Engine {
         // iki-haftalık turnover (fee'ye dayanıklı). FORCE-FLAT (devre-kesici/rejim-gate/cooldown → kitap
         // boş) MUAF: hızlı felaket freni responsive kalmalı; bar da işaretlenmez → koruma kalkınca kitap
         // anında yeniden kurulur. [[project_xs_momentum]] [[project_funding_carry]]
-        let cur_bar = candles_map.values().filter_map(|c| c.last()).map(|k| k.timestamp).max();
+        let cur_bar = candles_map
+            .values()
+            .filter_map(|c| c.last())
+            .map(|k| k.timestamp)
+            .max();
         let forced_flat = longs.is_empty() && shorts.is_empty();
         if !forced_flat {
             let skip = match state.lock() {
                 Ok(st) => {
                     let last = kind.bar_lock(&st.finance).read().ok().and_then(|b| *b);
                     let due = match (cur_bar, last) {
-                        (Some(cur), Some(l)) => bars_between(cur, l, interval_secs) >= cfg.rebalance_min_bars as i64,
-                        (Some(_), None) => true,  // henüz hiç rebalance yok → kur
-                        (None, _) => false,       // mevcut bar yok → kitabı tut (rebalance edemeyiz)
+                        (Some(cur), Some(l)) => {
+                            bars_between(cur, l, interval_secs) >= cfg.rebalance_min_bars as i64
+                        }
+                        (Some(_), None) => true, // henüz hiç rebalance yok → kur
+                        (None, _) => false,      // mevcut bar yok → kitabı tut (rebalance edemeyiz)
                     };
                     if due {
-                        if let Ok(mut b) = kind.bar_lock(&st.finance).write() { *b = cur_bar; }
+                        if let Ok(mut b) = kind.bar_lock(&st.finance).write() {
+                            *b = cur_bar;
+                        }
                         false
                     } else {
                         true
@@ -389,38 +475,97 @@ impl Engine {
                 Err(_) => return,
             };
             if skip {
+                if let Ok(mut st) = state.lock() {
+                    Self::bump_indicator_counters(&mut st, kind.tag(), "gated_rebalance_cadence");
+                }
                 return; // kadans dolmadı → kitabı tut (bar-içi/erken rebalance churn'ü yok)
             }
         }
 
         let actions = plan_actions(&longs, &shorts, &current);
         if actions.is_empty() {
+            if let Ok(mut st) = state.lock() {
+                Self::bump_indicator_counters(&mut st, kind.tag(), "book_target_hold");
+            }
             return; // kitap zaten hedefte (no-trade band churn'ü emdi) → işlem yok
         }
+        if let Ok(mut st) = state.lock() {
+            Self::bump_indicator_counter_by(
+                &mut st,
+                kind.tag(),
+                "rebalance_actions",
+                actions.len() as u64,
+            );
+        }
         // Panel + DOSYA logu: operatör `grep "{label} rebalance"` ile her rebalance'ın kitabını izleyebilsin.
-        push_state_log(state, format!(
-            "📐 {} rebalance: long={:?} short={:?} → {} aksiyon", label, longs, shorts, actions.len()));
-        log::info!("📐 {} rebalance: long={:?} short={:?} → {} aksiyon", label, longs, shorts, actions.len());
+        push_state_log(
+            state,
+            format!(
+                "📐 {} rebalance: long={:?} short={:?} → {} aksiyon",
+                label,
+                longs,
+                shorts,
+                actions.len()
+            ),
+        );
+        log::info!(
+            "📐 {} rebalance: long={:?} short={:?} → {} aksiyon",
+            label,
+            longs,
+            shorts,
+            actions.len()
+        );
 
         // 4) infaz: önce kapanışlar (flat/flip), sonra açılışlar (plan bu sırada). Eşit-ağırlık alloc +
         //    sabit kaldıraç override (BookSizing). reentry_cooldown flip'i bir cycle geciktirebilir (kabul).
-        let sizing = BookSizing { alloc_frac: cfg.position_pct, leverage: cfg.leverage };
+        let sizing = BookSizing {
+            alloc_frac: cfg.position_pct,
+            leverage: cfg.leverage,
+        };
         let tag = kind.tag();
         for act in actions {
             match act {
                 BookAction::Close(sym) => {
                     if let Some(c) = candles_map.get(&sym) {
-                        Self::close_paper_position(state, &sym, c, ExitReason::StrategySignal).await;
+                        if let Ok(mut st) = state.lock() {
+                            Self::bump_indicator_counters(&mut st, kind.tag(), "close_rebalance");
+                        }
+                        Self::close_paper_position(state, &sym, c, ExitReason::StrategySignal)
+                            .await;
                     }
                 }
                 BookAction::OpenLong(sym) => {
                     if let Some(c) = candles_map.get(&sym) {
-                        Self::open_paper_position(state, &sym, &crate::core::types::Signal::Buy, c, tag, None, Some(sizing)).await;
+                        if let Ok(mut st) = state.lock() {
+                            Self::bump_indicator_counters(&mut st, kind.tag(), "entry_attempt");
+                        }
+                        Self::open_paper_position(
+                            state,
+                            &sym,
+                            &crate::core::types::Signal::Buy,
+                            c,
+                            tag,
+                            None,
+                            Some(sizing),
+                        )
+                        .await;
                     }
                 }
                 BookAction::OpenShort(sym) => {
                     if let Some(c) = candles_map.get(&sym) {
-                        Self::open_paper_position(state, &sym, &crate::core::types::Signal::Sell, c, tag, None, Some(sizing)).await;
+                        if let Ok(mut st) = state.lock() {
+                            Self::bump_indicator_counters(&mut st, kind.tag(), "entry_attempt");
+                        }
+                        Self::open_paper_position(
+                            state,
+                            &sym,
+                            &crate::core::types::Signal::Sell,
+                            c,
+                            tag,
+                            None,
+                            Some(sizing),
+                        )
+                        .await;
                     }
                 }
             }
@@ -435,8 +580,19 @@ mod book_core_tests {
     #[test]
     fn regime_gate_blocks_only_high_volatility() {
         use crate::evolution::MarketRegime::*;
-        assert!(regime_blocks_book(HighVolatility), "kriz/yüksek-vol → kitap flat");
-        for r in [StrongUptrend, WeakUptrend, Ranging, WeakDowntrend, StrongDowntrend, LowVolatility, Unknown] {
+        assert!(
+            regime_blocks_book(HighVolatility),
+            "kriz/yüksek-vol → kitap flat"
+        );
+        for r in [
+            StrongUptrend,
+            WeakUptrend,
+            Ranging,
+            WeakDowntrend,
+            StrongDowntrend,
+            LowVolatility,
+            Unknown,
+        ] {
             assert!(!regime_blocks_book(r), "{:?} → kitap normal işler", r);
         }
     }
@@ -444,23 +600,48 @@ mod book_core_tests {
     #[test]
     fn book_managed_tag_recognizes_all_books_and_rejects_general() {
         // Üç kitap tag'i de book-yönetimli → genel exit yolu DOKUNMAZ.
-        assert!(is_book_managed_tag(super::super::xs_live::XS_STRATEGY_TAG));      // XS_MOMENTUM
-        assert!(is_book_managed_tag(super::super::carry_live::CARRY_STRATEGY_TAG)); // FUNDING_CARRY
-        assert!(is_book_managed_tag(super::super::blend_live::BLEND_STRATEGY_TAG)); // BLEND_FACTOR
+        assert!(is_book_managed_tag(super::super::xs_live::XS_STRATEGY_TAG)); // XS_MOMENTUM
+        assert!(is_book_managed_tag(
+            super::super::carry_live::CARRY_STRATEGY_TAG
+        )); // FUNDING_CARRY
+        assert!(is_book_managed_tag(
+            super::super::blend_live::BLEND_STRATEGY_TAG
+        )); // BLEND_FACTOR
         assert!(is_book_managed_tag("XS_MOMENTUM"));
         assert!(is_book_managed_tag("FUNDING_CARRY"));
         assert!(is_book_managed_tag("BLEND_FACTOR"));
         // Genel strateji etiketleri book DEĞİL → normal SL/TP/trailing exit uygulanır.
-        for s in ["SUPERTREND", "RSI", "MACD", "SCALP_BUY", "SWING_SELL", "default", ""] {
-            assert!(!is_book_managed_tag(s), "{s} genel strateji, book-yönetimli olmamalı");
+        for s in [
+            "SUPERTREND",
+            "RSI",
+            "MACD",
+            "SCALP_BUY",
+            "SWING_SELL",
+            "default",
+            "",
+        ] {
+            assert!(
+                !is_book_managed_tag(s),
+                "{s} genel strateji, book-yönetimli olmamalı"
+            );
         }
     }
 
     #[test]
     fn book_drawdown_pct_basic() {
-        assert!((book_drawdown_pct(-500.0, 10_000.0) - (-5.0)).abs() < 1e-9, "−$500/$10k = −%5");
-        assert!((book_drawdown_pct(200.0, 10_000.0) - 2.0).abs() < 1e-9, "+$200/$10k = +%2");
-        assert_eq!(book_drawdown_pct(-100.0, 0.0), 0.0, "equity 0 → bölme koruması");
+        assert!(
+            (book_drawdown_pct(-500.0, 10_000.0) - (-5.0)).abs() < 1e-9,
+            "−$500/$10k = −%5"
+        );
+        assert!(
+            (book_drawdown_pct(200.0, 10_000.0) - 2.0).abs() < 1e-9,
+            "+$200/$10k = +%2"
+        );
+        assert_eq!(
+            book_drawdown_pct(-100.0, 0.0),
+            0.0,
+            "equity 0 → bölme koruması"
+        );
         let dd = book_drawdown_pct(-800.0, 10_000.0); // −%8
         assert!(dd <= -5.0, "−%8, −%5 eşiğini tetiklemeli");
         assert!(!(dd <= -10.0), "−%8, −%10 eşiğini tetiklememeli");
@@ -479,10 +660,19 @@ mod book_core_tests {
         assert_eq!(bars_between(t0, t0, day), 0, "aynı bar → 0");
         assert_eq!(bars_between(t14, t0, day), 14, "14 gün → 14 bar");
         // Carry kadansı (min 14): 13 < 14 → henüz değil, 14 ≥ 14 → due.
-        assert!(bars_between(t13, t0, day) < 14, "13 bar carry kadansını doldurmaz");
-        assert!(bars_between(t14, t0, day) >= 14, "14 bar carry kadansını doldurur");
+        assert!(
+            bars_between(t13, t0, day) < 14,
+            "13 bar carry kadansını doldurmaz"
+        );
+        assert!(
+            bars_between(t14, t0, day) >= 14,
+            "14 bar carry kadansını doldurur"
+        );
         // Momentum kadansı (min 1): farklı bar → ≥1, aynı bar → 0<1 skip.
-        assert!(bars_between(t0 + chrono::Duration::days(1), t0, day) >= 1, "yeni bar momentum rebalance");
+        assert!(
+            bars_between(t0 + chrono::Duration::days(1), t0, day) >= 1,
+            "yeni bar momentum rebalance"
+        );
         assert!(bars_between(t0, t0, day) < 1, "aynı bar momentum skip");
         // interval bilinmiyorsa (0): farklıysa 1, aynıysa 0.
         assert_eq!(bars_between(t14, t0, 0), 1);
@@ -512,30 +702,63 @@ mod book_core_tests {
         assert!(!map.contains_key("C"), "tek faktörlü sembol harmana girmez");
         assert_eq!(map.len(), 2, "yalnız iki faktörde de olan A,B");
         // carry-ağırlıklı (0.6) → carry'de güçlü B, momentum'da güçlü A'dan yüksek skorlu olmalı.
-        assert!(map["B"] > map["A"], "carry-ağırlıklı harmanda carry-güçlü B önde");
+        assert!(
+            map["B"] > map["A"],
+            "carry-ağırlıklı harmanda carry-güçlü B önde"
+        );
     }
 
-    fn s(v: &[&str]) -> Vec<String> { v.iter().map(|x| x.to_string()).collect() }
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
 
     #[test]
     fn plan_opens_new_book_when_flat() {
         let actions = plan_actions(&s(&["A", "B"]), &s(&["E", "D"]), &HashMap::new());
-        assert_eq!(actions.iter().filter(|a| matches!(a, BookAction::Close(_))).count(), 0);
-        assert!(actions.contains(&BookAction::OpenLong("A".into())) && actions.contains(&BookAction::OpenShort("E".into())));
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|a| matches!(a, BookAction::Close(_)))
+                .count(),
+            0
+        );
+        assert!(
+            actions.contains(&BookAction::OpenLong("A".into()))
+                && actions.contains(&BookAction::OpenShort("E".into()))
+        );
     }
 
     #[test]
     fn plan_holds_matching_and_closes_dropped() {
         let mut cur = HashMap::new();
-        cur.insert("A".to_string(), true);  // long, hedefte long → tut
-        cur.insert("X".to_string(), true);  // long ama hedefte yok → kapat
+        cur.insert("A".to_string(), true); // long, hedefte long → tut
+        cur.insert("X".to_string(), true); // long ama hedefte yok → kapat
         cur.insert("E".to_string(), false); // short, hedefte short → tut
         let actions = plan_actions(&s(&["A", "B"]), &s(&["E", "D"]), &cur);
-        assert!(actions.contains(&BookAction::Close("X".into())), "düşen pozisyon kapanır");
-        assert!(!actions.iter().any(|a| matches!(a, BookAction::OpenLong(x) if x=="A")), "A zaten long → tutulur");
-        assert!(!actions.iter().any(|a| matches!(a, BookAction::Close(x) if x=="A")), "A kapanmaz");
-        assert!(actions.contains(&BookAction::OpenLong("B".into())), "yeni B long açılır");
-        assert!(actions.contains(&BookAction::OpenShort("D".into())), "yeni D short açılır");
+        assert!(
+            actions.contains(&BookAction::Close("X".into())),
+            "düşen pozisyon kapanır"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, BookAction::OpenLong(x) if x=="A")),
+            "A zaten long → tutulur"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, BookAction::Close(x) if x=="A")),
+            "A kapanmaz"
+        );
+        assert!(
+            actions.contains(&BookAction::OpenLong("B".into())),
+            "yeni B long açılır"
+        );
+        assert!(
+            actions.contains(&BookAction::OpenShort("D".into())),
+            "yeni D short açılır"
+        );
     }
 
     #[test]
@@ -543,9 +766,16 @@ mod book_core_tests {
         let mut cur = HashMap::new();
         cur.insert("A".to_string(), false); // şu an SHORT, hedef LONG → flip
         let actions = plan_actions(&s(&["A"]), &s(&[]), &cur);
-        let close_idx = actions.iter().position(|a| matches!(a, BookAction::Close(x) if x == "A"));
-        let open_idx = actions.iter().position(|a| matches!(a, BookAction::OpenLong(x) if x == "A"));
-        assert!(close_idx.is_some() && open_idx.is_some(), "flip = kapat + aç");
+        let close_idx = actions
+            .iter()
+            .position(|a| matches!(a, BookAction::Close(x) if x == "A"));
+        let open_idx = actions
+            .iter()
+            .position(|a| matches!(a, BookAction::OpenLong(x) if x == "A"));
+        assert!(
+            close_idx.is_some() && open_idx.is_some(),
+            "flip = kapat + aç"
+        );
         assert!(close_idx < open_idx, "flip'te kapanış açılıştan ÖNCE gelir");
     }
 }

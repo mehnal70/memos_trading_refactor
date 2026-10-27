@@ -24,7 +24,7 @@ impl fmt::Display for UpdateStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Deploying => write!(f, "🚀 Dağıtılıyor"),
-            Self::Success   => write!(f, "✅ Başarılı"),
+            Self::Success => write!(f, "✅ Başarılı"),
             Self::RolledBack => write!(f, "🔄 Geri Alındı"),
             Self::Failed(e) => write!(f, "❌ Hata: {}", e),
         }
@@ -65,9 +65,9 @@ impl UpdateManager for SimpleUpdateManager {
             deployed_at: Utc::now(),
             status: UpdateStatus::Deploying,
         };
-        
+
         self.updates.push(info);
-        
+
         // Pipeline: Burada 'HealthOrchestrator' üzerinden otomatik testler tetiklenebilir
         // Başarılı varsayıyoruz (Simülasyon)
         if let Some(last) = self.updates.last_mut() {
@@ -84,7 +84,7 @@ impl UpdateManager for SimpleUpdateManager {
             if last.status == UpdateStatus::RolledBack {
                 return UpdateStatus::Failed("Zaten geri alınmış.".to_owned());
             }
-            
+
             last.status = UpdateStatus::RolledBack;
             println!("[DEPLOY] 🔄 Versiyon {} geri alındı.", last.version);
             UpdateStatus::RolledBack

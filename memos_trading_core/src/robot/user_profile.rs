@@ -1,8 +1,8 @@
 // robot/user_profile.rs - Kullanıcıya Özel Parametre Tuning ve Kişiselleştirme
 // Her kullanıcı için ayrı model, parametre ve geçmiş yönetimi
 
-use crate::robot::ml_engine::{MLModel, FeatureVector};
 use crate::core::types::StrategyParams;
+use crate::robot::ml_engine::{FeatureVector, MLModel};
 
 pub struct UserProfile {
     pub user_id: String,

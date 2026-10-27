@@ -1,10 +1,10 @@
 // backtest_engine.rs - Yüksek Performanslı Otonom Simülasyon Motoru
 
-use crate::core::types::{Candle, StrategyParams, Signal};
+use crate::core::types::{Candle, Signal, StrategyParams};
 use crate::robot::order_management::{OrderBookSimulator, SyntheticBookConfig};
 use crate::robot::strategies::base::Strategy;
-use crate::Result;
 use crate::MemosTradingError;
+use crate::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -98,8 +98,7 @@ pub struct BacktestConfig {
 }
 
 /// İşlem yönü modu — long-only yapısal kusurunu kapatma kaldıracı (A/B kolu).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum DirectionMode {
     /// Yalnız `Signal::Buy` → long (legacy, canlı sistemin mevcut davranışı).
     #[default]
@@ -111,10 +110,8 @@ pub enum DirectionMode {
     RegimeDirectional,
 }
 
-
 /// Backtest rejim Volatile-kapısı modu — canlı IDLE-in-volatile aynası, A/B kolu.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum RegimeGate {
     /// Kapı yok (legacy). Her uygun sinyal açılır.
     #[default]
@@ -123,16 +120,24 @@ pub enum RegimeGate {
     Absolute,
     /// Adaptif: Volatile sınırı sembolün kendi ATR% dağılımının `pctl` persentili.
     Adaptive { pctl: f64 },
+    /// Yalnız Trending rejiminde girişe izin verir; diğer rejimleri bastırır.
+    TrendingOnly,
 }
 
-
-fn default_commission() -> f64 { 0.001 }
+fn default_commission() -> f64 {
+    0.001
+}
 
 /// HTF interval → bucket saniyesi (look-ahead'siz HTF dilimleme için). Bilinmeyen → 0.
 fn htf_bucket_secs(interval: &str) -> i64 {
     match interval {
-        "1m" => 60, "5m" => 300, "15m" => 900, "30m" => 1800,
-        "1h" => 3600, "4h" => 14_400, "1d" => 86_400,
+        "1m" => 60,
+        "5m" => 300,
+        "15m" => 900,
+        "30m" => 1800,
+        "1h" => 3600,
+        "4h" => 14_400,
+        "1d" => 86_400,
         _ => 0,
     }
 }
@@ -140,6 +145,7 @@ fn htf_bucket_secs(interval: &str) -> i64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimulatedTrade {
     pub symbol: String,
+    pub is_long: bool,
     pub entry_price: f64,
     pub exit_price: f64,
     pub entry_time: String,
@@ -181,12 +187,28 @@ struct BacktestPos {
     partial_tp_triggered: bool,
     /// true → long, false → short. Yön-farkında TP/SL/trailing/breakeven/PnL için.
     is_long: bool,
+    tranche_count: usize,
+    last_add_idx: usize,
 }
 
 impl BacktestPos {
     /// Yön işareti: long +1, short -1. TP/SL/PnL hesabını tek formülde birleştirir.
     #[inline]
-    fn sign(&self) -> f64 { if self.is_long { 1.0 } else { -1.0 } }
+    fn sign(&self) -> f64 {
+        if self.is_long {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+
+    fn next_tranche_weight(&self, weights: &[f64]) -> f64 {
+        weights
+            .get(self.tranche_count)
+            .copied()
+            .unwrap_or(0.0)
+            .max(0.0)
+    }
 }
 
 pub struct Backtester {
@@ -196,6 +218,36 @@ pub struct Backtester {
 }
 
 impl Backtester {
+    /// Trade-başı getirilerden daha kararlı Sharpe üretir.
+    ///
+    /// Bazı pencerelerde çok az trade + neredeyse sıfır varyans kombinasyonu,
+    /// `mean / sd` oranını astronomik büyüklüklere itiyordu. Bu da walk-forward
+    /// strateji loglarında anlamsız skor patlamaları üretiyordu. Böyle pencereler
+    /// gerçek edge değil, istatistiksel olarak bilgi-yoksul kabul edilir.
+    fn stable_sharpe_ratio(returns: &[f64]) -> f64 {
+        const MIN_TRADES_FOR_SHARPE: usize = 5;
+        const MIN_STD_PCT: f64 = 1e-3;
+        const MAX_ABS_SHARPE: f64 = 10.0;
+
+        if returns.len() < MIN_TRADES_FOR_SHARPE {
+            return 0.0;
+        }
+
+        let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+        let var =
+            returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (returns.len() as f64 - 1.0);
+        if !var.is_finite() {
+            return 0.0;
+        }
+
+        let sd = var.sqrt();
+        if !sd.is_finite() || sd < MIN_STD_PCT {
+            return 0.0;
+        }
+
+        (mean / sd).clamp(-MAX_ABS_SHARPE, MAX_ABS_SHARPE)
+    }
+
     pub fn new(config: BacktestConfig) -> Self {
         Self {
             config,
@@ -222,17 +274,19 @@ impl Backtester {
         // should_open hardcoded basit bir reimplementasyondu ve cfg.strategy_params'ı
         // YOK SAYIYORDU → param_spec araması düz zeminde etkisizdi. Strateji bir kez
         // kurulur (per-bar alloc yok); generate_signal cfg.strategy_params ile çağrılır.
-        let entry_strat = crate::robot::strategies::default_registry()
-            .make(&self.config.strategy_name);
+        let entry_strat =
+            crate::robot::strategies::default_registry().make(&self.config.strategy_name);
         let entry_params = self.config.strategy_params.unwrap_or_default();
 
         // Multi-TF hizalama (use_htf): base seriyi HTF'e bir kez topla. Her bara
         // YALNIZ tamamlanmış HTF mumları verilir (forming bucket dışlanır) → canlı
         // load_htf_candles davranışıyla look-ahead'siz hizalı. bucket_secs slicing için.
         let (htf_full, htf_bucket_secs) = if self.config.use_htf {
-            let htf_int = crate::robot::data_pipeline::orchestrator::DataPipeline
-                ::get_htf_interval(&self.config.interval);
-            let agg = crate::robot::data_pipeline::aggregate_to(&sorted, htf_int, &self.config.symbol);
+            let htf_int = crate::robot::data_pipeline::orchestrator::DataPipeline::get_htf_interval(
+                &self.config.interval,
+            );
+            let agg =
+                crate::robot::data_pipeline::aggregate_to(&sorted, htf_int, &self.config.symbol);
             let bs = htf_bucket_secs(htf_int);
             (agg, bs)
         } else {
@@ -242,6 +296,7 @@ impl Backtester {
         for (idx, candle) in sorted.iter().enumerate() {
             let mut close_signal = false;
             let mut trade_net = 0.0;
+            let had_position_at_bar_open = pos.is_some();
 
             if let Some(ref mut p) = pos {
                 // Yön işareti: long +1, short -1. TP/SL/trailing/breakeven/PnL bunu kullanır
@@ -253,22 +308,25 @@ impl Backtester {
                 // B2: Trailing Stop Güncelleme (yön-farkında ratchet)
                 if let Some(trail_pct) = p.trailing_pct {
                     // best_price = lehte uç — fitil-farkında (long: en yüksek HIGH, short: en düşük LOW).
-                    p.best_price = if p.is_long { p.best_price.max(candle.high) }
-                                   else { p.best_price.min(candle.low) };
+                    p.best_price = if p.is_long {
+                        p.best_price.max(candle.high)
+                    } else {
+                        p.best_price.min(candle.low)
+                    };
                     let new_trail = p.best_price * (1.0 - s * trail_pct / 100.0);
                     // Trail SL lehe doğru kayar (long: yükselir, short: düşer).
                     p.trailing_sl = Some(match p.trailing_sl {
                         Some(t) if p.is_long => t.max(new_trail),
-                        Some(t)              => t.min(new_trail),
-                        None                 => new_trail,
+                        Some(t) => t.min(new_trail),
+                        None => new_trail,
                     });
                 }
 
                 // Etkin SL: long → en yüksek taban (max), short → en düşük tavan (min).
                 let eff_sl = match p.trailing_sl {
                     Some(t) if p.is_long => t.max(p.sl_price),
-                    Some(t)              => t.min(p.sl_price),
-                    None                 => p.sl_price,
+                    Some(t) => t.min(p.sl_price),
+                    None => p.sl_price,
                 };
 
                 // B1: Breakeven — lehte hareket be_rr×risk'i aşınca SL'i girişe çek.
@@ -289,11 +347,14 @@ impl Backtester {
                         let favorable = if p.is_long { candle.high } else { candle.low };
                         if s * (favorable - partial_threshold) >= 0.0 {
                             let p_qty = p.qty * ratio;
-                            let exit_fill = self.sim_fill_price(exit_is_buy, partial_threshold, p_qty);
-                            let fee = p_qty * (p.entry_price + exit_fill) * self.config.commission_pct;
+                            let exit_fill =
+                                self.sim_fill_price(exit_is_buy, partial_threshold, p_qty);
+                            let fee =
+                                p_qty * (p.entry_price + exit_fill) * self.config.commission_pct;
                             let net = s * (exit_fill - p.entry_price) * p_qty - fee;
 
-                            self.trades.push(self.create_sim_trade(p, candle, exit_fill, p_qty, net));
+                            self.trades
+                                .push(self.create_sim_trade(p, candle, exit_fill, p_qty, net));
                             balance += net;
                             p.qty -= p_qty;
                             p.partial_tp_triggered = true;
@@ -306,7 +367,7 @@ impl Backtester {
                 // (kötümser worst-case; bar-içi sıra bilinmez). Dolum kapanışta değil SEVİYEde olur
                 // (fitil seviyeye değdi) → live_path konvansiyonuyla aynı.
                 let favorable = if p.is_long { candle.high } else { candle.low };
-                let adverse   = if p.is_long { candle.low }  else { candle.high };
+                let adverse = if p.is_long { candle.low } else { candle.high };
                 let tp_hit = s * (favorable - p.tp_price) >= 0.0;
                 let sl_hit = s * (adverse - eff_sl) <= 0.0;
                 if tp_hit || sl_hit {
@@ -314,7 +375,8 @@ impl Backtester {
                     let exit_fill = self.sim_fill_price(exit_is_buy, exit_level, p.qty);
                     let fee = p.qty * (p.entry_price + exit_fill) * self.config.commission_pct;
                     trade_net = s * (exit_fill - p.entry_price) * p.qty - fee;
-                    self.trades.push(self.create_sim_trade(p, candle, exit_fill, p.qty, trade_net));
+                    self.trades
+                        .push(self.create_sim_trade(p, candle, exit_fill, p.qty, trade_net));
                     close_signal = true;
                 }
             }
@@ -325,12 +387,52 @@ impl Backtester {
             }
 
             // Stratejik Giriş Kontrolü — yön-farkında (Some(true)=long, Some(false)=short).
-            let dir = if pos.is_none() && !self.regime_blocks_entry(&sorted, idx) {
-                self.entry_signal(entry_strat.as_ref(), &entry_params, &sorted, idx, &htf_full, htf_bucket_secs)
+            let dir = if !self.regime_blocks_entry(&sorted, idx) {
+                self.entry_signal(
+                    entry_strat.as_ref(),
+                    &entry_params,
+                    &sorted,
+                    idx,
+                    &htf_full,
+                    htf_bucket_secs,
+                )
             } else {
                 None
             };
             if let Some(is_long) = dir {
+                if let Some(ref mut p) = pos {
+                    const PYRAMID_WEIGHTS: [f64; 3] = [1.0, 0.5, 0.25];
+                    let max_tranches = PYRAMID_WEIGHTS.len();
+                    let weight_sum: f64 = PYRAMID_WEIGHTS.iter().sum();
+                    let weight = p.next_tranche_weight(&PYRAMID_WEIGHTS);
+                    let favorable_move = p.sign() * (candle.close - p.entry_price)
+                        / p.entry_price.max(f64::EPSILON)
+                        * 100.0;
+                    let can_add = self.config.position_profile.as_deref()
+                        == Some("trend-pyramiding")
+                        && p.is_long == is_long
+                        && p.tranche_count < max_tranches
+                        && idx > p.last_add_idx
+                        && weight > 0.0
+                        && weight_sum > 0.0
+                        && favorable_move >= 5.0
+                        && Self::pyramid_allowed(&sorted, idx, is_long);
+
+                    if can_add {
+                        let qty = self.config.max_position_size * (weight / weight_sum);
+                        if qty > 0.0 {
+                            let entry = self.sim_fill_price(is_long, candle.close, qty);
+                            let total_qty = p.qty + qty;
+                            p.entry_price =
+                                (p.entry_price * p.qty + entry * qty) / total_qty;
+                            p.qty = total_qty;
+                            p.risk_distance =
+                                (p.entry_price - p.sl_price).abs().max(f64::EPSILON);
+                            p.tranche_count += 1;
+                            p.last_add_idx = idx;
+                        }
+                    }
+                } else {
                 let s = if is_long { 1.0 } else { -1.0 };
                 let window = &sorted[..=idx];
 
@@ -338,17 +440,20 @@ impl Backtester {
                 // ATR%: 14-periyot, fiyatın %'si. atr_sl_mult&atr_tp_mult ikisi de Some
                 // ve ATR>0 ise mesafe = mult × ATR%; aksi halde sabit config %'leri.
                 let atr_pct = crate::robot::logic::market_regime::compute_atr_pct(window);
-                let (sl_pct_eff, tp_pct_eff) = match (self.config.atr_sl_mult, self.config.atr_tp_mult) {
-                    (Some(slm), Some(tpm)) if atr_pct.is_finite() && atr_pct > 0.0 =>
-                        ((slm * atr_pct).clamp(0.1, 50.0), (tpm * atr_pct).clamp(0.1, 100.0)),
-                    _ => (self.config.stop_loss_pct, self.config.take_profit_pct),
-                };
+                let (sl_pct_eff, tp_pct_eff) =
+                    match (self.config.atr_sl_mult, self.config.atr_tp_mult) {
+                        (Some(slm), Some(tpm)) if atr_pct.is_finite() && atr_pct > 0.0 => (
+                            (slm * atr_pct).clamp(0.1, 50.0),
+                            (tpm * atr_pct).clamp(0.1, 100.0),
+                        ),
+                        _ => (self.config.stop_loss_pct, self.config.take_profit_pct),
+                    };
 
                 // ── Sizing: vol-hedefli (rejim-koşullu) ya da sabit qty ──
                 // Risk(trade) = qty × entry × (sl_pct/100) = r% × sermaye → qty türetilir.
                 // SL mesafesi ATR'den gelince yüksek-vol→küçük qty, düşük-vol→büyük qty.
                 // Notional 3× sermaye tavanı (degenerate düşük-vol patlamasını önler).
-                let qty = match self.config.vol_target_pct {
+                let base_qty = match self.config.vol_target_pct {
                     Some(r) if r > 0.0 && sl_pct_eff > 0.0 && candle.close > 0.0 => {
                         let risk_dollars = r / 100.0 * self.config.initial_balance;
                         let notional = (risk_dollars / (sl_pct_eff / 100.0))
@@ -357,14 +462,24 @@ impl Backtester {
                     }
                     _ => self.config.max_position_size,
                 };
-                if qty <= 0.0 { continue; }
+                let qty = if self.config.position_profile.as_deref() == Some("trend-pyramiding") {
+                    base_qty * (1.0 / (1.0 + 0.5 + 0.25))
+                } else {
+                    base_qty
+                };
+                if qty <= 0.0 {
+                    continue;
+                }
 
                 // Giriş emri yönü: long → BUY, short → SELL (slippage doğru tarafta).
                 let entry = self.sim_fill_price(is_long, candle.close, qty);
                 // SL girişin ters tarafında, TP lehte (yön-farkında).
                 let sl = entry * (1.0 - s * sl_pct_eff / 100.0);
                 let tp = entry * (1.0 + s * tp_pct_eff / 100.0);
-                let trail_pct = self.config.atr_trail_mult.map(|m| Self::calc_atr_pct(window) * m);
+                let trail_pct = self
+                    .config
+                    .atr_trail_mult
+                    .map(|m| Self::calc_atr_pct(window) * m);
 
                 pos = Some(BacktestPos {
                     entry_price: entry,
@@ -380,12 +495,24 @@ impl Backtester {
                     breakeven_triggered: false,
                     partial_tp_triggered: false,
                     is_long,
+                    tranche_count: 1,
+                    last_add_idx: idx,
                 });
+                }
             }
 
-            // Risk & Bakiye Takibi — gerçekleşmemiş PnL yön-farkında (short'ta ters işaret).
+            // Risk & Bakiye Takibi — açık pozisyonu mumun aleyhte fitiliyle mark et.
+            // Yeni açılan pozisyon aynı mumun geçmiş fitiline maruz bırakılmaz.
             max_balance = max_balance.max(balance);
-            let current_val = balance + pos.as_ref().map_or(0.0, |p| p.sign() * (candle.close - p.entry_price) * p.qty);
+            let current_val = balance
+                + if had_position_at_bar_open {
+                    pos.as_ref().map_or(0.0, |p| {
+                        let mark = if p.is_long { candle.low } else { candle.high };
+                        p.sign() * (mark - p.entry_price) * p.qty
+                    })
+                } else {
+                    0.0
+                };
             max_drawdown = max_drawdown.max((max_balance - current_val) / max_balance * 100.0);
             self.balance_history.push((candle.timestamp, balance));
         }
@@ -395,9 +522,17 @@ impl Backtester {
 
     /// `exit_price`: gerçekleşen çıkış fiyatı (orderbook açıkken slippage'li avg fill,
     /// kapalıyken candle.close). PnL ve raporlama bu fiyattan hesaplanır.
-    fn create_sim_trade(&self, p: &BacktestPos, c: &Candle, exit_price: f64, qty: f64, net: f64) -> SimulatedTrade {
+    fn create_sim_trade(
+        &self,
+        p: &BacktestPos,
+        c: &Candle,
+        exit_price: f64,
+        qty: f64,
+        net: f64,
+    ) -> SimulatedTrade {
         SimulatedTrade {
             symbol: c.symbol.clone(),
+            is_long: p.is_long,
             entry_price: p.entry_price,
             exit_price,
             entry_time: p.entry_ts.to_rfc3339(),
@@ -418,17 +553,41 @@ impl Backtester {
         match self.config.orderbook_sim.as_deref() {
             None => mid,
             Some(profile) => {
-                if mid <= 0.0 || qty <= 0.0 { return mid; }
+                if mid <= 0.0 || qty <= 0.0 {
+                    return mid;
+                }
+
                 let cfg = if profile.eq_ignore_ascii_case("illiquid") {
                     SyntheticBookConfig::illiquid(mid)
                 } else {
                     SyntheticBookConfig::liquid(mid)
                 };
                 let sim = OrderBookSimulator::new(cfg);
-                let fr = if is_buy { sim.simulate_buy(qty) } else { sim.simulate_sell(qty) };
-                if fr.filled_qty > 0.0 && fr.avg_fill_price > 0.0 { fr.avg_fill_price } else { mid }
+                let fr = if is_buy {
+                    sim.simulate_buy(qty)
+                } else {
+                    sim.simulate_sell(qty)
+                };
+                if fr.filled_qty > 0.0 && fr.avg_fill_price > 0.0 {
+                    fr.avg_fill_price
+                } else {
+                    mid
+                }
             }
         }
+    }
+
+    fn pyramid_allowed(candles: &[Candle], idx: usize, is_long: bool) -> bool {
+        let start = (idx + 1).saturating_sub(200);
+        let regime =
+            crate::robot::logic::market_regime::classify_market_regime(&candles[start..=idx]);
+        matches!(
+            regime,
+            crate::evolution::MarketRegime::StrongUptrend
+                | crate::evolution::MarketRegime::WeakUptrend
+                | crate::evolution::MarketRegime::StrongDowntrend
+                | crate::evolution::MarketRegime::WeakDowntrend
+        ) && crate::robot::logic::market_regime::regime_confirms_direction(regime, is_long)
     }
 
     fn finalize_result(&self, balance: f64, max_dd: f64) -> Result<BacktestResult> {
@@ -437,22 +596,31 @@ impl Backtester {
 
         // Profit factor = brüt kâr / brüt zarar (gerçek hesap; eski hardcode 1.5 idi).
         // Zarar yokken kâr varsa anlamlı bir tavan (999) — INF JSON'da sorun çıkarır.
-        let gross_profit: f64 = self.trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).sum();
-        let gross_loss: f64   = self.trades.iter().filter(|t| t.pnl < 0.0).map(|t| -t.pnl).sum();
-        let profit_factor = if gross_loss > f64::EPSILON { gross_profit / gross_loss }
-            else if gross_profit > 0.0 { 999.0 } else { 0.0 };
+        let gross_profit: f64 = self
+            .trades
+            .iter()
+            .filter(|t| t.pnl > 0.0)
+            .map(|t| t.pnl)
+            .sum();
+        let gross_loss: f64 = self
+            .trades
+            .iter()
+            .filter(|t| t.pnl < 0.0)
+            .map(|t| -t.pnl)
+            .sum();
+        let profit_factor = if gross_loss > f64::EPSILON {
+            gross_profit / gross_loss
+        } else if gross_profit > 0.0 {
+            999.0
+        } else {
+            0.0
+        };
 
         // Per-trade Sharpe = ortalama getiri / getiri std (gerçek hesap; eski hardcode 2.0).
         // sqrt(n) ölçeklemesi YOK — A/B karşılaştırmasında trade sayısı farklı olabilir,
         // bu yüzden trade-başına risk-ayarlı getiri daha adil bir kıyas metriğidir.
         let rets: Vec<f64> = self.trades.iter().map(|t| t.pnl_pct).collect();
-        let n = rets.len();
-        let sharpe_ratio = if n >= 2 {
-            let mean = rets.iter().sum::<f64>() / n as f64;
-            let var = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
-            let sd = var.sqrt();
-            if sd > f64::EPSILON { mean / sd } else { 0.0 }
-        } else { 0.0 };
+        let sharpe_ratio = Self::stable_sharpe_ratio(&rets);
 
         Ok(BacktestResult {
             symbol: self.config.symbol.clone(),
@@ -477,19 +645,34 @@ impl Backtester {
     /// rejiminde hem long hem short bastırılır.
     fn regime_blocks_entry(&self, candles: &[Candle], idx: usize) -> bool {
         use crate::robot::logic::market_regime::{
-            detect_adx_regime_with, adaptive_thresholds, AdxRegime, RegimeThresholds,
+            adaptive_thresholds, detect_adx_regime_with, AdxRegime, RegimeThresholds,
         };
+
+        // 1. ADIM: Eğer kapı kapalıysa hemen false dön ve fonksiyondan çık
+        if matches!(self.config.regime_gate, RegimeGate::Off) {
+            return false;
+        }
+
         const W: usize = 200;
+        let start = (idx + 1).saturating_sub(W);
+        if matches!(self.config.regime_gate, RegimeGate::TrendingOnly) {
+            return !matches!(
+                detect_adx_regime_with(&candles[start..=idx], &RegimeThresholds::default()),
+                AdxRegime::Trending
+            );
+        }
         let thr = match self.config.regime_gate {
-            RegimeGate::Off => return false,
+            RegimeGate::Off => unreachable!(),
             RegimeGate::Absolute => RegimeThresholds::default(),
             RegimeGate::Adaptive { pctl } => {
-                let start = (idx + 1).saturating_sub(W);
                 adaptive_thresholds(&candles[start..=idx], pctl)
             }
+            RegimeGate::TrendingOnly => unreachable!(),
         };
-        let start = (idx + 1).saturating_sub(W);
-        matches!(detect_adx_regime_with(&candles[start..=idx], &thr), AdxRegime::Volatile)
+        return matches!(
+            detect_adx_regime_with(&candles[start..=idx], &thr),
+            AdxRegime::Volatile
+        );
     }
 
     /// Yön-farkında giriş kararı: `Some(true)`=long, `Some(false)`=short, `None`=giriş yok.
@@ -506,16 +689,25 @@ impl Backtester {
         htf_bucket_secs: i64,
     ) -> Option<bool> {
         const W: usize = 200;
-        if idx < 20 { return None; }
+        if idx < 20 {
+            return None;
+        }
         let start = (idx + 1).saturating_sub(W);
         let window = &candles[start..=idx];
         // HTF dilimi: yalnız o anki bara göre TAMAMLANMIŞ bucket'lar (forming hariç →
         // look-ahead yok). htf_full sıralı; forming bucket başlangıcından öncekiler alınır.
         let htf: Option<&[Candle]> = if htf_bucket_secs > 0 && !htf_full.is_empty() {
-            let cur_bucket_start = candles[idx].timestamp.timestamp()
-                .div_euclid(htf_bucket_secs) * htf_bucket_secs;
+            let cur_bucket_start = candles[idx]
+                .timestamp
+                .timestamp()
+                .div_euclid(htf_bucket_secs)
+                * htf_bucket_secs;
             let n = htf_full.partition_point(|c| c.timestamp.timestamp() < cur_bucket_start);
-            if n > 0 { Some(&htf_full[..n]) } else { None }
+            if n > 0 {
+                Some(&htf_full[..n])
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -529,16 +721,19 @@ impl Backtester {
 
         // 2) Rejim kapıları (yön + stil) — gerekiyorsa rejim TEK KEZ hesaplanır.
         //    Tek-kaynak helper'lar → canlı kapılarla (regime_directional / regime_strategy_fit) aynı kural.
-        if self.config.direction == DirectionMode::RegimeDirectional || self.config.regime_style_fit {
+        if self.config.direction == DirectionMode::RegimeDirectional || self.config.regime_style_fit
+        {
             let regime = crate::robot::logic::market_regime::classify_market_regime(window);
             // 2a) RegimeDirectional: rejim yönü niyeti teyit etmeli (ters-trend ele).
             if self.config.direction == DirectionMode::RegimeDirectional
-                && !crate::robot::logic::market_regime::regime_confirms_direction(regime, want_long) {
+                && !crate::robot::logic::market_regime::regime_confirms_direction(regime, want_long)
+            {
                 return None;
             }
             // 2b) Stil-fit: strateji stili rejimle uyumlu olmalı (trend-strateji yatayda açmaz vb.).
             if self.config.regime_style_fit
-                && !crate::robot::logic::market_regime::strategy_fits_regime(strat.name(), regime) {
+                && !crate::robot::logic::market_regime::strategy_fits_regime(strat.name(), regime)
+            {
                 return None;
             }
         }
@@ -546,18 +741,23 @@ impl Backtester {
         // 3) Giriş kalitesi kapısı (#4): canlı motorla tek-kaynak edge hunisi, yöne göre.
         if let Some(t) = self.config.edge_min_score {
             let sig = if want_long { Signal::Buy } else { Signal::Sell };
-            let edge = crate::robot::engines::Engine::compute_edge_score_with(window, &sig, 0.0, 0.4);
-            if edge < t { return None; }
+            let edge =
+                crate::robot::engines::Engine::compute_edge_score_with(window, &sig, 0.0, 0.4);
+            if edge < t {
+                return None;
+            }
         }
         Some(want_long)
     }
 
     fn calc_atr_pct(candles: &[Candle]) -> f64 {
         let n = candles.len();
-        if n < 2 { return 1.0; }
-        let tr = (candles[n-1].high - candles[n-1].low)
-            .max((candles[n-1].high - candles[n-2].close).abs());
-        (tr / candles[n-1].close) * 100.0
+        if n < 2 {
+            return 1.0;
+        }
+        let tr = (candles[n - 1].high - candles[n - 1].low)
+            .max((candles[n - 1].high - candles[n - 2].close).abs());
+        (tr / candles[n - 1].close) * 100.0
     }
 }
 
@@ -569,20 +769,24 @@ mod edge_filter_tests {
     /// Sürüklenme + salınımlı sentetik seri → MA_CROSSOVER (DEFAULT) tekrar tekrar
     /// Buy üretir, fiyat yükseldiğinden TP devreye girip pozisyonlar döner.
     fn synthetic_uptrend(n: usize) -> Vec<Candle> {
-        (0..n).map(|i| {
-            let f = i as f64;
-            let close = 100.0 + 0.05 * f + 6.0 * (f * 0.3).sin();
-            Candle {
-                timestamp: Utc.timestamp_opt(1_700_000_000 + (i as i64) * 3600, 0).unwrap(),
-                open: close,
-                high: close * 1.004,
-                low: close * 0.996,
-                close,
-                volume: 1_000.0,
-                symbol: "TEST".into(),
-                interval: "1h".into(),
-            }
-        }).collect()
+        (0..n)
+            .map(|i| {
+                let f = i as f64;
+                let close = 100.0 + 0.05 * f + 6.0 * (f * 0.3).sin();
+                Candle {
+                    timestamp: Utc
+                        .timestamp_opt(1_700_000_000 + (i as i64) * 3600, 0)
+                        .unwrap(),
+                    open: close,
+                    high: close * 1.004,
+                    low: close * 0.996,
+                    close,
+                    volume: 1_000.0,
+                    symbol: "TEST".into(),
+                    interval: "1h".into(),
+                }
+            })
+            .collect()
     }
 
     fn cfg(edge_min: Option<f64>) -> BacktestConfig {
@@ -614,20 +818,32 @@ mod edge_filter_tests {
     }
 
     fn n_trades(edge_min: Option<f64>, candles: &[Candle]) -> usize {
-        Backtester::new(cfg(edge_min)).run(candles).unwrap().total_trades
+        Backtester::new(cfg(edge_min))
+            .run(candles)
+            .unwrap()
+            .total_trades
     }
 
     /// İstikrarlı düşüş — trend stratejisi Sell üretir; short bacağı bunu kâra çevirmeli.
     fn synthetic_downtrend(n: usize) -> Vec<Candle> {
-        (0..n).map(|i| {
-            let f = i as f64;
-            let close = 200.0 - 0.10 * f + 4.0 * (f * 0.3).sin();
-            Candle {
-                timestamp: Utc.timestamp_opt(1_700_000_000 + (i as i64) * 3600, 0).unwrap(),
-                open: close, high: close * 1.004, low: close * 0.996, close,
-                volume: 1_000.0, symbol: "TEST".into(), interval: "1h".into(),
-            }
-        }).collect()
+        (0..n)
+            .map(|i| {
+                let f = i as f64;
+                let close = 200.0 - 0.10 * f + 4.0 * (f * 0.3).sin();
+                Candle {
+                    timestamp: Utc
+                        .timestamp_opt(1_700_000_000 + (i as i64) * 3600, 0)
+                        .unwrap(),
+                    open: close,
+                    high: close * 1.004,
+                    low: close * 0.996,
+                    close,
+                    volume: 1_000.0,
+                    symbol: "TEST".into(),
+                    interval: "1h".into(),
+                }
+            })
+            .collect()
     }
 
     #[test]
@@ -637,6 +853,33 @@ mod edge_filter_tests {
         let up = synthetic_uptrend(300);
         let r = Backtester::new(cfg(None)).run(&up).unwrap();
         assert!(r.total_trades > 0, "uptrend long-only işlem üretmeli");
+    }
+
+    #[test]
+    fn trending_only_blocks_flat_regime_but_allows_trend() {
+        let trending = synthetic_uptrend(300);
+        let flat: Vec<Candle> = (0..300)
+            .map(|i| {
+                let close = 100.0;
+                Candle {
+                    timestamp: Utc
+                        .timestamp_opt(1_700_000_000 + (i as i64) * 3600, 0)
+                        .unwrap(),
+                    open: close,
+                    high: close,
+                    low: close,
+                    close,
+                    volume: 1_000.0,
+                    symbol: "TEST".into(),
+                    interval: "1h".into(),
+                }
+            })
+            .collect();
+        let mut backtester = Backtester::new(cfg(None));
+        backtester.config.regime_gate = RegimeGate::TrendingOnly;
+
+        assert!(!backtester.regime_blocks_entry(&trending, 299));
+        assert!(backtester.regime_blocks_entry(&flat, 299));
     }
 
     #[test]
@@ -651,10 +894,18 @@ mod edge_filter_tests {
         };
         let lo = mk(0.5);
         let hi = mk(5.0);
-        assert!(lo.total_trades > 0 && lo.total_trades == hi.total_trades,
-            "aynı işlemler (slippage yok): {} vs {}", lo.total_trades, hi.total_trades);
-        assert!(hi.total_pnl.abs() > lo.total_pnl.abs() * 5.0,
-            "yüksek risk ~10× exposure: |hi|={:.2} |lo|={:.2}", hi.total_pnl, lo.total_pnl);
+        assert!(
+            lo.total_trades > 0 && lo.total_trades == hi.total_trades,
+            "aynı işlemler (slippage yok): {} vs {}",
+            lo.total_trades,
+            hi.total_trades
+        );
+        assert!(
+            hi.total_pnl.abs() > lo.total_pnl.abs() * 5.0,
+            "yüksek risk ~10× exposure: |hi|={:.2} |lo|={:.2}",
+            hi.total_pnl,
+            lo.total_pnl
+        );
     }
 
     #[test]
@@ -670,8 +921,11 @@ mod edge_filter_tests {
         assert!(r.total_pnl.is_finite());
         let fixed = Backtester::new(cfg(None)).run(&up).unwrap();
         // Vol-relatif eşikler sabit %3/%1.5'ten farklı tetiklenir → trade sayısı/PnL ayrışır.
-        assert!(r.total_trades != fixed.total_trades || (r.total_pnl - fixed.total_pnl).abs() > f64::EPSILON,
-            "ATR-exit sabit %'den farklı sonuç vermeli");
+        assert!(
+            r.total_trades != fixed.total_trades
+                || (r.total_pnl - fixed.total_pnl).abs() > f64::EPSILON,
+            "ATR-exit sabit %'den farklı sonuç vermeli"
+        );
     }
 
     #[test]
@@ -687,10 +941,16 @@ mod edge_filter_tests {
         let long_res = Backtester::new(long_cfg).run(&down).unwrap();
         let both_res = Backtester::new(both_cfg).run(&down).unwrap();
 
-        assert!(both_res.total_trades > 0, "BothDirections düşüşte short açmalı");
-        assert!(both_res.total_pnl > long_res.total_pnl,
+        assert!(
+            both_res.total_trades > 0,
+            "BothDirections düşüşte short açmalı"
+        );
+        assert!(
+            both_res.total_pnl > long_res.total_pnl,
             "short bacağı düşüşü kâra çevirmeli: both={:.2} > long={:.2}",
-            both_res.total_pnl, long_res.total_pnl);
+            both_res.total_pnl,
+            long_res.total_pnl
+        );
     }
 
     #[test]
@@ -699,19 +959,34 @@ mod edge_filter_tests {
         // likitten daha kötü (geniş spread). sim_fill_price private → bu modülden erişilir.
         let mid = 100.0;
         let bt_off = Backtester::new(cfg(None));
-        assert_eq!(bt_off.sim_fill_price(true, mid, 1.0), mid, "None → mid (slippage yok)");
+        assert_eq!(
+            bt_off.sim_fill_price(true, mid, 1.0),
+            mid,
+            "None → mid (slippage yok)"
+        );
 
-        let mut c_liq = cfg(None); c_liq.orderbook_sim = Some("liquid".into());
+        let mut c_liq = cfg(None);
+        c_liq.orderbook_sim = Some("liquid".into());
         let bt_liq = Backtester::new(c_liq);
-        let buy_liq  = bt_liq.sim_fill_price(true,  mid, 1.0);
+        let buy_liq = bt_liq.sim_fill_price(true, mid, 1.0);
         let sell_liq = bt_liq.sim_fill_price(false, mid, 1.0);
-        assert!(buy_liq  >= mid, "BUY fill ≥ mid (slippage yukarı): {buy_liq}");
-        assert!(sell_liq <= mid, "SELL fill ≤ mid (slippage aşağı): {sell_liq}");
+        assert!(
+            buy_liq >= mid,
+            "BUY fill ≥ mid (slippage yukarı): {buy_liq}"
+        );
+        assert!(
+            sell_liq <= mid,
+            "SELL fill ≤ mid (slippage aşağı): {sell_liq}"
+        );
 
-        let mut c_illq = cfg(None); c_illq.orderbook_sim = Some("illiquid".into());
+        let mut c_illq = cfg(None);
+        c_illq.orderbook_sim = Some("illiquid".into());
         let bt_illq = Backtester::new(c_illq);
         let buy_illq = bt_illq.sim_fill_price(true, mid, 1.0);
-        assert!(buy_illq >= buy_liq, "illiquid BUY slippage'i ≥ liquid: {buy_illq} vs {buy_liq}");
+        assert!(
+            buy_illq >= buy_liq,
+            "illiquid BUY slippage'i ≥ liquid: {buy_illq} vs {buy_liq}"
+        );
 
         // Geçersiz mid → mid (guard).
         assert_eq!(bt_illq.sim_fill_price(true, 0.0, 1.0), 0.0);
@@ -721,7 +996,10 @@ mod edge_filter_tests {
     fn none_means_legacy_with_trades() {
         // edge_min_score=None → eski davranış: filtre yok, trend serisinde işlem üretir.
         let candles = synthetic_uptrend(400);
-        assert!(n_trades(None, &candles) > 0, "filtre kapalı baz işlem üretmeli");
+        assert!(
+            n_trades(None, &candles) > 0,
+            "filtre kapalı baz işlem üretmeli"
+        );
     }
 
     #[test]
@@ -729,7 +1007,11 @@ mod edge_filter_tests {
         // Edge skoru [0,1]'e clamp'li → eşik 2.0 hiçbir zaman aşılmaz → 0 işlem.
         // Kapının gerçekten Buy'ı kestiğini kanıtlar (yalnız wiring değil semantik).
         let candles = synthetic_uptrend(400);
-        assert_eq!(n_trades(Some(2.0), &candles), 0, "eşik>1.0 tüm girişleri engellemeli");
+        assert_eq!(
+            n_trades(Some(2.0), &candles),
+            0,
+            "eşik>1.0 tüm girişleri engellemeli"
+        );
     }
 
     #[test]
@@ -741,6 +1023,9 @@ mod edge_filter_tests {
         let f1 = n_trades(Some(0.20), &candles);
         let f2 = n_trades(Some(0.20), &candles);
         assert_eq!(f1, f2, "backtest deterministik olmalı");
-        assert_ne!(f1, none, "0.20 eşiği filtresizden farklı bir giriş seti vermeli");
+        assert_ne!(
+            f1, none,
+            "0.20 eşiği filtresizden farklı bir giriş seti vermeli"
+        );
     }
 }

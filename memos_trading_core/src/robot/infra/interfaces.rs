@@ -41,11 +41,7 @@ pub trait RiskAnalyzer: Send + Sync {
     fn max_position_size(&self, capital: f64, price: f64) -> Result<f64>;
 }
 
-/// TradeExecutor: Otomatik trade işlemlerini yönetir
-pub trait TradeExecutor: Send + Sync {
-    fn execute(&self, signal: Signal, symbol: &str, amount: f64) -> Result<Trade>;
-    fn cancel_all(&self, symbol: &str) -> Result<()>;
-    /// Exchange'deki gerçek açık pozisyon sembollerini döndürür.
-    /// Paper mod veya desteklenmeyen executor'larda boş vec döner.
-    fn fetch_open_symbols(&self) -> Vec<String> { vec![] }
-}
+// TradeExecutor memos_venue_api'ye taşındı (Adım 5): venue adaptörleri sözleşmeyi
+// core'suz implement edebilsin. Hata tipi orada VenueError; core `From` köprüsüyle
+// tüketir. Eski yol korunur:
+pub use memos_venue_api::executor::TradeExecutor;

@@ -1,16 +1,16 @@
 // src/evolution/autonomous_controller.rs - Otonom Strateji ve Evrim Yönetimi
 
-use crate::evolution::{PopulationManager, AdaptiveBrain, MarketRegime, StrategyGenome};
-use serde::{Serialize, Deserialize};
-use std::time::{Instant, Duration};
+use crate::evolution::{AdaptiveBrain, MarketRegime, PopulationManager, StrategyGenome};
+use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AutonomousState {
-    Observe,    // Sadece izle, veri topla
-    Optimize,   // Parametreleri iyileştir
-    Trade,      // Aktif işlem yap
-    SafeMode,   // Riskli rejim, hacim düşür
-    Halted,     // Acil durdurma
+    Observe,  // Sadece izle, veri topla
+    Optimize, // Parametreleri iyileştir
+    Trade,    // Aktif işlem yap
+    SafeMode, // Riskli rejim, hacim düşür
+    Halted,   // Acil durdurma
 }
 
 impl std::fmt::Display for AutonomousState {
@@ -65,7 +65,10 @@ impl AutonomousController {
 
     /// robotic_loop içindeki can_trade() kontrolü
     pub fn can_trade(&self) -> bool {
-        matches!(self.state, AutonomousState::Trade | AutonomousState::SafeMode | AutonomousState::Observe)
+        matches!(
+            self.state,
+            AutonomousState::Trade | AutonomousState::SafeMode | AutonomousState::Observe
+        )
     }
 
     /// Yeni bir döngü başlat (Kısım 56'daki mantık)

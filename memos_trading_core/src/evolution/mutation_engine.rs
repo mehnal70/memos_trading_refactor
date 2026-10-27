@@ -1,12 +1,12 @@
 // mutation_engine.rs - Akıllı ve Adaptif Mutasyon Motoru
 
 // evolution/mutation_engine.rs - Akıllı ve Adaptif Mutasyon Motoru
-use crate::prelude::*; 
+use crate::prelude::*;
 
 use crate::evolution::StrategyGenome;
-use serde::{Deserialize, Serialize};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum MutationType {
@@ -43,7 +43,9 @@ impl MutationEngine {
         match self.default_mutation_type {
             MutationType::Adaptive => self.mutate_adaptive(genome, rate, strength),
             MutationType::Random => self.mutate_random(genome, rate, strength),
-            MutationType::Gaussian { mean, std_dev } => self.mutate_gaussian(genome, rate, mean, std_dev),
+            MutationType::Gaussian { mean, std_dev } => {
+                self.mutate_gaussian(genome, rate, mean, std_dev)
+            }
             MutationType::Directed { direction } => self.mutate_directed(genome, rate, direction),
             MutationType::Hybrid => {
                 // Hibrit mod: %70 Adaptif, %30 Directed
@@ -56,19 +58,25 @@ impl MutationEngine {
         }
     }
 
-    pub fn mutate_adaptive(&mut self, genome: &mut StrategyGenome, base_rate: f64, base_strength: f64) {
+    pub fn mutate_adaptive(
+        &mut self,
+        genome: &mut StrategyGenome,
+        base_rate: f64,
+        base_strength: f64,
+    ) {
         let fitness = genome.fitness;
         let factor = match fitness {
-            f if f < 50.0  => 2.0,
+            f if f < 50.0 => 2.0,
             f if f < 100.0 => 1.0,
-            _              => 0.5,
+            _ => 0.5,
         };
 
         let adj_rate = base_rate * factor;
         let adj_strength = (base_strength * factor).max(0.01);
-        
+
         let mut rng = rand::thread_rng();
-        let normal = Normal::new(0.0, adj_strength).unwrap_or_else(|_| Normal::new(0.0, 0.01).unwrap());
+        let normal =
+            Normal::new(0.0, adj_strength).unwrap_or_else(|_| Normal::new(0.0, 0.01).unwrap());
 
         for (key, value) in genome.genes.iter_mut() {
             if rng.gen::<f64>() < adj_rate {
@@ -76,7 +84,9 @@ impl MutationEngine {
                 let old_val = *value;
                 *value += delta;
                 self.apply_constraints(key, value);
-                genome.mutation_history.push(format!("{}:{:.2}->{:.2}", key, old_val, *value));
+                genome
+                    .mutation_history
+                    .push(format!("{}:{:.2}->{:.2}", key, old_val, *value));
                 self.mutation_stats.total_mutations += 1;
             }
         }
@@ -122,7 +132,7 @@ impl MutationEngine {
         match key {
             "fast_period" | "slow_period" | "period" => *value = value.clamp(2.0, 200.0).round(),
             "overbought" => *value = value.clamp(60.0, 90.0),
-            "oversold"   => *value = value.clamp(10.0, 40.0),
+            "oversold" => *value = value.clamp(10.0, 40.0),
             "stop_loss_pct" | "take_profit_pct" => *value = value.clamp(0.1, 20.0),
             "signal_threshold" => *value = value.clamp(0.0001, 0.1),
             _ => *value = value.max(0.0),
@@ -131,20 +141,28 @@ impl MutationEngine {
 
     pub fn evaluate_impact(&mut self, old_f: f64, new_f: f64) {
         match new_f - old_f {
-            d if d > 1.0  => self.mutation_stats.beneficial_mutations += 1,
+            d if d > 1.0 => self.mutation_stats.beneficial_mutations += 1,
             d if d < -1.0 => self.mutation_stats.harmful_mutations += 1,
-            _             => self.mutation_stats.neutral_mutations += 1,
+            _ => self.mutation_stats.neutral_mutations += 1,
         }
     }
 
     pub fn get_summary(&self) -> String {
         let total = self.mutation_stats.total_mutations as f64;
-        if total == 0.0 { return "Mutasyon verisi yok".to_owned(); }
+        if total == 0.0 {
+            return "Mutasyon verisi yok".to_owned();
+        }
         format!(
             "Mutasyon Özeti | Toplam: {} | Faydalı: {:.1}% | Zararlı: {:.1}%",
-            total, (self.mutation_stats.beneficial_mutations as f64 / total) * 100.0, (self.mutation_stats.harmful_mutations as f64 / total) * 100.0
+            total,
+            (self.mutation_stats.beneficial_mutations as f64 / total) * 100.0,
+            (self.mutation_stats.harmful_mutations as f64 / total) * 100.0
         )
     }
 }
 
-impl Default for MutationEngine { fn default() -> Self { Self::new(MutationType::Adaptive) } }
+impl Default for MutationEngine {
+    fn default() -> Self {
+        Self::new(MutationType::Adaptive)
+    }
+}

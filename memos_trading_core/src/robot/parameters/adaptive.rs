@@ -26,42 +26,54 @@ pub fn default_patch_for_regime(regime: &str) -> RegimePatch {
     match regime {
         "Ranging" => RegimePatch::empty()
             .with_edge(EdgeThresholds {
-                cold: 0.30, warm: 0.45, hot: 0.65,
-                cold_until: 0.05, warm_until: 0.30,
+                cold: 0.30,
+                warm: 0.45,
+                hot: 0.65,
+                cold_until: 0.05,
+                warm_until: 0.30,
             })
             .with_trade_risk(TradeRiskParams {
-                take_profit_pct:   1.5,
-                stop_loss_pct:     0.8,
+                take_profit_pct: 1.5,
+                stop_loss_pct: 0.8,
                 max_position_size: 0.35,
             }),
         "HighVolatility" => RegimePatch::empty()
             .with_edge(EdgeThresholds {
-                cold: 0.45, warm: 0.55, hot: 0.70,
-                cold_until: 0.05, warm_until: 0.30,
+                cold: 0.45,
+                warm: 0.55,
+                hot: 0.70,
+                cold_until: 0.05,
+                warm_until: 0.30,
             })
             .with_trade_risk(TradeRiskParams {
-                take_profit_pct:   4.0,
-                stop_loss_pct:     2.0,
+                take_profit_pct: 4.0,
+                stop_loss_pct: 2.0,
                 max_position_size: 0.25,
             }),
         "LowVolatility" => RegimePatch::empty()
             .with_edge(EdgeThresholds {
-                cold: 0.15, warm: 0.25, hot: 0.40,
-                cold_until: 0.05, warm_until: 0.30,
+                cold: 0.15,
+                warm: 0.25,
+                hot: 0.40,
+                cold_until: 0.05,
+                warm_until: 0.30,
             })
             .with_trade_risk(TradeRiskParams {
-                take_profit_pct:   2.5,
-                stop_loss_pct:     1.2,
+                take_profit_pct: 2.5,
+                stop_loss_pct: 1.2,
                 max_position_size: 0.50,
             }),
         "StrongUptrend" | "StrongDowntrend" => RegimePatch::empty()
             .with_edge(EdgeThresholds {
-                cold: 0.15, warm: 0.30, hot: 0.50,
-                cold_until: 0.05, warm_until: 0.30,
+                cold: 0.15,
+                warm: 0.30,
+                hot: 0.50,
+                cold_until: 0.05,
+                warm_until: 0.30,
             })
             .with_trade_risk(TradeRiskParams {
-                take_profit_pct:   3.5,
-                stop_loss_pct:     1.5,
+                take_profit_pct: 3.5,
+                stop_loss_pct: 1.5,
                 max_position_size: 0.50,
             }),
         // WeakUptrend / WeakDowntrend / Unknown → base parametreler.
@@ -107,16 +119,24 @@ mod tests {
     fn strong_trends_share_same_patch() {
         let up = default_patch_for_regime("StrongUptrend");
         let dn = default_patch_for_regime("StrongDowntrend");
-        assert_eq!(up.edge_thresholds.map(|e| e.cold), dn.edge_thresholds.map(|e| e.cold));
-        assert_eq!(up.trade_risk.map(|t| t.take_profit_pct),
-                   dn.trade_risk.map(|t| t.take_profit_pct));
+        assert_eq!(
+            up.edge_thresholds.map(|e| e.cold),
+            dn.edge_thresholds.map(|e| e.cold)
+        );
+        assert_eq!(
+            up.trade_risk.map(|t| t.take_profit_pct),
+            dn.trade_risk.map(|t| t.take_profit_pct)
+        );
     }
 
     #[test]
     fn weak_and_unknown_regimes_yield_empty_patch() {
         for r in ["WeakUptrend", "WeakDowntrend", "Unknown", "Custom123"] {
-            assert!(default_patch_for_regime(r).is_empty(),
-                "rejim {} için boş patch beklenir", r);
+            assert!(
+                default_patch_for_regime(r).is_empty(),
+                "rejim {} için boş patch beklenir",
+                r
+            );
         }
     }
 }

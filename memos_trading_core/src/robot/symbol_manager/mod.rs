@@ -1,3 +1,3 @@
 pub mod manager;
 
-pub use manager::{SymbolManager, SymbolState, PortfolioStats};
+pub use manager::{PortfolioStats, SymbolManager, SymbolState};

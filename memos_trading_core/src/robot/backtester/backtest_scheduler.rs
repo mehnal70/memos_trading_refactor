@@ -1,21 +1,21 @@
 // robot/backtest_scheduler.rs - Otomatik backtest scheduler ve param optimization
 // Periyodik olarak geçmiş veri ile backtest çalıştırır, parametreleri optimize eder, canary mode ile live'e geçer
 
-use chrono::{DateTime, Duration, Utc};
-use crate::core::types::{Candle, StrategyParams, Signal};
+use crate::core::types::{Candle, Signal, StrategyParams};
 use crate::Result;
+use chrono::{DateTime, Duration, Utc};
 
 /// Backtest sonuçları
 #[derive(Debug, Clone)]
 pub struct BacktestResult {
     pub total_trades: usize,
-    pub win_rate: f64,                  // 0-100
-    pub sharpe_ratio: f64,              // Risk-adjusted return
-    pub max_drawdown_pct: f64,          // Max loss from peak
-    pub profit_factor: f64,             // Gross profit / Gross loss
-    pub net_pnl: f64,                   // Total P&L
-    pub params: StrategyParams,         // Kullanılan parametreler
-    pub timestamp: DateTime<Utc>,       // Backtest zamanı
+    pub win_rate: f64,            // 0-100
+    pub sharpe_ratio: f64,        // Risk-adjusted return
+    pub max_drawdown_pct: f64,    // Max loss from peak
+    pub profit_factor: f64,       // Gross profit / Gross loss
+    pub net_pnl: f64,             // Total P&L
+    pub params: StrategyParams,   // Kullanılan parametreler
+    pub timestamp: DateTime<Utc>, // Backtest zamanı
 }
 
 impl BacktestResult {
@@ -64,17 +64,17 @@ pub enum CanaryStatus {
 /// Scheduler konfigürasyonu
 #[derive(Debug, Clone)]
 pub struct SchedulerConfig {
-    pub backtest_interval_secs: u64,   // Ne sıklıkta backtest çalıştır (örn. 3600 = 1h)
-    pub lookback_days: u64,             // Kaç gün geçmiş veri kullan (örn. 30)
-    pub min_candles_for_backtest: usize,// Min candle sayısı (örn. 100)
-    pub max_consecutive_losses: usize,  // Fail-safe: max kayıp trade sayısı
-    pub paper_duration_before_live: u64,// Paper mod süresi (secs, örn. 86400 = 1 gün)
+    pub backtest_interval_secs: u64, // Ne sıklıkta backtest çalıştır (örn. 3600 = 1h)
+    pub lookback_days: u64,          // Kaç gün geçmiş veri kullan (örn. 30)
+    pub min_candles_for_backtest: usize, // Min candle sayısı (örn. 100)
+    pub max_consecutive_losses: usize, // Fail-safe: max kayıp trade sayısı
+    pub paper_duration_before_live: u64, // Paper mod süresi (secs, örn. 86400 = 1 gün)
 }
 
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
-            backtest_interval_secs: 3600,   // 1 saat
+            backtest_interval_secs: 3600, // 1 saat
             lookback_days: 30,
             min_candles_for_backtest: 100,
             max_consecutive_losses: 5,
@@ -96,9 +96,9 @@ pub struct BacktestScheduler {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TradingMode {
-    Disabled,  // Sistemi kapat
-    Paper,     // Paper trading (güvenli test)
-    Live,      // Live trading (canlı para)
+    Disabled, // Sistemi kapat
+    Paper,    // Paper trading (güvenli test)
+    Live,     // Live trading (canlı para)
 }
 
 impl BacktestScheduler {
@@ -146,7 +146,9 @@ impl BacktestScheduler {
                 if self.current_mode == TradingMode::Paper {
                     if let Some(switch_time) = self.mode_switch_time {
                         let elapsed = Utc::now() - switch_time;
-                        if elapsed > Duration::seconds(self.config.paper_duration_before_live as i64) {
+                        if elapsed
+                            > Duration::seconds(self.config.paper_duration_before_live as i64)
+                        {
                             self.current_mode = TradingMode::Live;
                             println!("[SCHEDULER] ✓ Paper validation passed! Switching to LIVE");
                         }
@@ -173,7 +175,10 @@ impl BacktestScheduler {
         } else {
             self.consecutive_losses += 1;
             if self.consecutive_losses >= self.config.max_consecutive_losses {
-                println!("[SCHEDULER] FAILSAFE: {} consecutive losses, disabling trading", self.consecutive_losses);
+                println!(
+                    "[SCHEDULER] FAILSAFE: {} consecutive losses, disabling trading",
+                    self.consecutive_losses
+                );
                 self.current_mode = TradingMode::Disabled;
             }
         }

@@ -2,7 +2,7 @@
 
 use crate::prelude::*;
 
-/// Srivastava ATP - Evrensel Motor Arayüzü (Trait)
+/// Evrensel Motor Arayüzü (Trait)
 pub trait TradingEngine {
     fn name(&self) -> &str;
 }

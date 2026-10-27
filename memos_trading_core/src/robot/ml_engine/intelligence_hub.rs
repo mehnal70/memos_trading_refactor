@@ -5,20 +5,20 @@
 // 2. Kapsüllü geri besleme (Feedback loop) mekanizması
 // 3. Fonksiyonel ticaret hafızası yönetimi
 // 4. Panic-free HashMap ve Rejim eşleştirme
-use crate::prelude::*; // Evrensel çekirdek kontratları ve AdaptiveThresholds yapısını bağlar
-use std::collections::{HashMap, VecDeque};
-use std::time::Instant;
+use crate::core::types::{PositionId, Signal};
 use crate::evolution::AutonomousController;
+use crate::prelude::*; // Evrensel çekirdek kontratları ve AdaptiveThresholds yapısını bağlar
 use crate::robot::ml_engine::{
     DriftDetector, FeatureExtractor, FeatureVector, GradientBoostedTrees, StrategyScorer,
     TradePatternClassifier,
 };
-use crate::core::types::{PositionId, Signal};
+use std::collections::{HashMap, VecDeque};
+use std::time::Instant;
 
 //use crate::robot::{App};
 
-use std::sync::{Arc, Mutex};
 use crate::robot::robotic_loop::AppState;
+use std::sync::{Arc, Mutex};
 
 /// §88.4: IntelligenceHub - Sistemin Öğrenme ve Adaptasyon Merkezi
 /// 🧠 İSTİHBARAT BAŞKANLIĞI (ASIL İŞÇİ MOTOR)
@@ -84,10 +84,12 @@ impl IntelligenceHub {
     //   - Hold → 0.5 (nötr; cycle edge eşikleriyle tabii hareket etsin)
 
     pub fn predict_confidence(&self, fv: &FeatureVector, signal: &Signal) -> Option<f64> {
-        if !self.gbt.is_ready() { return None; }
+        if !self.gbt.is_ready() {
+            return None;
+        }
         let score = self.gbt.predict(fv); // [-1, 1]
         let raw = match signal {
-            Signal::Buy  => (score + 1.0) / 2.0,
+            Signal::Buy => (score + 1.0) / 2.0,
             Signal::Sell => ((-score) + 1.0) / 2.0,
             Signal::Hold => 0.5,
         };
@@ -103,7 +105,9 @@ impl IntelligenceHub {
     /// eğitildiği TF'deki mumlardan üretmeli (train/infer tutarlılığı). Son ~200 mumdan
     /// FeatureVector çıkarılır (predict cycle'la aynı pencere).
     pub fn regime_direction_score(&self, candles: &[crate::core::types::Candle]) -> Option<f64> {
-        if !self.gbt.is_ready() || candles.len() < 30 { return None; }
+        if !self.gbt.is_ready() || candles.len() < 30 {
+            return None;
+        }
         let tail = &candles[candles.len().saturating_sub(200)..];
         let fv = FeatureExtractor::extract(tail);
         Some(self.gbt.predict(&fv).clamp(-1.0, 1.0))
@@ -148,37 +152,40 @@ impl IntelligenceHub {
     pub fn should_retrain(&self, current_drift: f64) -> bool {
         let history = &self.drift_history;
         let n = history.len();
-        
+
         // Soğuk Başlangıç Koruması: Hafızada yeterli veri yoksa (ilk 10 döngü) varsayılan baseline'a bak
-        if n < 10 { 
-            return current_drift > self.thresholds.drift_baseline; 
+        if n < 10 {
+            return current_drift > self.thresholds.drift_baseline;
         }
-        
+
         // 1. Geçmiş sapmaların ortalamasını (mean) hesapla
         let sum: f64 = history.iter().sum();
         let mean = sum / n as f64;
-        
+
         // 2. Standart Sapmayı (Std Dev) hesapla (Single-pass variance)
-        let variance_sum: f64 = history.iter()
-            .map(|&d| (d - mean).powi(2))
-            .sum();
+        let variance_sum: f64 = history.iter().map(|&d| (d - mean).powi(2)).sum();
         let std_dev = (variance_sum / n as f64).sqrt();
-        
+
         // 3. DİNAMİK BARİKAT: Eşik = Ortalama + (2.0 * Standart Sapma)
-        let dynamic_threshold = mean + (2.0 * std_dev); 
-        
+        let dynamic_threshold = mean + (2.0 * std_dev);
+
         current_drift > dynamic_threshold
     }
 
     /// §88.6: Evrimsel Döngü Kontrolü (Legacy: maybe_evolve)
     /// Pattern Matching ile otonom tetikleme.
     pub fn tick_evolution(&mut self) {
-        match (self.controller.evolution_enabled, self.controller.should_evolve()) {
+        match (
+            self.controller.evolution_enabled,
+            self.controller.should_evolve(),
+        ) {
             (true, true) => {
-                log::info!("Srivastava-ATP: Popülasyon evrimi tetiklendi. Otonom adaptasyon başlıyor.");
+                log::info!(
+                    "Srivastava-ATP: Popülasyon evrimi tetiklendi. Otonom adaptasyon başlıyor."
+                );
                 self.controller.evolve_population();
-            },
-            (true, false) => { /* Henüz evrim zamanı değil, denge korunuyor */ },
+            }
+            (true, false) => { /* Henüz evrim zamanı değil, denge korunuyor */ }
             _ => { /* Evrimsel motor devre dışı */ }
         }
     }
@@ -188,21 +195,27 @@ impl IntelligenceHub {
         // Functional Entry Management: İşlemi hafızadan çıkar ve işle
         if let Some((regime, strategy)) = self.pending_trades.remove(&pos_id) {
             // Evrimsel beyne tecrübe aktarımı
-            self.controller.learn_from_trade(pnl_pct, &regime, &strategy);
-            
+            self.controller
+                .learn_from_trade(pnl_pct, &regime, &strategy);
+
             // Reaktif Evrim: Eğer zarar edildiyse, stratejiyi otonom sorgula
             match pnl_pct {
                 p if p < 0.0 => {
                     log::warn!("Srivastava-ATP: Kayıplı işlem sonrası mikro-evrim denetleniyor. PnL: {:.2}%", p);
                     self.tick_evolution();
-                },
+                }
                 _ => log::info!("Srivastava-ATP: Başarılı işlem tecrübe hanesine mühürlendi."),
             }
         }
     }
 
     /// Yeni bir işlemi evrimsel takip listesine mühürler.
-    pub fn track_trade(&mut self, id: PositionId, regime: crate::evolution::MarketRegime, strategy: String) {
+    pub fn track_trade(
+        &mut self,
+        id: PositionId,
+        regime: crate::evolution::MarketRegime,
+        strategy: String,
+    ) {
         self.pending_trades.insert(id, (regime, strategy));
     }
 }
@@ -214,14 +227,18 @@ mod tests {
 
     fn fresh_hub() -> IntelligenceHub {
         use crate::evolution::AutonomousControllerConfig;
-        IntelligenceHub::new(AutonomousController::new(AutonomousControllerConfig::default()))
+        IntelligenceHub::new(AutonomousController::new(
+            AutonomousControllerConfig::default(),
+        ))
     }
 
     #[test]
     fn drift_retrain_armed_when_never_fired() {
         let hub = fresh_hub();
-        assert!(hub.drift_retrain_armed(600),
-            "ilk çağrıda (timestamp yok) armed olmalı");
+        assert!(
+            hub.drift_retrain_armed(600),
+            "ilk çağrıda (timestamp yok) armed olmalı"
+        );
     }
 
     #[test]
@@ -230,10 +247,18 @@ mod tests {
         // gbt_trained_interval de None → regime_for_cycle GBT'yi hiç çağırmaz.
         let hub = fresh_hub();
         assert_eq!(hub.gbt_trained_interval, None, "fresh hub eğitilmemiş");
-        let cs: Vec<crate::core::types::Candle> = (0..60).map(|i| crate::core::types::Candle {
-            timestamp: chrono::Utc::now(), open: 100.0, high: 101.0, low: 99.0,
-            close: 100.0 + i as f64, volume: 1.0, symbol: "T".into(), interval: "1m".into(),
-        }).collect();
+        let cs: Vec<crate::core::types::Candle> = (0..60)
+            .map(|i| crate::core::types::Candle {
+                timestamp: chrono::Utc::now(),
+                open: 100.0,
+                high: 101.0,
+                low: 99.0,
+                close: 100.0 + i as f64,
+                volume: 1.0,
+                symbol: "T".into(),
+                interval: "1m".into(),
+            })
+            .collect();
         assert_eq!(hub.regime_direction_score(&cs), None);
     }
 
@@ -244,8 +269,10 @@ mod tests {
         hub.mark_drift_retrain_fired_at(t0);
         // 5 dk sonra hâlâ cooldown'da (default 600s = 10 dk).
         let t1 = t0 + Duration::from_secs(300);
-        assert!(!hub.drift_retrain_armed_at(t1, 600),
-            "cooldown içinde armed olmamalı");
+        assert!(
+            !hub.drift_retrain_armed_at(t1, 600),
+            "cooldown içinde armed olmamalı"
+        );
     }
 
     #[test]
@@ -255,8 +282,10 @@ mod tests {
         hub.mark_drift_retrain_fired_at(t0);
         // Tam eşiğe ulaşır (saturating_duration_since(>=cooldown)).
         let t1 = t0 + Duration::from_secs(600);
-        assert!(hub.drift_retrain_armed_at(t1, 600),
-            "tam cooldown sonunda yeniden armed olmalı");
+        assert!(
+            hub.drift_retrain_armed_at(t1, 600),
+            "tam cooldown sonunda yeniden armed olmalı"
+        );
     }
 
     #[test]
@@ -265,8 +294,10 @@ mod tests {
         let t0 = Instant::now();
         hub.mark_drift_retrain_fired_at(t0);
         // cooldown=0 → her zaman armed (cooldown devre dışı modu).
-        assert!(hub.drift_retrain_armed_at(t0, 0),
-            "cooldown=0 ile her tick fire edebilmeli");
+        assert!(
+            hub.drift_retrain_armed_at(t0, 0),
+            "cooldown=0 ile her tick fire edebilmeli"
+        );
     }
 
     // ── predict_confidence (GBT inference) ──────────────────────────────
@@ -275,14 +306,21 @@ mod tests {
     fn predict_confidence_none_when_gbt_not_ready() {
         let hub = fresh_hub();
         let fv = crate::robot::ml_engine::FeatureExtractor::extract(
-            &(0..30).map(|i| crate::core::types::Candle {
-                open: 100.0 + i as f64, high: 100.5 + i as f64,
-                low: 99.5 + i as f64, close: 100.0 + i as f64,
-                volume: 100.0, ..Default::default()
-            }).collect::<Vec<_>>()
+            &(0..30)
+                .map(|i| crate::core::types::Candle {
+                    open: 100.0 + i as f64,
+                    high: 100.5 + i as f64,
+                    low: 99.5 + i as f64,
+                    close: 100.0 + i as f64,
+                    volume: 100.0,
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>(),
         );
-        assert!(hub.predict_confidence(&fv, &Signal::Buy).is_none(),
-            "eğitilmemiş GBT → None");
+        assert!(
+            hub.predict_confidence(&fv, &Signal::Buy).is_none(),
+            "eğitilmemiş GBT → None"
+        );
     }
 
     #[test]
@@ -290,11 +328,16 @@ mod tests {
         let mut hub = fresh_hub();
         // GBT eğit: deterministik tek yön (sürekli pozitif target).
         use crate::robot::ml_engine::build_training_set;
-        let candles: Vec<crate::core::types::Candle> = (0..60).map(|i| crate::core::types::Candle {
-            open: 100.0 + i as f64, high: 100.5 + i as f64,
-            low: 99.5 + i as f64, close: 100.0 + i as f64,
-            volume: 100.0, ..Default::default()
-        }).collect();
+        let candles: Vec<crate::core::types::Candle> = (0..60)
+            .map(|i| crate::core::types::Candle {
+                open: 100.0 + i as f64,
+                high: 100.5 + i as f64,
+                low: 99.5 + i as f64,
+                close: 100.0 + i as f64,
+                volume: 100.0,
+                ..Default::default()
+            })
+            .collect();
         let ds = build_training_set(&candles, 20, 5);
         hub.gbt.train(&ds);
         assert!(hub.gbt.is_ready());
@@ -308,23 +351,34 @@ mod tests {
         let mut hub = fresh_hub();
         use crate::robot::ml_engine::build_training_set;
         // Monoton yukarı seri → GBT score pozitif olmalı (sign target = +1).
-        let candles: Vec<crate::core::types::Candle> = (0..120).map(|i| crate::core::types::Candle {
-            open: 100.0 + i as f64, high: 100.5 + i as f64,
-            low: 99.5 + i as f64, close: 100.0 + i as f64,
-            volume: 100.0, ..Default::default()
-        }).collect();
+        let candles: Vec<crate::core::types::Candle> = (0..120)
+            .map(|i| crate::core::types::Candle {
+                open: 100.0 + i as f64,
+                high: 100.5 + i as f64,
+                low: 99.5 + i as f64,
+                close: 100.0 + i as f64,
+                volume: 100.0,
+                ..Default::default()
+            })
+            .collect();
         let ds = build_training_set(&candles, 20, 5);
         hub.gbt.train(&ds);
         let fv = crate::robot::ml_engine::FeatureExtractor::extract(&candles[80..]);
         let conf_buy = hub.predict_confidence(&fv, &Signal::Buy).unwrap();
         let conf_sell = hub.predict_confidence(&fv, &Signal::Sell).unwrap();
-        assert!(conf_buy > 0.5,
-            "Buy + yukarı eğilim → conf > 0.5, geldi: {conf_buy}");
-        assert!(conf_sell < 0.5,
-            "Sell + yukarı eğilim → conf < 0.5 (simetri), geldi: {conf_sell}");
+        assert!(
+            conf_buy > 0.5,
+            "Buy + yukarı eğilim → conf > 0.5, geldi: {conf_buy}"
+        );
+        assert!(
+            conf_sell < 0.5,
+            "Sell + yukarı eğilim → conf < 0.5 (simetri), geldi: {conf_sell}"
+        );
         // Simetri: Buy + Sell ≈ 1
-        assert!((conf_buy + conf_sell - 1.0).abs() < 1e-9,
-            "Buy/Sell güvenleri simetrik olmalı: {conf_buy} + {conf_sell}");
+        assert!(
+            (conf_buy + conf_sell - 1.0).abs() < 1e-9,
+            "Buy/Sell güvenleri simetrik olmalı: {conf_buy} + {conf_sell}"
+        );
     }
 
     #[test]

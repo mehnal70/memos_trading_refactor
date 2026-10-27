@@ -15,8 +15,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, TimeZone, Utc};
@@ -35,18 +35,24 @@ pub enum ReportPeriod {
 impl ReportPeriod {
     pub fn label(&self, start: DateTime<Utc>) -> String {
         match self {
-            ReportPeriod::Daily  => format!("daily {}", start.format("%Y-%m-%d")),
-            ReportPeriod::Weekly => format!("weekly {}-W{:02}",
-                start.iso_week().year(), start.iso_week().week()),
+            ReportPeriod::Daily => format!("daily {}", start.format("%Y-%m-%d")),
+            ReportPeriod::Weekly => format!(
+                "weekly {}-W{:02}",
+                start.iso_week().year(),
+                start.iso_week().week()
+            ),
         }
     }
 
     /// Period için dosya adı tabanı (uzantısız).
     pub fn file_stem(&self, start: DateTime<Utc>) -> String {
         match self {
-            ReportPeriod::Daily  => format!("daily_{}", start.format("%Y-%m-%d")),
-            ReportPeriod::Weekly => format!("weekly_{}-W{:02}",
-                start.iso_week().year(), start.iso_week().week()),
+            ReportPeriod::Daily => format!("daily_{}", start.format("%Y-%m-%d")),
+            ReportPeriod::Weekly => format!(
+                "weekly_{}-W{:02}",
+                start.iso_week().year(),
+                start.iso_week().week()
+            ),
         }
     }
 }
@@ -108,15 +114,18 @@ impl TradeSummary {
         end: DateTime<Utc>,
     ) -> Self {
         // 1. Pencereye düşen kapanışları topla
-        let in_window: Vec<&ClosedTradeModel> = trades.iter().filter(|t| {
-            DateTime::parse_from_rfc3339(&t.closed_at)
-                .ok()
-                .map(|dt| {
-                    let utc: DateTime<Utc> = dt.with_timezone(&Utc);
-                    utc >= start && utc < end
-                })
-                .unwrap_or(false)
-        }).collect();
+        let in_window: Vec<&ClosedTradeModel> = trades
+            .iter()
+            .filter(|t| {
+                DateTime::parse_from_rfc3339(&t.closed_at)
+                    .ok()
+                    .map(|dt| {
+                        let utc: DateTime<Utc> = dt.with_timezone(&Utc);
+                        utc >= start && utc < end
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
 
         let total_trades = in_window.len();
         let mut sum_win: f64 = 0.0;
@@ -128,61 +137,110 @@ impl TradeSummary {
 
         // 2. Per-symbol ve per-exit-reason kovaları
         let mut sym_bucket: HashMap<String, (usize, usize, f64)> = HashMap::new(); // (trades, wins, pnl)
-        let mut exit_bucket: HashMap<String, (usize, f64)> = HashMap::new();       // (count, pnl)
+        let mut exit_bucket: HashMap<String, (usize, f64)> = HashMap::new(); // (count, pnl)
 
         for t in &in_window {
-            if t.pnl > 0.0 { wins += 1; sum_win += t.pnl; }
-            else if t.pnl < 0.0 { losses += 1; sum_loss_abs += -t.pnl; }
-            if t.pnl > best  { best  = t.pnl; }
-            if t.pnl < worst { worst = t.pnl; }
+            let net_pnl = t.effective_net_pnl();
+            if net_pnl > 0.0 {
+                wins += 1;
+                sum_win += net_pnl;
+            } else if net_pnl < 0.0 {
+                losses += 1;
+                sum_loss_abs += -net_pnl;
+            }
+            if net_pnl > best {
+                best = net_pnl;
+            }
+            if net_pnl < worst {
+                worst = net_pnl;
+            }
 
             let s = sym_bucket.entry(t.symbol.clone()).or_insert((0, 0, 0.0));
-            s.0 += 1; if t.pnl > 0.0 { s.1 += 1; } s.2 += t.pnl;
+            s.0 += 1;
+            if net_pnl > 0.0 {
+                s.1 += 1;
+            }
+            s.2 += net_pnl;
 
             let e = exit_bucket.entry(t.exit_reason.clone()).or_insert((0, 0.0));
-            e.0 += 1; e.1 += t.pnl;
+            e.0 += 1;
+            e.1 += net_pnl;
         }
 
         // 3. Türetilmiş metrikler
         let total_pnl_usd: f64 = sum_win - sum_loss_abs;
-        let win_rate = if total_trades > 0 { wins as f64 / total_trades as f64 } else { 0.0 };
-        let avg_win_usd  = if wins > 0   { sum_win / wins as f64 } else { 0.0 };
-        let avg_loss_usd = if losses > 0 { sum_loss_abs / losses as f64 } else { 0.0 };
+        let win_rate = if total_trades > 0 {
+            wins as f64 / total_trades as f64
+        } else {
+            0.0
+        };
+        let avg_win_usd = if wins > 0 { sum_win / wins as f64 } else { 0.0 };
+        let avg_loss_usd = if losses > 0 {
+            sum_loss_abs / losses as f64
+        } else {
+            0.0
+        };
         let profit_factor: Option<f64> = if sum_loss_abs > 0.0 {
             Some(sum_win / sum_loss_abs)
-        } else if sum_win > 0.0 { None } else { Some(0.0) };
+        } else if sum_win > 0.0 {
+            None
+        } else {
+            Some(0.0)
+        };
         let avg_rr: Option<f64> = if avg_loss_usd > 0.0 {
             Some(avg_win_usd / avg_loss_usd)
-        } else if avg_win_usd > 0.0 { None } else { Some(0.0) };
-        let best_trade_pnl  = if total_trades > 0 { best  } else { 0.0 };
+        } else if avg_win_usd > 0.0 {
+            None
+        } else {
+            Some(0.0)
+        };
+        let best_trade_pnl = if total_trades > 0 { best } else { 0.0 };
         let worst_trade_pnl = if total_trades > 0 { worst } else { 0.0 };
 
         // 4. Kovaları sıralı Vec'e dök (deterministik output)
-        let mut by_symbol: Vec<SymbolSummary> = sym_bucket.into_iter().map(|(symbol, (n, w, pnl))| {
-            SymbolSummary {
+        let mut by_symbol: Vec<SymbolSummary> = sym_bucket
+            .into_iter()
+            .map(|(symbol, (n, w, pnl))| SymbolSummary {
                 symbol,
                 trades: n,
                 wins: w,
                 pnl_usd: pnl,
                 win_rate: if n > 0 { w as f64 / n as f64 } else { 0.0 },
-            }
-        }).collect();
-        by_symbol.sort_by(|a, b| b.pnl_usd.partial_cmp(&a.pnl_usd).unwrap_or(std::cmp::Ordering::Equal));
+            })
+            .collect();
+        by_symbol.sort_by(|a, b| {
+            b.pnl_usd
+                .partial_cmp(&a.pnl_usd)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-        let mut by_exit_reason: Vec<ExitSummary> = exit_bucket.into_iter().map(|(reason, (n, pnl))| {
-            ExitSummary { reason, count: n, pnl_usd: pnl }
-        }).collect();
+        let mut by_exit_reason: Vec<ExitSummary> = exit_bucket
+            .into_iter()
+            .map(|(reason, (n, pnl))| ExitSummary {
+                reason,
+                count: n,
+                pnl_usd: pnl,
+            })
+            .collect();
         by_exit_reason.sort_by(|a, b| b.count.cmp(&a.count));
 
         TradeSummary {
             period: period.label(start),
             start: start.to_rfc3339(),
             end: end.to_rfc3339(),
-            total_trades, wins, losses, win_rate,
-            total_pnl_usd, avg_win_usd, avg_loss_usd,
-            profit_factor, avg_rr,
-            best_trade_pnl, worst_trade_pnl,
-            by_symbol, by_exit_reason,
+            total_trades,
+            wins,
+            losses,
+            win_rate,
+            total_pnl_usd,
+            avg_win_usd,
+            avg_loss_usd,
+            profit_factor,
+            avg_rr,
+            best_trade_pnl,
+            worst_trade_pnl,
+            by_symbol,
+            by_exit_reason,
             written_at: Utc::now().to_rfc3339(),
         }
     }
@@ -192,7 +250,7 @@ impl TradeSummary {
 pub fn current_day_window(now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
     let date = now.date_naive();
     let start = utc_at_midnight(date);
-    let end   = start + ChronoDuration::days(1);
+    let end = start + ChronoDuration::days(1);
     (start, end)
 }
 
@@ -203,7 +261,7 @@ pub fn current_week_window(now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>)
     let days_since_monday = date.weekday().num_days_from_monday() as i64;
     let monday = date - ChronoDuration::days(days_since_monday);
     let start = utc_at_midnight(monday);
-    let end   = start + ChronoDuration::days(7);
+    let end = start + ChronoDuration::days(7);
     (start, end)
 }
 
@@ -212,13 +270,17 @@ fn utc_at_midnight(date: NaiveDate) -> DateTime<Utc> {
 }
 
 /// Bir özet'i dosyaya atomik yazar (.tmp → rename).
-pub fn write_summary_to_file(summary: &TradeSummary, dir: &Path, period: ReportPeriod, start: DateTime<Utc>) -> std::io::Result<PathBuf> {
+pub fn write_summary_to_file(
+    summary: &TradeSummary,
+    dir: &Path,
+    period: ReportPeriod,
+    start: DateTime<Utc>,
+) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let file_name = format!("{}.json", period.file_stem(start));
     let target = dir.join(&file_name);
     let tmp = dir.join(format!("{}.tmp", &file_name));
-    let json = serde_json::to_string_pretty(summary)
-        .map_err(std::io::Error::other)?;
+    let json = serde_json::to_string_pretty(summary).map_err(std::io::Error::other)?;
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, &target)?;
     Ok(target)
@@ -227,31 +289,46 @@ pub fn write_summary_to_file(summary: &TradeSummary, dir: &Path, period: ReportP
 /// 📊 Periyodik closed_trades raporu task'ı.
 /// `reports_dir` örn. "data/reports". `interval_secs` default 300 (5 dk).
 /// Hem daily hem weekly özetini her tick'te idempotent olarak yeniden yazar.
-pub fn spawn_trade_summary(
-    state: Arc<Mutex<AppState>>,
-    reports_dir: String,
-    interval_secs: u64,
-) {
+pub fn spawn_trade_summary(state: Arc<Mutex<AppState>>, reports_dir: String, interval_secs: u64) {
     tokio::spawn(async move {
         let interval = Duration::from_secs(interval_secs.max(60));
         let dir = PathBuf::from(&reports_dir);
         let mut tick: u64 = 0;
         loop {
-            let stop = state.lock().map(|s| s.app_stop_signal.load(Ordering::Relaxed)).unwrap_or(true);
-            if stop { break; }
+            let lock_intent = "trade_summary:stop";
+            crate::robot::infra::app_state_lock_watchdog::set_intent(lock_intent);
+            let stop = match state.try_lock() {
+                Ok(s) => Some(s.app_stop_signal.load(Ordering::Relaxed)),
+                Err(_) => None,
+            };
+            crate::robot::infra::app_state_lock_watchdog::clear_intent(lock_intent);
+            let Some(stop) = stop else {
+                tokio::time::sleep(interval).await;
+                continue;
+            };
+            if stop {
+                break;
+            }
 
             // Kapanış listesinin clone'unu kısa kilit altında al
-            let trades: Vec<ClosedTradeModel> = {
-                let st = match state.lock() { Ok(s) => s, Err(_) => break };
-                st.finance.live_closed_trades.read()
+            let trades: Vec<ClosedTradeModel> = match state.try_lock().ok().and_then(|st| {
+                st.finance
+                    .live_closed_trades
+                    .try_read()
+                    .ok()
                     .map(|v| v.clone())
-                    .unwrap_or_default()
+            }) {
+                Some(trades) => trades,
+                None => {
+                    tokio::time::sleep(interval).await;
+                    continue;
+                }
             };
 
             let now = Utc::now();
             let (d_start, d_end) = current_day_window(now);
             let (w_start, w_end) = current_week_window(now);
-            let daily  = TradeSummary::aggregate(&trades, ReportPeriod::Daily,  d_start, d_end);
+            let daily = TradeSummary::aggregate(&trades, ReportPeriod::Daily, d_start, d_end);
             let weekly = TradeSummary::aggregate(&trades, ReportPeriod::Weekly, w_start, w_end);
 
             let mut errors: Vec<String> = Vec::new();

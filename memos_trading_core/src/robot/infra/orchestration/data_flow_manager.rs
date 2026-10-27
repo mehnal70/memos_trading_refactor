@@ -47,7 +47,9 @@ impl SimpleDataFlowManager {
     /// Veri kaynağının ne kadar süredir güncellenmediğini kontrol eder
     pub fn get_latency_ms(&self, name: &str) -> Option<i64> {
         self.sources.get(name).map(|s| {
-            Utc::now().signed_duration_since(s.last_update).num_milliseconds()
+            Utc::now()
+                .signed_duration_since(s.last_update)
+                .num_milliseconds()
         })
     }
 }

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Memos Runtime Setup
+Comment=Venue runtime'larını manuel olarak başlat, durdur ve kontrol et
+Exec=/home/memos/PycharmProjects/memos_trading_refactor/scripts/memos-runtime-setup.sh
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run MT5 Self-Heal periodically
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=__INTERVAL__
+Persistent=true
+Unit=mt5-self-heal.service
+
+[Install]
+WantedBy=timers.target

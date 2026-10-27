@@ -1,9 +1,76 @@
 // src/persistence/reader.rs - Srivastava ATP Adli Okuma Birimi
 
 // ... Mevcut importlar ve struct'lar (SymbolInfo, PaperTradingResult vb.) aynı kalsın ...
+use crate::core::model::{PaperTradingResult, PositionModel};
+use rusqlite::{params, Connection};
 use std::fs;
-use rusqlite::{Connection,params};
-use crate::core::model::{PositionModel,PaperTradingResult};
+
+pub fn load_uncertain_orders_for_profile(
+    db_path: &str,
+    profile: &str,
+) -> Result<Vec<crate::core::model::UncertainOrderState>, String> {
+    let conn = crate::persistence::open_db(db_path).map_err(|e| e.to_string())?;
+    let mut stmt = match conn.prepare(
+        "SELECT symbol, side, requested_quantity, filled_quantity, broker_order_id,
+                status, reason, created_at, last_checked_at, resolved_at
+                , healthy_reconcile_count
+         FROM uncertain_orders
+         WHERE profile=?1 AND resolved_at IS NULL
+         ORDER BY created_at",
+    ) {
+        Ok(stmt) => stmt,
+        Err(error) if error.to_string().contains("no such table") => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let rows = stmt
+        .query_map(params![profile], |row| {
+            Ok(crate::core::model::UncertainOrderState {
+                symbol: row.get(0)?,
+                side: row.get(1)?,
+                requested_quantity: row.get(2)?,
+                filled_quantity: row.get(3)?,
+                broker_order_id: row.get(4)?,
+                status: row.get(5)?,
+                reason: row.get(6)?,
+                created_at: row.get(7)?,
+                last_checked_at: row.get(8)?,
+                resolved_at: row.get(9)?,
+                healthy_reconcile_count: row.get::<_, i64>(10)? as u32,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("uncertain_orders recovery hatası: {e}"))
+}
+
+pub fn load_pending_closes_for_profile(
+    db_path: &str,
+    profile: &str,
+) -> Result<Vec<(memos_venue_api::CanonicalPositionKey, String)>, String> {
+    let conn = crate::persistence::open_db(db_path).map_err(|e| e.to_string())?;
+    let mut stmt = match conn.prepare(
+        "SELECT position_key, broker_order_id FROM pending_closes WHERE profile=?1",
+    ) {
+        Ok(stmt) => stmt,
+        Err(error) if error.to_string().contains("no such table") => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let rows = stmt
+        .query_map(params![profile], |row| {
+            let raw_key: String = row.get(0)?;
+            let key = serde_json::from_str(&raw_key).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok((key, row.get(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("pending_closes recovery hatası: {e}"))
+}
 
 // --- 3. SRIVASTAVA MODERNİZE OKUMA METODLARI ---
 
@@ -12,33 +79,45 @@ use crate::core::model::{PositionModel,PaperTradingResult};
 pub fn load_config_with_fallback<T: serde::de::DeserializeOwned + Default>(path: &str) -> T {
     match fs::read_to_string(path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
-            eprintln!("⚠️ [Reader] JSON parse hatası [{}]: {}. Varsayılanlar yükleniyor.", path, e);
+            eprintln!(
+                "⚠️ [Reader] JSON parse hatası [{}]: {}. Varsayılanlar yükleniyor.",
+                path, e
+            );
             T::default()
         }),
         Err(_) => {
-            eprintln!("ℹ️ [Reader] {} bulunamadı. Temiz profil oluşturuluyor.", path);
+            eprintln!(
+                "ℹ️ [Reader] {} bulunamadı. Temiz profil oluşturuluyor.",
+                path
+            );
             T::default()
         }
     }
 }
 
-
-
 /// Veritabanından en son 'Adli Durum Snapshot'ını canlandırır.
 /// Bu fonksiyon robotun 'ben kimim?' sorusuna yanıtıdır.
 pub fn recover_open_positions(db_path: &str) -> Result<Vec<PositionModel>, String> {
+    recover_open_positions_for_profile(db_path, "default")
+}
+
+pub fn recover_open_positions_for_profile(
+    db_path: &str,
+    profile: &str,
+) -> Result<Vec<PositionModel>, String> {
     let conn = crate::persistence::open_db(db_path).map_err(|e| e.to_string())?;
 
-    let json_str: Option<String> = conn.query_row(
-        "SELECT positions FROM open_positions_snapshot WHERE id = 1",
-        [],
-
-        |row| row.get(0)
-    ).ok();
+    let json_str: Option<String> = conn
+        .query_row(
+            "SELECT positions FROM open_positions_snapshot WHERE profile = ?1",
+            params![profile],
+            |row| row.get(0),
+        )
+        .ok();
 
     match json_str {
         Some(s) => serde_json::from_str(&s).map_err(|e| format!("Recovery hatası: {}", e)),
-        None => Ok(vec![])
+        None => Ok(vec![]),
     }
 }
 
@@ -52,22 +131,68 @@ pub struct AccountStateRecord {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ClosedTradesSnapshotRecord {
+    pub trades: Vec<crate::core::model::ClosedTradeModel>,
+    pub equity_history: Vec<f64>,
+}
+
+pub fn load_closed_trades_snapshot_for_profile(
+    db_path: &str,
+    profile: &str,
+) -> Result<Option<ClosedTradesSnapshotRecord>, String> {
+    let conn = crate::persistence::open_db(db_path).map_err(|e| e.to_string())?;
+    let row = conn.query_row(
+        "SELECT trades, equity_history FROM closed_trades_snapshot WHERE profile = ?1",
+        params![profile],
+        |r| {
+            let trades_json: String = r.get(0)?;
+            let equity_json: String = r.get(1)?;
+            Ok((trades_json, equity_json))
+        },
+    );
+    match row {
+        Ok((trades_json, equity_json)) => {
+            let trades = serde_json::from_str(&trades_json)
+                .map_err(|e| format!("Kapalı işlem recovery hatası: {}", e))?;
+            let equity_history = serde_json::from_str(&equity_json)
+                .map_err(|e| format!("Equity history recovery hatası: {}", e))?;
+            Ok(Some(ClosedTradesSnapshotRecord {
+                trades,
+                equity_history,
+            }))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) if e.to_string().contains("no such table") => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Boot'ta önceki run'un `account_state` satırını okur.
 /// - Tablo yoksa veya kayıt yoksa: `Ok(None)` (cold-start).
 /// - DB açılamaz/parse hatası: `Err(String)`; çağıran cold-start'a düşer.
 pub fn load_account_state(db_path: &str) -> Result<Option<AccountStateRecord>, String> {
+    load_account_state_for_profile(db_path, "default")
+}
+
+pub fn load_account_state_for_profile(
+    db_path: &str,
+    profile: &str,
+) -> Result<Option<AccountStateRecord>, String> {
     let conn = crate::persistence::open_db(db_path).map_err(|e| e.to_string())?;
     let row = conn.query_row(
         "SELECT equity, peak_equity, starting_capital, closed_trades_count, updated_at \
-         FROM account_state WHERE id = 1",
-        [],
-        |r| Ok(AccountStateRecord {
-            equity: r.get(0)?,
-            peak_equity: r.get(1)?,
-            starting_capital: r.get(2)?,
-            closed_trades_count: r.get::<_, i64>(3)? as usize,
-            updated_at: r.get(4)?,
-        }),
+         FROM account_state WHERE profile = ?1",
+        params![profile],
+        |r| {
+            Ok(AccountStateRecord {
+                equity: r.get(0)?,
+                peak_equity: r.get(1)?,
+                starting_capital: r.get(2)?,
+                closed_trades_count: r.get::<_, i64>(3)? as usize,
+                updated_at: r.get(4)?,
+            })
+        },
     );
     match row {
         Ok(rec) => Ok(Some(rec)),
@@ -75,7 +200,11 @@ pub fn load_account_state(db_path: &str) -> Result<Option<AccountStateRecord>, S
         Err(e) => {
             // Tablo henüz oluşturulmamış olabilir (eski DB). Bunu cold-start kabul et.
             let msg = e.to_string();
-            if msg.contains("no such table") { Ok(None) } else { Err(msg) }
+            if msg.contains("no such table") {
+                Ok(None)
+            } else {
+                Err(msg)
+            }
         }
     }
 }
@@ -94,14 +223,15 @@ pub fn get_top_performing_symbols(db_path: &str, limit: usize) -> Vec<(String, f
         sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         sorted.into_iter().take(limit).collect()
     } else {
-        vec![]
+        return vec![];
     }
 }
 
-
-
 /// 🔬 ADLİ VERİ HASADI: Veritabanından en taze sanal işlem/backtest sonuçlarını okur
-pub fn read_paper_trading_results(db_path: &str, limit: Option<usize>) -> Result<Vec<PaperTradingResult>, crate::MemosTradingError> {
+pub fn read_paper_trading_results(
+    db_path: &str,
+    limit: Option<usize>,
+) -> Result<Vec<PaperTradingResult>, crate::MemosTradingError> {
     // 1. Veritabanı Bağlantısı Aç
     let conn = crate::persistence::open_db(db_path)
         .map_err(|e| crate::MemosTradingError::Database(format!("DB Açılamadı: {}", e)))?;
@@ -109,30 +239,34 @@ pub fn read_paper_trading_results(db_path: &str, limit: Option<usize>) -> Result
     let max_rows = limit.unwrap_or(50);
 
     // 2. Adli Sorguyu Hazırla
-    let mut stmt = conn.prepare(
-        "SELECT symbol, interval, total_trades, win_trades, loss_trades, win_rate, \
+    let mut stmt = conn
+        .prepare(
+            "SELECT symbol, interval, total_trades, win_trades, loss_trades, win_rate, \
          profit_factor, total_pnl_usd, max_drawdown_pct, sharpe_ratio, tested_at \
          FROM paper_trading_results \
          ORDER BY total_pnl_usd DESC \
-         LIMIT ?"
-    ).map_err(|e| crate::MemosTradingError::Database(format!("Sorgu Hazırlanamadı: {}", e)))?;
+         LIMIT ?",
+        )
+        .map_err(|e| crate::MemosTradingError::Database(format!("Sorgu Hazırlanamadı: {}", e)))?;
 
     // 3. Verileri Hasat Et ve Modelle
-    let rows = stmt.query_map(params![max_rows], |row| {
-        Ok(PaperTradingResult {
-            symbol: row.get(0)?,
-            interval: row.get(1)?,
-            total_trades: row.get(2)?,
-            win_trades: row.get(3)?,
-            loss_trades: row.get(4)?,
-            win_rate: row.get(5)?,
-            profit_factor: row.get(6)?,
-            total_pnl_usd: row.get(7)?,
-            max_drawdown_pct: row.get(8)?,
-            sharpe_ratio: row.get(9)?,
-            tested_at: row.get(10)?,
+    let rows = stmt
+        .query_map(params![max_rows], |row| {
+            Ok(PaperTradingResult {
+                symbol: row.get(0)?,
+                interval: row.get(1)?,
+                total_trades: row.get(2)?,
+                win_trades: row.get(3)?,
+                loss_trades: row.get(4)?,
+                win_rate: row.get(5)?,
+                profit_factor: row.get(6)?,
+                total_pnl_usd: row.get(7)?,
+                max_drawdown_pct: row.get(8)?,
+                sharpe_ratio: row.get(9)?,
+                tested_at: row.get(10)?,
+            })
         })
-    }).map_err(|e| crate::MemosTradingError::Database(format!("Veri Okuma Hatası: {}", e)))?;
+        .map_err(|e| crate::MemosTradingError::Database(format!("Veri Okuma Hatası: {}", e)))?;
 
     let mut results = Vec::new();
     for res in rows.flatten() {
@@ -149,11 +283,17 @@ pub fn list_available_tables(db_path: &str) -> Result<Vec<String>, crate::MemosT
     let conn = crate::persistence::open_db(db_path)
         .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
 
-    let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table'")
-        .map_err(|e| crate::MemosTradingError::Database(format!("Sorgu hazırlama hatası: {}", e)))?;
+    let mut stmt = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+        .map_err(|e| {
+            crate::MemosTradingError::Database(format!("Sorgu hazırlama hatası: {}", e))
+        })?;
 
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))
-        .map_err(|e| crate::MemosTradingError::Database(format!("Tablo listesi okuma hatası: {}", e)))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| {
+            crate::MemosTradingError::Database(format!("Tablo listesi okuma hatası: {}", e))
+        })?;
 
     let mut tables = Vec::new();
     for table in rows.flatten() {
@@ -209,22 +349,24 @@ pub fn list_series(
             false,
         ),
     };
-    let mut stmt = conn.prepare(sql)
+    let mut stmt = conn
+        .prepare(sql)
         .map_err(|e| crate::MemosTradingError::Database(format!("list_series hazırlık: {}", e)))?;
     let map_row = |row: &rusqlite::Row| -> rusqlite::Result<CandleSeriesRef> {
         Ok(CandleSeriesRef {
             exchange: row.get(0)?,
-            market:   row.get(1)?,
-            symbol:   row.get(2)?,
+            market: row.get(1)?,
+            symbol: row.get(2)?,
             interval: row.get(3)?,
-            rows:     row.get::<_, i64>(4)?.max(0) as usize,
+            rows: row.get::<_, i64>(4)?.max(0) as usize,
         })
     };
     let rows = if has_filter {
         stmt.query_map(rusqlite::params![market_filter.unwrap()], map_row)
     } else {
         stmt.query_map([], map_row)
-    }.map_err(|e| crate::MemosTradingError::Database(format!("list_series sorgu: {}", e)))?;
+    }
+    .map_err(|e| crate::MemosTradingError::Database(format!("list_series sorgu: {}", e)))?;
     Ok(rows.flatten().collect())
 }
 
@@ -245,30 +387,81 @@ pub fn list_symbols_for_market(
     let conn = crate::persistence::open_db(db_path)
         .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
 
-    let mut where_clauses: Vec<&str> = Vec::new();
-    let mut params: Vec<&str> = Vec::new();
-    if let Some(m) = market   { where_clauses.push("market = ?");   params.push(m); }
-    if let Some(i) = interval { where_clauses.push("interval = ?"); params.push(i); }
+    // KESİN ÇÖZÜM: Match içinde closure çalıştırmıyoruz, sadece SQL şablonunu seçiyoruz.
+    // Böylece closure tipi tek bir noktada doğar ve uyuşmazlık tamamen biter.
+    let mut symbols = Vec::new();
 
-    let sql = if where_clauses.is_empty() {
-        "SELECT DISTINCT symbol FROM candles ORDER BY symbol".to_string()
-    } else {
-        format!(
-            "SELECT DISTINCT symbol FROM candles WHERE {} ORDER BY symbol",
-            where_clauses.join(" AND "),
-        )
+    match (market, interval) {
+        (Some(m), Some(i)) => {
+            let sql = "SELECT DISTINCT symbol FROM candles WHERE market = ? AND interval = ? ORDER BY symbol";
+            let mut stmt = conn.prepare(sql).map_err(|e| {
+                crate::MemosTradingError::Database(format!("Sorgu hazırlama hatası: {}", e))
+            })?;
+            let rows = stmt
+                .query_map(rusqlite::params![m, i], |row| row.get::<_, String>(0))
+                .map_err(|e| {
+                    crate::MemosTradingError::Database(format!(
+                        "Sembol listesi okuma hatası: {}",
+                        e
+                    ))
+                })?;
+            for sym in rows.flatten() {
+                symbols.push(sym);
+            }
+        }
+        (Some(m), None) => {
+            let sql = "SELECT DISTINCT symbol FROM candles WHERE market = ? ORDER BY symbol";
+            let mut stmt = conn.prepare(sql).map_err(|e| {
+                crate::MemosTradingError::Database(format!("Sorgu hazırlama hatası: {}", e))
+            })?;
+            let rows = stmt
+                .query_map(rusqlite::params![m], |row| row.get::<_, String>(0))
+                .map_err(|e| {
+                    crate::MemosTradingError::Database(format!(
+                        "Sembol listesi okuma hatası: {}",
+                        e
+                    ))
+                })?;
+            for sym in rows.flatten() {
+                symbols.push(sym);
+            }
+        }
+        (None, Some(i)) => {
+            let sql = "SELECT DISTINCT symbol FROM candles WHERE interval = ? ORDER BY symbol";
+            let mut stmt = conn.prepare(sql).map_err(|e| {
+                crate::MemosTradingError::Database(format!("Sorgu hazırlama hatası: {}", e))
+            })?;
+            let rows = stmt
+                .query_map(rusqlite::params![i], |row| row.get::<_, String>(0))
+                .map_err(|e| {
+                    crate::MemosTradingError::Database(format!(
+                        "Sembol listesi okuma hatası: {}",
+                        e
+                    ))
+                })?;
+            for sym in rows.flatten() {
+                symbols.push(sym);
+            }
+        }
+        (None, None) => {
+            let sql = "SELECT DISTINCT symbol FROM candles ORDER BY symbol";
+            let mut stmt = conn.prepare(sql).map_err(|e| {
+                crate::MemosTradingError::Database(format!("Sorgu hazırlama hatası: {}", e))
+            })?;
+            let rows = stmt
+                .query_map(rusqlite::params![], |row| row.get::<_, String>(0))
+                .map_err(|e| {
+                    crate::MemosTradingError::Database(format!(
+                        "Sembol listesi okuma hatası: {}",
+                        e
+                    ))
+                })?;
+            for sym in rows.flatten() {
+                symbols.push(sym);
+            }
+        }
     };
 
-    let mut stmt = conn.prepare(&sql)
-        .map_err(|e| crate::MemosTradingError::Database(format!("Sorgu hazırlama hatası: {}", e)))?;
-
-    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| row.get::<_, String>(0))
-        .map_err(|e| crate::MemosTradingError::Database(format!("Sembol listesi okuma hatası: {}", e)))?;
-
-    let mut symbols = Vec::new();
-    for sym in rows.flatten() {
-        symbols.push(sym);
-    }
     Ok(symbols)
 }
 
@@ -302,6 +495,179 @@ pub fn read_candles_market(
     read_candles_filtered(db_path, symbol, interval, Some(market), limit)
 }
 
+/// 🗄️ NAMESPACE-farkında mum okuma: `(exchange, market)` çiftinin İKİSİNİ de filtreler.
+///
+/// NEDEN GEREKLİ: `read_candles_market` yalnız `market`'i süzer. Ama `mt5:cfd` ve
+/// `ibkr:cfd` aynı market etiketini paylaşıyor (ikisi de `Market::Cfd`), dolayısıyla
+/// çıplak sembolle (`AUDUSD`) market-only okuma İKİ BORSANIN serisini birbirine
+/// karıştırır — aynı timestamp'te iki farklı fiyat satırı. Tablonun UNIQUE index'i
+/// `(exchange, market, symbol, interval, timestamp)` olduğuna göre doğru okuma anahtarı
+/// da bu çifttir. Canlı döngü `VenueAdapter::storage_namespace()` ile bunu besler.
+pub fn read_candles_ns(
+    db_path: &str,
+    symbol: &str,
+    interval: &str,
+    exchange: &str,
+    market: &str,
+    limit: usize,
+) -> Result<Vec<crate::core::types::Candle>, crate::MemosTradingError> {
+    read_candles_ns_for_profile(
+        db_path, symbol, interval, exchange, market, "default", limit,
+    )
+}
+
+pub fn read_candles_ns_for_profile(
+    db_path: &str,
+    symbol: &str,
+    interval: &str,
+    exchange: &str,
+    market: &str,
+    profile: &str,
+    limit: usize,
+) -> Result<Vec<crate::core::types::Candle>, crate::MemosTradingError> {
+    use chrono::{DateTime, TimeZone, Utc};
+    use rusqlite::types::ValueRef;
+
+    let conn = crate::persistence::open_db(db_path)
+        .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT timestamp, open, high, low, close, volume, symbol, interval \
+         FROM candles \
+         WHERE symbol = ?1 AND interval = ?2 AND exchange = ?3 AND market = ?4 AND profile = ?5 \
+         ORDER BY timestamp DESC LIMIT ?6",
+        )
+        .map_err(|e| {
+            crate::MemosTradingError::Database(format!("candles(ns) sorgusu hazırlanamadı: {}", e))
+        })?;
+
+    let rows = stmt
+        .query_map(
+            params![symbol, interval, exchange, market, profile, limit as i64],
+            |row: &rusqlite::Row| {
+                let ts: DateTime<Utc> = match row.get_ref(0)? {
+                    ValueRef::Integer(ms) => Utc
+                        .timestamp_millis_opt(ms)
+                        .single()
+                        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().unwrap()),
+                    ValueRef::Text(b) => {
+                        let t = std::str::from_utf8(b).unwrap_or("");
+                        DateTime::parse_from_rfc3339(t)
+                            .map(|d| d.with_timezone(&Utc))
+                            .unwrap_or_else(|_| Utc.timestamp_opt(0, 0).single().unwrap())
+                    }
+                    _ => Utc.timestamp_opt(0, 0).single().unwrap(),
+                };
+                Ok(crate::core::types::Candle {
+                    timestamp: ts,
+                    open: row.get(1)?,
+                    high: row.get(2)?,
+                    low: row.get(3)?,
+                    close: row.get(4)?,
+                    volume: row.get(5)?,
+                    symbol: row.get(6)?,
+                    interval: row.get(7)?,
+                })
+            },
+        )
+        .map_err(|e| crate::MemosTradingError::Database(format!("Mum hasat hatası (ns): {}", e)))?;
+
+    let mut candles = Vec::with_capacity(limit.min(4096));
+    for row in rows {
+        match row {
+            Ok(c) => candles.push(c),
+            Err(e) => log::warn!("read_candles_ns: bozuk satır atlandı ({}): {}", symbol, e),
+        }
+    }
+    candles.reverse(); // DESC → kronolojik
+    Ok(candles)
+}
+
+/// `exchange+market` kanonik namespace için okuma denemesi. İlk önce kanonik alanı
+/// dener; boş/eksik sonuçta yalnızca market filtresiyle geriye-uyum okuma yapılır.
+/// Bu, aktif runtime'ı bozmaz; yalnız uyumluluk ve dedup açısından en güvenli akışı sağlar.
+pub fn read_candles_for_venue(
+    db_path: &str,
+    symbol: &str,
+    interval: &str,
+    exchange: &str,
+    market: &str,
+    limit: usize,
+) -> Result<Vec<crate::core::types::Candle>, crate::MemosTradingError> {
+    read_candles_for_venue_profile(
+        db_path, symbol, interval, exchange, market, "default", limit,
+    )
+}
+
+pub fn read_candles_for_venue_profile(
+    db_path: &str,
+    symbol: &str,
+    interval: &str,
+    exchange: &str,
+    market: &str,
+    profile: &str,
+    limit: usize,
+) -> Result<Vec<crate::core::types::Candle>, crate::MemosTradingError> {
+    let canonical =
+        read_candles_ns_for_profile(db_path, symbol, interval, exchange, market, profile, limit);
+    match canonical {
+        Ok(candles) if !candles.is_empty() => {
+            validate_venue_cadence(exchange, symbol, interval, &candles)?;
+            Ok(candles)
+        }
+        _ if profile == "default" => {
+            let candles = read_candles_market(db_path, symbol, interval, market, limit)?;
+            validate_venue_cadence(exchange, symbol, interval, &candles)?;
+            Ok(candles)
+        }
+        Ok(_) => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+fn validate_venue_cadence(
+    exchange: &str,
+    symbol: &str,
+    interval: &str,
+    candles: &[crate::core::types::Candle],
+) -> Result<(), crate::MemosTradingError> {
+    if !matches!(exchange, "ibkr" | "mt5") {
+        return Ok(());
+    }
+    let expected = match interval {
+        "1m" => 60_000,
+        "5m" => 300_000,
+        "15m" => 900_000,
+        "30m" => 1_800_000,
+        "1h" => 3_600_000,
+        "4h" => 14_400_000,
+        "1d" => 86_400_000,
+        _ => return Ok(()),
+    };
+    let mut counts = std::collections::BTreeMap::<i64, usize>::new();
+    for pair in candles.windows(2) {
+        let delta = (pair[1].timestamp - pair[0].timestamp).num_milliseconds();
+        if delta > 0 && delta < expected {
+            return Err(crate::MemosTradingError::Database(format!(
+                "Veri uygun değil: {exchange} {symbol} {interval} alt-interval delta={delta}ms, beklenen={expected}ms"
+            )));
+        }
+        if delta > 0 {
+            *counts.entry(delta).or_insert(0) += 1;
+        }
+    }
+    let Some((observed, _)) = counts.into_iter().max_by_key(|(_, count)| *count) else {
+        return Ok(());
+    };
+    if observed != expected {
+        return Err(crate::MemosTradingError::Database(format!(
+            "Veri uygun değil: {exchange} {symbol} {interval} cadence={observed}ms, beklenen={expected}ms"
+        )));
+    }
+    Ok(())
+}
+
 fn read_candles_filtered(
     db_path: &str,
     symbol: &str,
@@ -317,14 +683,18 @@ fn read_candles_filtered(
 
     // Market filtresi opsiyonel: None → eski davranış (market-agnostik).
     let query = match market {
-        Some(_) => "SELECT timestamp, open, high, low, close, volume, symbol, interval \
+        Some(_) => {
+            "SELECT timestamp, open, high, low, close, volume, symbol, interval \
                     FROM candles \
                     WHERE symbol = ?1 AND interval = ?2 AND market = ?4 \
-                    ORDER BY timestamp DESC LIMIT ?3",
-        None => "SELECT timestamp, open, high, low, close, volume, symbol, interval \
+                    ORDER BY timestamp DESC LIMIT ?3"
+        }
+        None => {
+            "SELECT timestamp, open, high, low, close, volume, symbol, interval \
                  FROM candles \
                  WHERE symbol = ?1 AND interval = ?2 \
-                 ORDER BY timestamp DESC LIMIT ?3",
+                 ORDER BY timestamp DESC LIMIT ?3"
+        }
     };
 
     let mut stmt = conn.prepare(query).map_err(|e| {
@@ -334,7 +704,9 @@ fn read_candles_filtered(
     let map_row = |row: &rusqlite::Row| {
         // timestamp INTEGER (ms) ya da TEXT (RFC3339) olabilir → her ikisini de destekle.
         let ts: DateTime<Utc> = match row.get_ref(0)? {
-            ValueRef::Integer(ms) => Utc.timestamp_millis_opt(ms).single()
+            ValueRef::Integer(ms) => Utc
+                .timestamp_millis_opt(ms)
+                .single()
                 .unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().unwrap()),
             ValueRef::Text(b) => {
                 let s = std::str::from_utf8(b).unwrap_or("");
@@ -346,10 +718,10 @@ fn read_candles_filtered(
         };
         Ok(crate::core::types::Candle {
             timestamp: ts,
-            open:   row.get(1)?,
-            high:   row.get(2)?,
-            low:    row.get(3)?,
-            close:  row.get(4)?,
+            open: row.get(1)?,
+            high: row.get(2)?,
+            low: row.get(3)?,
+            close: row.get(4)?,
             volume: row.get(5)?,
             symbol: row.get(6)?,
             interval: row.get(7)?,
@@ -358,8 +730,9 @@ fn read_candles_filtered(
 
     let rows = match market {
         Some(m) => stmt.query_map(params![symbol, interval, limit as i64, m], map_row),
-        None    => stmt.query_map(params![symbol, interval, limit as i64], map_row),
-    }.map_err(|e| crate::MemosTradingError::Database(format!("Mum hasat hatası: {}", e)))?;
+        None => stmt.query_map(params![symbol, interval, limit as i64], map_row),
+    }
+    .map_err(|e| crate::MemosTradingError::Database(format!("Mum hasat hatası: {}", e)))?;
 
     let mut candles = Vec::with_capacity(limit.min(4096));
     for row in rows {
@@ -379,18 +752,33 @@ fn read_candles_filtered(
 /// Bir (symbol, interval, market) serisinin en yeni mum timestamp'i (epoch ms) — gap-farkında
 /// download için (Faz 2). Kayıt yoksa None. MAX(timestamp) tek-satır, hızlı (idx_candles_pk).
 pub fn last_candle_ts(db_path: &str, symbol: &str, interval: &str, market: &str) -> Option<i64> {
+    last_candle_ts_for_profile(db_path, symbol, interval, market, "default")
+}
+
+pub fn last_candle_ts_for_profile(
+    db_path: &str,
+    symbol: &str,
+    interval: &str,
+    market: &str,
+    profile: &str,
+) -> Option<i64> {
     let conn = crate::persistence::open_db(db_path).ok()?;
     conn.query_row(
-        "SELECT MAX(timestamp) FROM candles WHERE symbol=?1 AND interval=?2 AND market=?3",
-        params![symbol, interval, market],
+        "SELECT MAX(timestamp) FROM candles WHERE symbol=?1 AND interval=?2 AND market=?3 AND profile=?4",
+        params![symbol, interval, market, profile],
         |row| row.get::<_, Option<i64>>(0),
-    ).ok().flatten()
+    )
+    .ok()
+    .flatten()
 }
 
 /// 💰 funding geçmişini KRONOLOJİK (ASC) okur — son `limit` kayıt. Tablo yoksa boş (henüz indirilmemiş).
 /// Market-saf (funding yalnız futures'ta anlamlı). funding_carry harness bunu hizalar.
 pub fn read_funding_market(
-    db_path: &str, symbol: &str, market: &str, limit: usize,
+    db_path: &str,
+    symbol: &str,
+    market: &str,
+    limit: usize,
 ) -> Result<Vec<(i64, f64)>, crate::MemosTradingError> {
     let conn = crate::persistence::open_db(db_path)
         .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
@@ -401,8 +789,10 @@ pub fn read_funding_market(
         Ok(s) => s,
         Err(_) => return Ok(Vec::new()), // tablo yok → boş
     };
-    let rows = stmt.query_map(params![symbol, market, limit as i64],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?)))
+    let rows = stmt
+        .query_map(params![symbol, market, limit as i64], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+        })
         .map_err(|e| crate::MemosTradingError::Database(format!("funding okuma: {}", e)))?;
     let mut v: Vec<(i64, f64)> = rows.filter_map(|r| r.ok()).collect();
     v.reverse(); // DESC → ASC (kronolojik)
@@ -412,7 +802,11 @@ pub fn read_funding_market(
 /// 💰 Borsa-FARKINDA funding okuma. `read_funding_market` yalnız (symbol,market) ile sorgular →
 /// aynı sembolün çok-borsalı funding'i KARIŞIR; cross-exchange analiz için exchange'i de filtreler.
 pub fn read_funding_exchange(
-    db_path: &str, exchange: &str, symbol: &str, market: &str, limit: usize,
+    db_path: &str,
+    exchange: &str,
+    symbol: &str,
+    market: &str,
+    limit: usize,
 ) -> Result<Vec<(i64, f64)>, crate::MemosTradingError> {
     let conn = crate::persistence::open_db(db_path)
         .map_err(|e| crate::MemosTradingError::Database(format!("DB bağlantı hatası: {}", e)))?;
@@ -423,8 +817,10 @@ pub fn read_funding_exchange(
         Ok(s) => s,
         Err(_) => return Ok(Vec::new()), // tablo yok → boş
     };
-    let rows = stmt.query_map(params![exchange, symbol, market, limit as i64],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?)))
+    let rows = stmt
+        .query_map(params![exchange, symbol, market, limit as i64], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+        })
         .map_err(|e| crate::MemosTradingError::Database(format!("funding okuma: {}", e)))?;
     let mut v: Vec<(i64, f64)> = rows.filter_map(|r| r.ok()).collect();
     v.reverse(); // DESC → ASC (kronolojik)
@@ -438,17 +834,26 @@ pub fn last_funding_ts(db_path: &str, symbol: &str, market: &str) -> Option<i64>
         "SELECT MAX(funding_time) FROM funding_rates WHERE symbol=?1 AND market=?2",
         params![symbol, market],
         |row| row.get::<_, Option<i64>>(0),
-    ).ok().flatten()
+    )
+    .ok()
+    .flatten()
 }
 
 /// 💰 Borsa-FARKINDA son funding_time (çok-borsalı gap-farkında indirme için).
-pub fn last_funding_ts_exchange(db_path: &str, exchange: &str, symbol: &str, market: &str) -> Option<i64> {
+pub fn last_funding_ts_exchange(
+    db_path: &str,
+    exchange: &str,
+    symbol: &str,
+    market: &str,
+) -> Option<i64> {
     let conn = crate::persistence::open_db(db_path).ok()?;
     conn.query_row(
         "SELECT MAX(funding_time) FROM funding_rates WHERE exchange=?1 AND symbol=?2 AND market=?3",
         params![exchange, symbol, market],
         |row| row.get::<_, Option<i64>>(0),
-    ).ok().flatten()
+    )
+    .ok()
+    .flatten()
 }
 
 /// 🗂️ Sembol-statü registry'sini DB'den okur (boot hydrate). Tablo henüz yoksa boş
@@ -461,7 +866,10 @@ pub fn load_symbol_statuses(db_path: &str) -> crate::Result<Vec<(String, String)
         Ok(s) => s,
         Err(_) => return Ok(Vec::new()), // tablo yok → boş
     };
-    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|e| crate::MemosTradingError::Database(format!("symbol_status sorgu: {}", e)))?;
     Ok(rows.filter_map(|r| r.ok()).collect())
 }

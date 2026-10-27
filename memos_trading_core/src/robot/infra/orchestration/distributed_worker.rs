@@ -1,9 +1,9 @@
 // distributed_worker.rs - Dağıtık Worker Pool ve Otonom Event İzleme
 
-use tokio::sync::{mpsc, broadcast};
-use tokio::task;
 use chrono::Utc;
 use std::sync::Arc;
+use tokio::sync::{broadcast, mpsc};
+use tokio::task;
 
 /// İş tipi - Bellek dostu enum (String kopyalamayı azaltmak için Arc/Box kullanılabilir)
 #[derive(Debug, Clone)]
@@ -33,7 +33,7 @@ impl WorkerPool {
         // Task kanalı: Buffer boyutu performans için 1024'e çıkarıldı
         let (task_tx, task_rx) = mpsc::channel::<WorkerTask>(1024);
         let (event_tx, mut event_rx) = mpsc::channel::<SystemEvent>(1024);
-        
+
         // Alıcıyı (rx) paylaşılan bir yapıya sarıyoruz
         let shared_rx = Arc::new(tokio::sync::Mutex::new(task_rx));
         let event_tx_clone = event_tx.clone();
@@ -58,16 +58,36 @@ impl WorkerPool {
 
                             match t {
                                 WorkerTask::FetchData { symbol } => {
-                                    let _ = tx.send(SystemEvent::Info(format!("{} Veri çekiliyor: {}", msg_prefix, symbol))).await;
+                                    let _ = tx
+                                        .send(SystemEvent::Info(format!(
+                                            "{} Veri çekiliyor: {}",
+                                            msg_prefix, symbol
+                                        )))
+                                        .await;
                                 }
                                 WorkerTask::GenerateSignal { symbol } => {
-                                    let _ = tx.send(SystemEvent::Info(format!("{} Sinyal üretiliyor: {}", msg_prefix, symbol))).await;
+                                    let _ = tx
+                                        .send(SystemEvent::Info(format!(
+                                            "{} Sinyal üretiliyor: {}",
+                                            msg_prefix, symbol
+                                        )))
+                                        .await;
                                 }
                                 WorkerTask::PlaceOrder { symbol } => {
-                                    let _ = tx.send(SystemEvent::Info(format!("{} Emir iletiliyor: {}", msg_prefix, symbol))).await;
+                                    let _ = tx
+                                        .send(SystemEvent::Info(format!(
+                                            "{} Emir iletiliyor: {}",
+                                            msg_prefix, symbol
+                                        )))
+                                        .await;
                                 }
                                 WorkerTask::ReportSummary => {
-                                    let _ = tx.send(SystemEvent::Info(format!("{} Özet rapor hazırlanıyor", msg_prefix))).await;
+                                    let _ = tx
+                                        .send(SystemEvent::Info(format!(
+                                            "{} Özet rapor hazırlanıyor",
+                                            msg_prefix
+                                        )))
+                                        .await;
                                 }
                             }
                         }
@@ -92,9 +112,9 @@ impl WorkerPool {
             }
         });
 
-        Self { 
-            task_sender: task_tx, 
-            event_sender: event_tx_clone 
+        Self {
+            task_sender: task_tx,
+            event_sender: event_tx_clone,
         }
     }
 }

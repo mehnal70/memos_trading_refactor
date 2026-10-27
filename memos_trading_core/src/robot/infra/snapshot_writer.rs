@@ -13,40 +13,35 @@
 // Atomicity: writer.rs::seal_config_to_disk geçici dosya + rename mantığı kullanır,
 // kısmi yazma kaynaklı bozulma yaşanmaz.
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::robot::robotic_loop::AppState;
 use crate::core::bridge;
 use crate::persistence::writer::seal_config_to_disk;
+use crate::robot::robotic_loop::AppState;
 
 /// Periyodik MissionControl snapshot yazıcısı.
 /// `interval_secs` = 1 önerilir (Android polling ile uyumlu).
-pub fn spawn_snapshot_writer(
-    state: Arc<Mutex<AppState>>,
-    path: String,
-    interval_secs: u64,
-) {
+pub fn spawn_snapshot_writer(state: Arc<Mutex<AppState>>, path: String, interval_secs: u64) {
     tokio::spawn(async move {
         let interval = Duration::from_secs(interval_secs.max(1));
         let mut tick: u64 = 0;
         loop {
             // Çıkış kontrolü + snapshot üretimi tek kilit altında
-            let snap_opt = {
-                let st = match state.lock() {
-                    Ok(g) => g,
-                    Err(_) => break,
-                };
+            let snap = match state.try_lock().ok().map(|st| {
                 if st.app_stop_signal.load(Ordering::Relaxed) {
                     None
                 } else {
                     Some(bridge::get_snapshot(&st))
                 }
-            };
-            let snap = match snap_opt {
-                Some(s) => s,
-                None => break,
+            }) {
+                None => {
+                    tokio::time::sleep(interval).await;
+                    continue;
+                }
+                Some(None) => break,
+                Some(Some(snap)) => snap,
             };
 
             // Atomik mühürleme (.tmp → rename)
@@ -55,10 +50,7 @@ pub fn spawn_snapshot_writer(
                 if tick == 0 {
                     log::warn!("snapshot_writer: {} dosyası yazılamadı: {:?}", path, e);
                     if let Ok(mut st) = state.lock() {
-                        st.push_log(format!(
-                            "⚠️ snapshot_writer: {} yazılamadı ({:?})",
-                            path, e
-                        ));
+                        st.push_log(format!("⚠️ snapshot_writer: {} yazılamadı ({:?})", path, e));
                     }
                 }
             } else if tick == 0 {

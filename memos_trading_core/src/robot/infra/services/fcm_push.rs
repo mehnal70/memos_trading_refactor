@@ -9,12 +9,12 @@ pub struct FcmPush;
 impl FcmPush {
     /// Mobil cihaza bildirim gönderir (Asenkron ve Optimize)
     pub async fn send_push(
-        token: &str, 
-        title: &str, 
-        body: &str, 
-        fcm_server_key: &str
+        token: &str,
+        title: &str,
+        body: &str,
+        fcm_server_key: &str,
     ) -> Result<(), String> {
-        // HTTP Client'ı her seferinde oluşturmak yerine reuse (yeniden kullanım) önerilir, 
+        // HTTP Client'ı her seferinde oluşturmak yerine reuse (yeniden kullanım) önerilir,
         // ancak bu yapı için asenkron hale getirilmesi önceliklidir.
         let client = Client::new();
 
@@ -31,7 +31,7 @@ impl FcmPush {
         let res = client
             .post("https://fcm.googleapis.com/fcm/send")
             .header("Authorization", format!("key={}", fcm_server_key))
-            .json(&msg) 
+            .json(&msg)
             .send()
             .await // Ana thread'i bloklamaz
             .map_err(|e| format!("FCM ağ hatası: {e}"))?;

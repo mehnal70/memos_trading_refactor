@@ -1,0 +1,13 @@
+[Unit]
+Description=Memos Venue Engines (manual start)
+After=memos-runtime-supervisor.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/memos/PycharmProjects/memos_trading_refactor
+ExecStart=/home/memos/PycharmProjects/memos_trading_refactor/scripts/venue_engine.sh start all
+ExecStop=/home/memos/PycharmProjects/memos_trading_refactor/scripts/venue_engine.sh stop all
+
+[Install]
+# Bilinçli olarak default.target'e bağlanmaz; menu/GUI ile manuel başlatılır.

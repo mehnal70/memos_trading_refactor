@@ -3,8 +3,8 @@
 // Semantik versiyonlama: major.minor.patch
 // Rollback desteği, version history
 
-use serde::{Serialize, Deserialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 /// Strateji Versiyonu
@@ -88,11 +88,7 @@ pub struct VersionInfo {
 
 impl VersionInfo {
     /// Yeni version info oluştur
-    pub fn new(
-        strategy_name: String,
-        version: StrategyVersion,
-        release_notes: String,
-    ) -> Self {
+    pub fn new(strategy_name: String, version: StrategyVersion, release_notes: String) -> Self {
         Self {
             strategy_name,
             version,
@@ -120,7 +116,7 @@ impl VersionManager {
         Self {
             history: VecDeque::new(),
             current_version: None,
-            max_history: 20,  // Son 20 versiyonu tut
+            max_history: 20, // Son 20 versiyonu tut
         }
     }
 
@@ -164,7 +160,11 @@ impl VersionManager {
             if info.version.version == target_version {
                 self.current_version = Some(info.version.clone());
                 // Bu versiyonu en başa koy
-                if let Some(pos) = self.history.iter().position(|v| v.version.version == target_version) {
+                if let Some(pos) = self
+                    .history
+                    .iter()
+                    .position(|v| v.version.version == target_version)
+                {
                     let rolled_back = self.history.remove(pos).unwrap();
                     self.history.push_front(rolled_back.clone());
                     return Ok(rolled_back);
@@ -196,10 +196,7 @@ impl VersionManager {
             }
 
             if include {
-                changes.push(format!(
-                    "{}: {}",
-                    info.version.version, info.release_notes
-                ));
+                changes.push(format!("{}: {}", info.version.version, info.release_notes));
             }
 
             if info.version.version == from_version {
@@ -254,8 +251,8 @@ mod tests {
         let v2 = StrategyVersion::new(1, 1, 0);
         let v3 = StrategyVersion::new(2, 0, 0);
 
-        assert!(v1.is_compatible(&v2));  // Same major
-        assert!(!v1.is_compatible(&v3));  // Different major
+        assert!(v1.is_compatible(&v2)); // Same major
+        assert!(!v1.is_compatible(&v3)); // Different major
     }
 
     #[test]
@@ -300,16 +297,8 @@ mod tests {
         let v1 = StrategyVersion::new(1, 0, 0);
         let v2 = StrategyVersion::new(1, 1, 0);
 
-        let info1 = VersionInfo::new(
-            "ma_cross".to_string(),
-            v1,
-            "Initial release".to_string(),
-        );
-        let info2 = VersionInfo::new(
-            "ma_cross".to_string(),
-            v2,
-            "Minor update".to_string(),
-        );
+        let info1 = VersionInfo::new("ma_cross".to_string(), v1, "Initial release".to_string());
+        let info2 = VersionInfo::new("ma_cross".to_string(), v2, "Minor update".to_string());
 
         manager.release_version(info1);
         manager.release_version(info2);
@@ -325,16 +314,8 @@ mod tests {
         let v1 = StrategyVersion::new(1, 0, 0);
         let v2 = StrategyVersion::new(1, 1, 0);
 
-        let info1 = VersionInfo::new(
-            "ma_cross".to_string(),
-            v1,
-            "Initial".to_string(),
-        );
-        let info2 = VersionInfo::new(
-            "ma_cross".to_string(),
-            v2,
-            "Update".to_string(),
-        );
+        let info1 = VersionInfo::new("ma_cross".to_string(), v1, "Initial".to_string());
+        let info2 = VersionInfo::new("ma_cross".to_string(), v2, "Update".to_string());
 
         manager.release_version(info1);
         manager.release_version(info2);

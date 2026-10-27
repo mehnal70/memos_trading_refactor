@@ -38,8 +38,17 @@ impl Engine {
     /// koşmamalı (tek-pozisyon/sembol invariantı; loop_core sepeti normal döngüden + birbirinden ayrı ele).
     pub(crate) async fn process_carry_book(state: &Arc<Mutex<AppState>>) {
         let (cfg, tuning, db_path, lookback, funding_max_age_secs, funding_limit) = {
-            let st = match state.lock() { Ok(s) => s, Err(_) => return };
-            let cr = match st.brain.parameters.read().ok().map(|p| p.carry_live.clone()) {
+            let st = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let cr = match st
+                .brain
+                .parameters
+                .read()
+                .ok()
+                .map(|p| p.carry_live.clone())
+            {
                 Some(x) if x.enabled && x.top_k >= 1 && x.symbols.len() >= 2 * x.top_k => x,
                 _ => return,
             };
@@ -62,21 +71,41 @@ impl Engine {
                 // ⏱️ KADANS: carry düşük-turnover ŞART (günlük rebalance fee'ye yenik) → ≥14 bar.
                 rebalance_min_bars: cr.rebalance_bars.max(1),
             };
-            (cfg, Arc::clone(&st.tuning), st.config.db_path.clone(),
-             cr.lookback, cr.funding_max_age_secs, cr.funding_limit)
+            (
+                cfg,
+                Arc::clone(&st.tuning),
+                st.config.db_path.clone(),
+                cr.lookback,
+                cr.funding_max_age_secs,
+                cr.funding_limit,
+            )
         };
 
-        let interval_secs = crate::robot::data_pipeline::DataNormalizer::parse_interval(&cfg.interval)
-            .max(1) as i64;
+        let interval_secs =
+            crate::robot::data_pipeline::DataNormalizer::parse_interval(&cfg.interval).max(1)
+                as i64;
         let db_path_sig = db_path.clone();
         // 💰 Carry kesitsel sinyal üreteci (xs_live ile aynı kalıp; blend_live ile ORTAK helper).
         let signal_source = move |candles_map: &std::collections::HashMap<String, Vec<Candle>>| {
-            carry_signals(candles_map, &db_path_sig, lookback, interval_secs, funding_max_age_secs, funding_limit)
+            carry_signals(
+                candles_map,
+                &db_path_sig,
+                lookback,
+                interval_secs,
+                funding_max_age_secs,
+                funding_limit,
+            )
         };
 
         Self::process_book(
-            state, &cfg, super::book_core::BookKind::Carry, &tuning, &db_path, signal_source,
-        ).await;
+            state,
+            &cfg,
+            super::book_core::BookKind::Carry,
+            &tuning,
+            &db_path,
+            signal_source,
+        )
+        .await;
     }
 }
 
@@ -87,7 +116,11 @@ impl Engine {
 /// yol; ortalama-funding rank-değişmez, backtest bar-bucket'ıyla bit-aynı sıralar). [[project_funding_carry]]
 pub(crate) fn carry_signals(
     candles_map: &std::collections::HashMap<String, Vec<Candle>>,
-    db_path: &str, lookback: usize, interval_secs: i64, funding_max_age_secs: i64, funding_limit: usize,
+    db_path: &str,
+    lookback: usize,
+    interval_secs: i64,
+    funding_max_age_secs: i64,
+    funding_limit: usize,
 ) -> Vec<(String, f64)> {
     let now_ms = crate::core::time::now_epoch_millis() as i64;
     let cutoff = now_ms - (lookback as i64) * interval_secs.max(1) * 1000;
@@ -127,6 +160,9 @@ mod carry_live_tests {
         // İki sembol: A yüksek-funding (short adayı), B negatif-funding (long adayı).
         let sig_a = latest_carry_signal(&[0.05, 0.05]).unwrap(); // −0.05
         let sig_b = latest_carry_signal(&[-0.01, -0.01]).unwrap(); // +0.01
-        assert!(sig_b > sig_a, "negatif-funding B, yüksek-funding A'dan daha LONG skorlu olmalı");
+        assert!(
+            sig_b > sig_a,
+            "negatif-funding B, yüksek-funding A'dan daha LONG skorlu olmalı"
+        );
     }
 }

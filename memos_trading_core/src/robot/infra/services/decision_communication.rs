@@ -60,7 +60,7 @@ impl DecisionCommunicator for SimpleDecisionCommunicator {
             message: message.to_owned(),
             timestamp: Utc::now(),
         };
-        
+
         self.notifications.push(log);
 
         // İlgili kararı bul ve 'notified' durumunu anında güncelle

@@ -62,7 +62,10 @@ impl AlertManager {
         if current_drawdown > threshold {
             self.send_alert(
                 TradingAlertLevel::Critical,
-                format!("Drawdown aşıldı: {:.2}% / {:.2}%", current_drawdown, threshold),
+                format!(
+                    "Drawdown aşıldı: {:.2}% / {:.2}%",
+                    current_drawdown, threshold
+                ),
                 AlertCode::HighDrawdown,
             );
         }
@@ -82,7 +85,10 @@ impl AlertManager {
         if current_size > max_size {
             self.send_alert(
                 TradingAlertLevel::Warning,
-                format!("Pozisyon boyutu çok büyük: {:.2} / {:.2}", current_size, max_size),
+                format!(
+                    "Pozisyon boyutu çok büyük: {:.2} / {:.2}",
+                    current_size, max_size
+                ),
                 AlertCode::PositionTooLarge,
             );
         }
@@ -97,12 +103,7 @@ impl AlertManager {
     }
 
     pub fn recent_alerts(&self, n: usize) -> Vec<TradingAlert> {
-        self.alerts
-            .iter()
-            .rev()
-            .take(n)
-            .cloned()
-            .collect()
+        self.alerts.iter().rev().take(n).cloned().collect()
     }
 
     pub fn alert_count_by_level(&self, level: TradingAlertLevel) -> usize {
@@ -127,17 +128,33 @@ mod tests {
     #[test]
     fn test_send_alert() {
         let mut manager = AlertManager::new(100);
-        manager.send_alert(TradingAlertLevel::Critical, "Test".to_string(), AlertCode::CircuitBreakerTriggered);
+        manager.send_alert(
+            TradingAlertLevel::Critical,
+            "Test".to_string(),
+            AlertCode::CircuitBreakerTriggered,
+        );
         assert_eq!(manager.alerts.len(), 1);
     }
 
     #[test]
     fn test_alert_levels() {
         let mut manager = AlertManager::new(100);
-        manager.send_alert(TradingAlertLevel::Critical, "C".to_string(), AlertCode::CircuitBreakerTriggered);
-        manager.send_alert(TradingAlertLevel::Warning, "W".to_string(), AlertCode::ConsecutiveLosses);
-        manager.send_alert(TradingAlertLevel::Info, "I".to_string(), AlertCode::StrategySignalGenerated);
-        
+        manager.send_alert(
+            TradingAlertLevel::Critical,
+            "C".to_string(),
+            AlertCode::CircuitBreakerTriggered,
+        );
+        manager.send_alert(
+            TradingAlertLevel::Warning,
+            "W".to_string(),
+            AlertCode::ConsecutiveLosses,
+        );
+        manager.send_alert(
+            TradingAlertLevel::Info,
+            "I".to_string(),
+            AlertCode::StrategySignalGenerated,
+        );
+
         assert_eq!(manager.alert_count_by_level(TradingAlertLevel::Critical), 1);
         assert_eq!(manager.alert_count_by_level(TradingAlertLevel::Warning), 1);
         assert_eq!(manager.alert_count_by_level(TradingAlertLevel::Info), 1);

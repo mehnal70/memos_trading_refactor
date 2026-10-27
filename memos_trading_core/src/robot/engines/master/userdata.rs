@@ -3,14 +3,14 @@
 use super::*;
 
 impl Engine {
-
     /// userDataStream'den gelen JSON event'i parse et: FILLED, PARTIALLY_FILLED,
     /// REJECTED, EXPIRED durumlarını ayrıştırıp ilgili işleyiciyi çağırır.
     /// NEW ve CANCELED sessizce yutulur (normal yaşam döngüsü).
     /// `pub` çünkü entegrasyon testlerinde gerçek JSON'la uçtan uca doğrulanır.
     pub async fn handle_user_data_event(state: &Arc<Mutex<AppState>>, raw: &str) {
         let v: serde_json::Value = match serde_json::from_str(raw) {
-            Ok(v) => v, Err(_) => return,
+            Ok(v) => v,
+            Err(_) => return,
         };
 
         // Spot: executionReport     → X=status, s=symbol, q=orig_qty, z=cum_qty, l=last_qty,
@@ -19,47 +19,83 @@ impl Engine {
         //                             o.l=last_qty, o.S=side, o.i=orderId
         let event_type = v.get("e").and_then(|x| x.as_str()).unwrap_or("").to_owned();
         let parse_f = |o: &serde_json::Value, k: &str| -> f64 {
-            o.get(k).and_then(|x| x.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0)
+            o.get(k)
+                .and_then(|x| x.as_str())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0)
         };
         let parse_s = |o: &serde_json::Value, k: &str| -> String {
             o.get(k).and_then(|x| x.as_str()).unwrap_or("").to_owned()
         };
         let parse_id = |o: &serde_json::Value, k: &str| -> String {
             // orderId tipik olarak sayı; bazen string de gelir. İkisini de yakalayalım.
-            o.get(k).map(|x| match x {
-                serde_json::Value::String(s) => s.clone(),
-                _ => x.to_string(),
-            }).unwrap_or_default()
+            o.get(k)
+                .map(|x| match x {
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => x.to_string(),
+                })
+                .unwrap_or_default()
         };
         // L = bu event'te dolan kısmın ortalama fiyatı (last_filled_price).
-        let (status, symbol, orig_qty, cum_qty, last_qty, last_price, side, order_id, reject_reason) =
-            match event_type.as_str() {
-                "executionReport" => (
-                    parse_s(&v, "X"), parse_s(&v, "s"),
-                    parse_f(&v, "q"), parse_f(&v, "z"), parse_f(&v, "l"), parse_f(&v, "L"),
-                    parse_s(&v, "S"), parse_id(&v, "i"), parse_s(&v, "r"),
-                ),
-                "ORDER_TRADE_UPDATE" => {
-                    let o = v.get("o").cloned().unwrap_or_default();
-                    (
-                        parse_s(&o, "X"), parse_s(&o, "s"),
-                        parse_f(&o, "q"), parse_f(&o, "z"), parse_f(&o, "l"), parse_f(&o, "L"),
-                        parse_s(&o, "S"), parse_id(&o, "i"), parse_s(&o, "r"),
-                    )
-                }
-                _ => return, // diğer event'ler ignored (account update vb.)
-            };
+        let (
+            status,
+            symbol,
+            orig_qty,
+            cum_qty,
+            last_qty,
+            last_price,
+            side,
+            order_id,
+            reject_reason,
+        ) = match event_type.as_str() {
+            "executionReport" => (
+                parse_s(&v, "X"),
+                parse_s(&v, "s"),
+                parse_f(&v, "q"),
+                parse_f(&v, "z"),
+                parse_f(&v, "l"),
+                parse_f(&v, "L"),
+                parse_s(&v, "S"),
+                parse_id(&v, "i"),
+                parse_s(&v, "r"),
+            ),
+            "ORDER_TRADE_UPDATE" => {
+                let o = v.get("o").cloned().unwrap_or_default();
+                (
+                    parse_s(&o, "X"),
+                    parse_s(&o, "s"),
+                    parse_f(&o, "q"),
+                    parse_f(&o, "z"),
+                    parse_f(&o, "l"),
+                    parse_f(&o, "L"),
+                    parse_s(&o, "S"),
+                    parse_id(&o, "i"),
+                    parse_s(&o, "r"),
+                )
+            }
+            _ => return, // diğer event'ler ignored (account update vb.)
+        };
 
         match status.as_str() {
             "FILLED" => Self::process_user_fill_status(state, &status, &symbol, &order_id).await,
-            "PARTIALLY_FILLED" =>
+            "PARTIALLY_FILLED" => {
                 Self::process_partial_fill(
                     state, &symbol, &side, orig_qty, cum_qty, last_qty, last_price,
-                ).await,
-            "REJECTED" | "EXPIRED" =>
+                )
+                .await
+            }
+            "REJECTED" | "EXPIRED" => {
                 Self::process_order_anomaly(
-                    state, &status, &symbol, &side, &order_id, orig_qty, &reject_reason,
-                ).await,
+                    state,
+                    &status,
+                    &symbol,
+                    &side,
+                    &order_id,
+                    orig_qty,
+                    &reject_reason,
+                )
+                .await
+            }
             _ => {} // NEW, CANCELED, TRADE → sessiz (normal yaşam döngüsü)
         }
     }
@@ -77,15 +113,35 @@ impl Engine {
         orig_qty: f64,
         reject_reason: &str,
     ) {
-        if symbol.is_empty() { return; }
+        if symbol.is_empty() {
+            return;
+        }
+        emit_trade_event(state, || {
+            crate::robot::infra::logger::TradeEvent::order_status(
+                symbol,
+                status,
+                side,
+                order_id,
+                orig_qty,
+                reject_reason,
+            )
+        });
         // Spot'ta `r="NONE"` gelirse sebep yok demektir. Boş veya NONE olan değeri gizle.
         let reason_part = if reject_reason.is_empty() || reject_reason == "NONE" {
             String::new()
         } else {
             format!(" · sebep={}", reject_reason)
         };
-        let side_part = if side.is_empty() { String::new() } else { format!(" {}", side) };
-        let id_part = if order_id.is_empty() { String::new() } else { format!(" order={}", order_id) };
+        let side_part = if side.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", side)
+        };
+        let id_part = if order_id.is_empty() {
+            String::new()
+        } else {
+            format!(" order={}", order_id)
+        };
 
         if let Ok(mut st) = state.lock() {
             // Telegram: REJECTED → Critical, EXPIRED → Warning. Throttle key sembol+status.
@@ -106,9 +162,16 @@ impl Engine {
             st.guardian.repair_log.push_back(format!(
                 "[{}] {}: {}{} qty={:.4}{}{}",
                 chrono::Local::now().format("%H:%M:%S"),
-                status, symbol, side_part, orig_qty, id_part, reason_part,
+                status,
+                symbol,
+                side_part,
+                orig_qty,
+                id_part,
+                reason_part,
             ));
-            while st.guardian.repair_log.len() > 100 { st.guardian.repair_log.pop_front(); }
+            while st.guardian.repair_log.len() > 100 {
+                st.guardian.repair_log.pop_front();
+            }
         }
     }
 
@@ -133,14 +196,22 @@ impl Engine {
         last_qty: f64,
         last_price: f64,
     ) {
-        if symbol.is_empty() || orig_qty <= 0.0 || last_qty <= 0.0 { return; }
+        if symbol.is_empty() || orig_qty <= 0.0 || last_qty <= 0.0 {
+            return;
+        }
         let fill_pct = (cum_qty / orig_qty * 100.0).clamp(0.0, 100.0);
         const COMMISSION_RATE: f64 = 0.001; // 0.1% — open/close ile aynı
 
         // 1. Pozisyonu oku, entry vs close sınıflandır.
         let (is_long, entry_price, current_price, local_qty_before) = {
-            let st = match state.lock() { Ok(s) => s, Err(_) => return };
-            let positions = match st.finance.live_positions.read() { Ok(p) => p, Err(_) => return };
+            let st = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let positions = match st.finance.live_positions.read() {
+                Ok(p) => p,
+                Err(_) => return,
+            };
             match positions.get(symbol) {
                 Some(pos) => (pos.is_long, pos.entry_price, pos.current_price, pos.qty),
                 None => return, // bot bilmediği bir sembol için event aldı
@@ -155,10 +226,12 @@ impl Engine {
         let commission = trade_notional * COMMISSION_RATE;
         let realized_pnl = if is_closing && last_price > 0.0 {
             crate::core::math::calculate_pnl(entry_price, last_price, last_qty, is_long)
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         // 3. State mutation — pozisyon qty + equity + execution_costs.
-        let new_qty: Option<f64> = if let Ok(mut st) = state.lock() {
+        let (new_qty, equity_after): (Option<f64>, f64) = if let Ok(mut st) = state.lock() {
             let mutated = if let Ok(mut positions) = st.finance.live_positions.write() {
                 positions.get_mut(symbol).map(|pos| {
                     if is_closing {
@@ -169,7 +242,9 @@ impl Engine {
                     }
                     pos.qty
                 })
-            } else { None };
+            } else {
+                None
+            };
 
             if mutated.is_some() {
                 if let Ok(mut costs) = st.finance.live_execution_costs.write() {
@@ -184,28 +259,55 @@ impl Engine {
                     st.finance.equity -= commission;
                 }
             }
-            mutated
-        } else { None };
+            (mutated, st.finance.equity)
+        } else {
+            (None, 0.0)
+        };
 
         // 4. Log + audit.
         if let Some(new_q) = new_qty {
             let kind_tag = if is_closing { "CLOSE" } else { "ENTRY" };
             let pnl_part = if is_closing {
                 format!(" · pnl=${:+.2}", realized_pnl)
-            } else { String::new() };
+            } else {
+                String::new()
+            };
             push_state_log(state, format!(
                 "🌓 [WS-PARTIAL-{}] {} %{:.1} ({} {:.4} @ {:.4}) · qty {:.4} → {:.4}{} · fee=${:.4}",
                 kind_tag, symbol, fill_pct, side, last_qty, last_price,
                 local_qty_before, new_q, pnl_part, commission,
             ));
 
+            emit_trade_event(state, || {
+                crate::robot::infra::logger::TradeEvent::order_partial(
+                    symbol,
+                    side,
+                    last_price,
+                    last_qty,
+                    cum_qty,
+                    orig_qty,
+                    fill_pct,
+                    equity_after,
+                )
+            });
+
             // 5. Anomali tespiti → Telegram push_alert.
             //    Üç kriter; her biri farklı throttle anahtarına bağlandı, sembol başına
             //    bağımsız cooldown takip eder (BTCUSDT'nin uyarısı ETHUSDT'yi susturmaz).
             Self::detect_partial_fill_anomalies(
-                state, symbol, side, fill_pct, orig_qty, cum_qty,
-                last_qty, last_price, local_qty_before, entry_price,
-                current_price, is_closing, is_long,
+                state,
+                symbol,
+                side,
+                fill_pct,
+                orig_qty,
+                cum_qty,
+                last_qty,
+                last_price,
+                local_qty_before,
+                entry_price,
+                current_price,
+                is_closing,
+                is_long,
             );
         }
     }
@@ -242,16 +344,16 @@ impl Engine {
         use crate::robot::infra::telegram_notifier::Severity;
         // Faz 2: sabit eşikler yerine ParameterStore'dan oku (HyperOpt/manuel update
         // runtime'da değişiklik yapabilsin). Lock alınamazsa legacy default fallback.
-        let pf = state.lock().ok()
+        let pf = state
+            .lock()
+            .ok()
             .and_then(|st| st.brain.parameters.read().ok().map(|p| p.partial_fill))
             .unwrap_or_default();
 
         // 1) OVERFILL: borsa pozisyondan fazla doldurmuş (close partial için anlamlı).
         //    Entry partial'de cum henüz local'in üstüne çıkamaz tanım gereği, ama yine
         //    de defensive olarak kontrol ediyoruz.
-        if local_qty_before > 0.0
-            && last_qty > local_qty_before * (1.0 + pf.overfill_tolerance)
-        {
+        if local_qty_before > 0.0 && last_qty > local_qty_before * (1.0 + pf.overfill_tolerance) {
             let key = format!("PARTIAL-ANOMALY-OVERFILL-{}", symbol);
             let msg = format!(
                 "[PARTIAL-ANOMALY-OVERFILL] {} side={} last_qty={:.6} > local_qty={:.6} \
@@ -277,10 +379,14 @@ impl Engine {
 
         // 3) SLIPPAGE: bot tarafına göre adverse fiyat sapması.
         if last_price > 0.0 {
-            let expected = if is_closing { current_price } else { entry_price };
+            let expected = if is_closing {
+                current_price
+            } else {
+                entry_price
+            };
             if expected > 0.0 {
                 let adverse_pct = match side {
-                    "BUY"  => (last_price - expected) / expected * 100.0,
+                    "BUY" => (last_price - expected) / expected * 100.0,
                     "SELL" => (expected - last_price) / expected * 100.0,
                     _ => 0.0,
                 };
@@ -307,25 +413,64 @@ impl Engine {
     /// sinyalidir. Giriş emri de FILLED event üretir → order_id kontrolü olmadan yeni açılan pozisyon
     /// (özellikle koruma emri taşımayan stopsuz XS) entry-fill ile anında kapanırdı. Eşleşmeyen
     /// (giriş/bilinmeyen) → no-op; gerçek koruma fill'i kaçarsa psync (30s) yedek kalır.
-    pub(crate) async fn process_user_fill_status(state: &Arc<Mutex<AppState>>, status: &str, symbol: &str, order_id: &str) {
-        if status != "FILLED" || symbol.is_empty() { return; }
+    pub(crate) async fn process_user_fill_status(
+        state: &Arc<Mutex<AppState>>,
+        status: &str,
+        symbol: &str,
+        order_id: &str,
+    ) {
+        if status != "FILLED" || symbol.is_empty() {
+            return;
+        }
 
         let (executor, db_path, interval, has_local, is_protection_fill) = {
-            let st = match state.lock() { Ok(s) => s, Err(_) => return };
-            let has = st.finance.live_positions.read().map(|p| p.contains_key(symbol)).unwrap_or(false);
+            let st = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let has = st
+                .finance
+                .live_positions
+                .read()
+                .map(|p| p.contains_key(symbol))
+                .unwrap_or(false);
             // order_id kayıtlı SL veya TP id'sine eşleşiyor mu? (quote-normalize — bazı yanıtlar id'yi
             // string olarak verir → to_string() tırnak ekleyebilir; close yolu da trim_matches('"') yapar.)
             let oid = order_id.trim_matches('"');
-            let is_prot = st.finance.live_orders.read().ok()
-                .and_then(|m| m.get(symbol).map(|r| {
-                    let m = |s: &Option<String>| s.as_deref().map(|x| x.trim_matches('"')) == Some(oid);
-                    m(&r.sl_order_id) || m(&r.tp_order_id)
-                }))
+            let is_prot = st
+                .finance
+                .live_orders
+                .read()
+                .ok()
+                .and_then(|m| {
+                    m.get(symbol).map(|r| {
+                        let m = |s: &Option<String>| {
+                            s.as_deref().map(|x| x.trim_matches('"')) == Some(oid)
+                        };
+                        m(&r.sl_order_id) || m(&r.tp_order_id)
+                    })
+                })
                 .unwrap_or(false);
-            (st.live_executor.clone(), st.config.db_path.clone(),
-             st.config.interval.clone(), has, is_prot)
+            (
+                st.live_venue_lifecycle
+                    .as_ref()
+                    .and_then(|lifecycle| lifecycle.binance_user_data()),
+                st.config.db_path.clone(),
+                st.config.interval.clone(),
+                has,
+                is_prot,
+            )
         };
-        if !has_local { return; } // bot bilmediği bir sembol için event aldı
+        if !has_local {
+            return;
+        } // bot bilmediği bir sembol için event aldı
+        emit_trade_event(state, || {
+            crate::robot::infra::logger::TradeEvent::order_filled(
+                symbol,
+                order_id,
+                is_protection_fill,
+            )
+        });
         if !is_protection_fill {
             // Giriş emri / bilinmeyen order fill'i → pozisyon kapatma TETİKLEME (XS stopsuz: koruma id'si
             // yok → hiç eşleşmez → entry-fill ile yanlış kapanış olmaz).
@@ -340,7 +485,9 @@ impl Engine {
             ));
         }
 
-        if let Ok(candles) = crate::persistence::reader::read_candles(&db_path, symbol, &interval, 5) {
+        if let Ok(candles) =
+            crate::persistence::reader::read_candles(&db_path, symbol, &interval, 5)
+        {
             if !candles.is_empty() {
                 Self::close_paper_position(state, symbol, &candles, ExitReason::TrailingStop).await;
             }

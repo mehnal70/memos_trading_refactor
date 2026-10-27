@@ -1,21 +1,21 @@
 // sim_data.rs
 // Simülasyon Veri Sağlayıcı Modülü - Performans Optimize Edilmiş
 
-use chrono::{Utc, Duration};
 use crate::core::types::Candle;
+use chrono::{Duration, Utc};
 
 /// Gerçek zamanlıya yakın test için örnek mum verisi üretir.
 /// Modernize: allocation maliyetini düşürmek için string sahipliği optimize edildi.
 pub fn generate_sample_candles(symbol: &str, interval: &str, count: usize) -> Vec<Candle> {
     let now = Utc::now();
-    
+
     // Iteratör ve Collect kullanarak daha fonksiyonel ve hızlı bir inşa süreci
     (0..count)
         .map(|i| {
             // Zaman damgasını (timestamp) i64 olarak milisaniye cinsinden hesapla
             let ts = now - Duration::minutes((count - i) as i64);
             let base = 100.0 + (i as f64 * 0.1);
-            
+
             Candle {
                 timestamp: ts,
                 open: base,
@@ -23,7 +23,7 @@ pub fn generate_sample_candles(symbol: &str, interval: &str, count: usize) -> Ve
                 low: base - 1.0,
                 close: base + ((i % 3) as f64 - 1.0),
                 volume: 10.0 + (i as f64),
-                symbol: symbol.to_owned(),   // to_string() yerine to_owned() tercih edildi
+                symbol: symbol.to_owned(), // to_string() yerine to_owned() tercih edildi
                 interval: interval.to_owned(),
             }
         })

@@ -1,8 +1,8 @@
 // evolution/strategy_genome.rs - Strateji DNA'sı ve Evrimsel Gelişim Modülü
 
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rand::Rng;
 
 // --- 1. GENETİK ALGORİTMA PARAMETRELERİ ---
 
@@ -46,7 +46,7 @@ pub struct StrategyGenome {
     pub generation: u32,
     pub strategy_type: String,
     pub genes: HashMap<String, f64>,
-    
+
     // Performans Metrikleri
     pub fitness: f64,
     pub trade_count: usize,
@@ -55,7 +55,7 @@ pub struct StrategyGenome {
     pub sharpe_ratio: f64,
     pub max_drawdown_pct: f64,
     pub survival_cycles: u32,
-    
+
     pub parents: Option<(String, String)>,
     pub mutation_history: Vec<String>,
 }
@@ -82,9 +82,17 @@ impl StrategyGenome {
 
         Self {
             id: format!("G{}-I{}", generation, individual_id),
-            generation, strategy_type, genes, fitness: 0.0, trade_count: 0,
-            total_pnl_pct: 0.0, win_rate: 0.0, sharpe_ratio: 0.0,
-            max_drawdown_pct: 0.0, survival_cycles: 0, parents: None,
+            generation,
+            strategy_type,
+            genes,
+            fitness: 0.0,
+            trade_count: 0,
+            total_pnl_pct: 0.0,
+            win_rate: 0.0,
+            sharpe_ratio: 0.0,
+            max_drawdown_pct: 0.0,
+            survival_cycles: 0,
+            parents: None,
             mutation_history: Vec::with_capacity(5),
         }
     }
@@ -103,10 +111,18 @@ impl StrategyGenome {
 
         Self {
             id: format!("G{}-I{}", gen, ind_id),
-            generation: gen, strategy_type: p1.strategy_type.clone(),
-            genes: child_genes, fitness: 0.0, trade_count: 0, total_pnl_pct: 0.0,
-            win_rate: 0.0, sharpe_ratio: 0.0, max_drawdown_pct: 0.0, survival_cycles: 0,
-            parents: Some((p1.id.clone(), p2.id.clone())), mutation_history: Vec::new(),
+            generation: gen,
+            strategy_type: p1.strategy_type.clone(),
+            genes: child_genes,
+            fitness: 0.0,
+            trade_count: 0,
+            total_pnl_pct: 0.0,
+            win_rate: 0.0,
+            sharpe_ratio: 0.0,
+            max_drawdown_pct: 0.0,
+            survival_cycles: 0,
+            parents: Some((p1.id.clone(), p2.id.clone())),
+            mutation_history: Vec::new(),
         }
     }
 
@@ -120,20 +136,26 @@ impl StrategyGenome {
                 *value += delta;
 
                 match key.as_str() {
-                    "fast_period" | "slow_period" | "period" => { *value = value.clamp(2.0, 200.0).round(); }
+                    "fast_period" | "slow_period" | "period" => {
+                        *value = value.clamp(2.0, 200.0).round();
+                    }
                     "overbought" => *value = value.clamp(60.0, 90.0),
                     "oversold" => *value = value.clamp(10.0, 40.0),
                     "signal_threshold" => *value = value.clamp(0.0001, 0.1),
                     _ => {}
                 }
-                self.mutation_history.push(format!("{}:{:.2}->{:.2}", key, old_val, *value));
+                self.mutation_history
+                    .push(format!("{}:{:.2}->{:.2}", key, old_val, *value));
             }
         }
     }
 
     /// Multi-Objective Fitness: Kar, Risk ve Kıdemi tek bir puan haline getirir.
     pub fn calculate_fitness(&mut self) {
-        if self.trade_count == 0 { self.fitness = 0.0; return; }
+        if self.trade_count == 0 {
+            self.fitness = 0.0;
+            return;
+        }
 
         let profit_comp = (self.total_pnl_pct * 10.0).clamp(-100.0, 100.0);
         let risk_comp = (20.0 - self.max_drawdown_pct).max(0.0);
@@ -141,11 +163,12 @@ impl StrategyGenome {
         let sharpe_comp = (self.sharpe_ratio * 20.0).clamp(-20.0, 50.0);
         let survival_bonus = (self.survival_cycles as f64 * 0.2).min(15.0);
 
-        let score = (profit_comp * 0.45) + (risk_comp * 0.20) + (consistency_comp * 0.15) 
-                  + (sharpe_comp * 0.10) + (survival_bonus * 0.10);
+        let score = (profit_comp * 0.45)
+            + (risk_comp * 0.20)
+            + (consistency_comp * 0.15)
+            + (sharpe_comp * 0.10)
+            + (survival_bonus * 0.10);
 
         self.fitness = score.clamp(0.0, 150.0);
     }
 }
-
-

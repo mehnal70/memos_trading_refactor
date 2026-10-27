@@ -17,10 +17,10 @@ pub struct ValidationRules {
 impl Default for ValidationRules {
     fn default() -> Self {
         Self {
-            max_position_size_pct: 5.0,  // Tek işlemde maks %5 bakiye riski
-            max_daily_loss_pct: 2.0,     // Günlük maks %2 özkaynak kaybı
-            min_risk_reward_ratio: 1.5,  // Minimum 1:1.5 R/R oranı
-            max_consecutive_losses: 3,   // 3 ardışık zararda dur
+            max_position_size_pct: 5.0, // Tek işlemde maks %5 bakiye riski
+            max_daily_loss_pct: 2.0,    // Günlük maks %2 özkaynak kaybı
+            min_risk_reward_ratio: 1.5, // Minimum 1:1.5 R/R oranı
+            max_consecutive_losses: 3,  // 3 ardışık zararda dur
             require_stop_loss: true,
             require_take_profit: true,
         }
@@ -38,17 +38,58 @@ impl OrderValidator {
     }
 
     pub fn with_defaults() -> Self {
-        Self { rules: ValidationRules::default() }
+        Self {
+            rules: ValidationRules::default(),
+        }
     }
 
     /// Pozisyon boyutunun hesap büyüklüğüne oranını otonom denetler.
     pub fn validate_position_size(&self, account_balance: f64, position_size: f64) -> Result<()> {
-        if account_balance <= 0.0 { return Err("Hesap bakiyesi yetersiz veya sıfır".into()); }
+        if account_balance <= 0.0 {
+            return Err("Hesap bakiyesi yetersiz veya sıfır".into());
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::OrderValidator;
+
+            #[test]
+            fn risk_reward_requires_stop_and_target() {
+                let validator = OrderValidator::with_defaults();
+
+                assert!(validator.validate_risk_reward(100.0, None, Some(103.0)).is_err());
+                assert!(validator.validate_risk_reward(100.0, Some(98.0), None).is_err());
+            }
+
+            #[test]
+            fn risk_reward_rejects_ratio_below_minimum() {
+                let validator = OrderValidator::with_defaults();
+
+                assert!(validator
+                    .validate_risk_reward(100.0, Some(98.0), Some(102.5))
+                    .is_err());
+            }
+
+            #[test]
+            fn risk_reward_accepts_two_to_one_for_both_directions() {
+                let validator = OrderValidator::with_defaults();
+
+                assert!(validator
+                    .validate_risk_reward(100.0, Some(98.0), Some(104.0))
+                    .is_ok());
+                assert!(validator
+                    .validate_risk_reward(100.0, Some(102.0), Some(96.0))
+                    .is_ok());
+            }
+        }
         let position_pct = (position_size / account_balance) * 100.0;
-        
+
         if position_pct > self.rules.max_position_size_pct {
-            return Err(format!("Pozisyon boyutu sınırı aşıldı: %{:.2} > %{:.2}", 
-                position_pct, self.rules.max_position_size_pct).into());
+            return Err(format!(
+                "Pozisyon boyutu sınırı aşıldı: %{:.2} > %{:.2}",
+                position_pct, self.rules.max_position_size_pct
+            )
+            .into());
         }
         Ok(())
     }
@@ -70,12 +111,15 @@ impl OrderValidator {
         if let (Some(sl), Some(tp)) = (stop_loss, take_profit) {
             let risk = (entry_price - sl).abs();
             let reward = (tp - entry_price).abs();
-            
+
             if risk > 0.0 {
                 let ratio = reward / risk;
                 if ratio < self.rules.min_risk_reward_ratio {
-                    return Err(format!("Düşük R/R Oranı: {:.2} < {:.2}", 
-                        ratio, self.rules.min_risk_reward_ratio).into());
+                    return Err(format!(
+                        "Düşük R/R Oranı: {:.2} < {:.2}",
+                        ratio, self.rules.min_risk_reward_ratio
+                    )
+                    .into());
                 }
             } else {
                 return Err("Geçersiz SL seviyesi: Risk sıfır olamaz".into());
@@ -86,9 +130,11 @@ impl OrderValidator {
 
     /// Günlük kümülatif kaybı otonom denetler.
     pub fn validate_daily_loss(&self, account_balance: f64, daily_loss: f64) -> Result<()> {
-        if account_balance <= 0.0 { return Ok(()); }
+        if account_balance <= 0.0 {
+            return Ok(());
+        }
         let loss_pct = (daily_loss.abs() / account_balance) * 100.0;
-        
+
         if loss_pct > self.rules.max_daily_loss_pct {
             return Err(format!("Günlük kayıp sınırı aşıldı: %{:.2}", loss_pct).into());
         }
@@ -104,14 +150,15 @@ impl OrderValidator {
             // 'realized_pnl' yerine 'pnl' alanını kullanıyoruz (types.rs ile uyumlu)
             .take_while(|t| t.pnl.is_some_and(|p| p < 0.0))
             .count();
-        
+
         if consecutive_losses >= self.rules.max_consecutive_losses {
             return Err(format!(
-                "{} ardışık zarar sonrası otonom blokaj aktif (Limit: {})", 
+                "{} ardışık zarar sonrası otonom blokaj aktif (Limit: {})",
                 consecutive_losses, self.rules.max_consecutive_losses
-            ).into());
+            )
+            .into());
         }
-        
+
         Ok(())
     }
 

@@ -1,0 +1,27 @@
+# Memos external runtime supervisor.
+#
+# Kurulum:
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/memos-runtime-supervisor.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now memos-runtime-supervisor
+#
+# GUI uygulamalarının açılabilmesi için kullanıcı grafik oturumu ve Remmina
+# profil yolu scripts/.autonomy.env içinde hazır olmalıdır.
+
+[Unit]
+Description=Memos External Runtime Supervisor
+After=graphical-session.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/memos/PycharmProjects/memos_trading_refactor
+ExecStart=/home/memos/PycharmProjects/memos_trading_refactor/scripts/runtime_supervisor.sh daemon
+Restart=always
+RestartSec=15
+Environment=RUNTIME_SUPERVISOR_INTERVAL_SECS=30
+Environment=VENUE_AUTO_RECOVERY_ENABLED=0
+
+[Install]
+WantedBy=default.target

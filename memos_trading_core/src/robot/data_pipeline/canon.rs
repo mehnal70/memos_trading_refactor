@@ -46,13 +46,13 @@ impl PipelineStage {
     /// ki timeline doğal sırada görünsün ("1. Veri Akışı", "2. Özellik...").
     pub fn label(self) -> &'static str {
         match self {
-            PipelineStage::DataIngest     => "1. Veri Akışı",
+            PipelineStage::DataIngest => "1. Veri Akışı",
             PipelineStage::FeatureExtract => "2. Özellik Çıkarımı",
-            PipelineStage::StrategyEval   => "3. Strateji & Sinyal",
-            PipelineStage::RiskGate       => "4. Risk Kapısı",
-            PipelineStage::Execute        => "5. İcra",
-            PipelineStage::Learn          => "6. Öğrenme",
-            PipelineStage::Optimize       => "7. Optimizasyon",
+            PipelineStage::StrategyEval => "3. Strateji & Sinyal",
+            PipelineStage::RiskGate => "4. Risk Kapısı",
+            PipelineStage::Execute => "5. İcra",
+            PipelineStage::Learn => "6. Öğrenme",
+            PipelineStage::Optimize => "7. Optimizasyon",
         }
     }
 }
@@ -73,9 +73,13 @@ mod tests {
     fn labels_start_with_numeric_prefix() {
         for (i, stage) in PipelineStage::ALL.iter().enumerate() {
             let expected_prefix = format!("{}.", i + 1);
-            assert!(stage.label().starts_with(&expected_prefix),
+            assert!(
+                stage.label().starts_with(&expected_prefix),
                 "stage {:?} etiketi {} ile başlamalı, gerçek: {}",
-                stage, expected_prefix, stage.label());
+                stage,
+                expected_prefix,
+                stage.label()
+            );
         }
     }
 
@@ -98,11 +102,16 @@ mod tests {
         pipe.mark_stage_completed(PipelineStage::DataIngest, StepStatus::Done);
         // Yeni satır eklenmedi, var olan güncellendi.
         assert_eq!(pipe.chain_steps.len(), before_len);
-        let ingest = pipe.chain_steps.iter()
+        let ingest = pipe
+            .chain_steps
+            .iter()
             .find(|s| s.label == PipelineStage::DataIngest.label())
             .expect("DataIngest etiketi olmalı");
         assert_eq!(ingest.status, StepStatus::Done);
-        assert!(ingest.last_run_secs > 0, "last_run_secs şimdiye eşitlenmeli");
+        assert!(
+            ingest.last_run_secs > 0,
+            "last_run_secs şimdiye eşitlenmeli"
+        );
     }
 
     #[test]
@@ -110,12 +119,18 @@ mod tests {
         let mut pipe = PipelineStatus::new();
         pipe.init_canon_stages();
         pipe.mark_stage_completed(PipelineStage::StrategyEval, StepStatus::Failed);
-        pipe.mark_stage_completed(PipelineStage::RiskGate,     StepStatus::Skipped);
+        pipe.mark_stage_completed(PipelineStage::RiskGate, StepStatus::Skipped);
 
-        let eval = pipe.chain_steps.iter()
-            .find(|s| s.label == PipelineStage::StrategyEval.label()).unwrap();
-        let risk = pipe.chain_steps.iter()
-            .find(|s| s.label == PipelineStage::RiskGate.label()).unwrap();
+        let eval = pipe
+            .chain_steps
+            .iter()
+            .find(|s| s.label == PipelineStage::StrategyEval.label())
+            .unwrap();
+        let risk = pipe
+            .chain_steps
+            .iter()
+            .find(|s| s.label == PipelineStage::RiskGate.label())
+            .unwrap();
         assert_eq!(eval.status, StepStatus::Failed);
         assert_eq!(risk.status, StepStatus::Skipped);
     }

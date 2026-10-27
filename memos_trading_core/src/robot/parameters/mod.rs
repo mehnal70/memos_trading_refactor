@@ -14,17 +14,17 @@
 // dosyalara taşındı. Dış API `pub use` ile birebir korunur — call-site değişmedi.
 // Env okuyucu helper'lar (parse_env_*, now_epoch_secs) burada kalır: hem store
 // child'ı hem test modülü erişir.
-mod types;
 mod store;
+mod types;
 
 pub mod adaptive;
 pub mod symbol_stats;
 pub mod trail_feedback;
 
-pub use types::*;
 pub use store::*;
-pub use symbol_stats::{SymbolStats, compute_symbol_stats, window_noise_floor_pct};
-pub use trail_feedback::{TrailFeedback, PendingTrailObservation};
+pub use symbol_stats::{compute_symbol_stats, window_noise_floor_pct, SymbolStats};
+pub use trail_feedback::{PendingTrailObservation, TrailFeedback};
+pub use types::*;
 
 fn parse_env_f64(key: &str) -> Option<f64> {
     crate::core::env::env_parse::<f64>(key)
@@ -53,9 +53,9 @@ mod tests {
         let now = crate::core::time::now_epoch_secs();
         SymbolStats {
             noise_floor_pct: noise_pct,
-            p90_range_pct:   noise_pct * 1.5,
-            sample_size:     sample,
-            last_updated:    now.saturating_sub(age_secs),
+            p90_range_pct: noise_pct * 1.5,
+            sample_size: sample,
+            last_updated: now.saturating_sub(age_secs),
         }
     }
 
@@ -72,7 +72,11 @@ mod tests {
         // SUPERTREND target=1.2, noise=0.05 → mult = 24
         s.update_symbol_stats("ETHUSDT", "1m", make_stats(0.05, 100, 60));
         let m = s.resolve_atr_mult("ETHUSDT", "1m", "SUPERTREND", 2.0);
-        assert!((m - 24.0).abs() < 1e-9, "mult = 1.2/0.05 = 24, gerçek {}", m);
+        assert!(
+            (m - 24.0).abs() < 1e-9,
+            "mult = 1.2/0.05 = 24, gerçek {}",
+            m
+        );
     }
 
     #[test]
@@ -81,7 +85,11 @@ mod tests {
         // BB target=0.5, noise=0.05 → mult = 10
         s.update_symbol_stats("ETHUSDT", "1m", make_stats(0.05, 100, 60));
         let m = s.resolve_atr_mult("ETHUSDT", "1m", "BB", 2.0);
-        assert!((m - 10.0).abs() < 1e-9, "BB mean-rev: mult = 0.5/0.05 = 10, gerçek {}", m);
+        assert!(
+            (m - 10.0).abs() < 1e-9,
+            "BB mean-rev: mult = 0.5/0.05 = 10, gerçek {}",
+            m
+        );
     }
 
     #[test]
@@ -90,7 +98,11 @@ mod tests {
         // default target=0.7, noise=0.05 → mult = 14
         s.update_symbol_stats("ETHUSDT", "1m", make_stats(0.05, 100, 60));
         let m = s.resolve_atr_mult("ETHUSDT", "1m", "FANCY_UNKNOWN", 2.0);
-        assert!((m - 14.0).abs() < 1e-9, "unknown → default target 0.7, gerçek {}", m);
+        assert!(
+            (m - 14.0).abs() < 1e-9,
+            "unknown → default target 0.7, gerçek {}",
+            m
+        );
     }
 
     #[test]
@@ -155,7 +167,7 @@ mod tests {
         let s = ParameterStore::default();
         assert_eq!(s.edge_thresholds.cold, 0.20);
         assert_eq!(s.edge_thresholds.warm, 0.35);
-        assert_eq!(s.edge_thresholds.hot,  0.55);
+        assert_eq!(s.edge_thresholds.hot, 0.55);
         assert_eq!(s.edge_thresholds.cold_until, 0.05);
         assert_eq!(s.edge_thresholds.warm_until, 0.30);
     }
@@ -164,7 +176,7 @@ mod tests {
     fn edge_threshold_picks_correct_tier_for_each_confidence_zone() {
         let s = ParameterStore::default();
         // cold: ml < 0.05
-        assert!((s.edge_threshold(0.0)  - 0.20).abs() < 1e-9);
+        assert!((s.edge_threshold(0.0) - 0.20).abs() < 1e-9);
         assert!((s.edge_threshold(0.04) - 0.20).abs() < 1e-9);
         // warm: 0.05 ≤ ml < 0.30
         assert!((s.edge_threshold(0.05) - 0.35).abs() < 1e-9);
@@ -178,7 +190,7 @@ mod tests {
     #[test]
     fn from_env_overrides_individual_thresholds() {
         std::env::set_var("EDGE_THRESHOLD_HOT", "0.70");
-        std::env::set_var("EDGE_WARM_UNTIL",    "0.50");
+        std::env::set_var("EDGE_WARM_UNTIL", "0.50");
         let s = ParameterStore::from_env();
         std::env::remove_var("EDGE_THRESHOLD_HOT");
         std::env::remove_var("EDGE_WARM_UNTIL");
@@ -250,7 +262,10 @@ mod tests {
         // Default artık enabled=true (otonom davranış); kapalıya çekip kontrol.
         let mut s = ParameterStore::default();
         s.leverage.enabled = false;
-        assert_eq!(s.resolve_leverage("StrongUptrend", 0.9, 0.7, Some(0.5)), 1.0);
+        assert_eq!(
+            s.resolve_leverage("StrongUptrend", 0.9, 0.7, Some(0.5)),
+            1.0
+        );
     }
 
     #[test]
@@ -269,7 +284,11 @@ mod tests {
         let s = enabled_lev_store();
         // base=3.0, ranging=×1.0, ml=0.5 (no boost), wr=0.5 (neutral), no vol → 3.0
         let lev = s.resolve_leverage("Ranging", 0.5, 0.5, Some(0.5));
-        assert!((lev - 3.0).abs() < 1e-9, "ranging+neutral → base, got {}", lev);
+        assert!(
+            (lev - 3.0).abs() < 1e-9,
+            "ranging+neutral → base, got {}",
+            lev
+        );
     }
 
     #[test]
@@ -285,7 +304,11 @@ mod tests {
         let s = enabled_lev_store();
         // 3.0 × 1.3 (strong up) × 1.2 (conf>0.70) × 1.15 (wr≥0.6) = 5.382
         let lev = s.resolve_leverage("StrongUptrend", 0.85, 0.7, Some(0.3));
-        assert!((lev - 5.382).abs() < 1e-3, "boost stack: 3×1.3×1.2×1.15, got {}", lev);
+        assert!(
+            (lev - 5.382).abs() < 1e-3,
+            "boost stack: 3×1.3×1.2×1.15, got {}",
+            lev
+        );
     }
 
     #[test]
@@ -311,27 +334,32 @@ mod tests {
         // wr=0.0 ("veri yok") cezalandırılmamalı: base=3.0 × ranging=1.0 = 3.0
         let lev_zero = s.resolve_leverage("Ranging", 0.5, 0.0, None);
         let lev_neut = s.resolve_leverage("Ranging", 0.5, 0.5, None);
-        assert!((lev_zero - lev_neut).abs() < 1e-9, "0.0 nötr olmalı, zero={} neut={}", lev_zero, lev_neut);
+        assert!(
+            (lev_zero - lev_neut).abs() < 1e-9,
+            "0.0 nötr olmalı, zero={} neut={}",
+            lev_zero,
+            lev_neut
+        );
     }
 
     #[test]
     fn resolve_leverage_noise_floor_optional() {
         let s = enabled_lev_store();
         // None → vol faktörü uygulanmaz; Some(altında) → uygulanmaz; Some(üstünde) → ×0.7
-        let lev_none  = s.resolve_leverage("Ranging", 0.5, 0.5, None);
+        let lev_none = s.resolve_leverage("Ranging", 0.5, 0.5, None);
         let lev_under = s.resolve_leverage("Ranging", 0.5, 0.5, Some(0.5));
-        let lev_over  = s.resolve_leverage("Ranging", 0.5, 0.5, Some(2.0));
+        let lev_over = s.resolve_leverage("Ranging", 0.5, 0.5, Some(2.0));
         assert!((lev_none - lev_under).abs() < 1e-9);
         assert!(lev_over < lev_none, "yüksek noise → düşük lev");
     }
 
     #[test]
     fn from_env_leverage_override_chain() {
-        std::env::set_var("LEVERAGE_ENABLED",        "true");
-        std::env::set_var("LEVERAGE_BASE",           "5.0");
-        std::env::set_var("LEVERAGE_MAX",            "20.0");
+        std::env::set_var("LEVERAGE_ENABLED", "true");
+        std::env::set_var("LEVERAGE_BASE", "5.0");
+        std::env::set_var("LEVERAGE_MAX", "20.0");
         std::env::set_var("LEVERAGE_CONF_THRESHOLD", "0.80");
-        std::env::set_var("LEVERAGE_VOL_FLOOR_PCT",  "1.5");
+        std::env::set_var("LEVERAGE_VOL_FLOOR_PCT", "1.5");
         let s = ParameterStore::from_env();
         std::env::remove_var("LEVERAGE_ENABLED");
         std::env::remove_var("LEVERAGE_BASE");
@@ -349,22 +377,22 @@ mod tests {
     fn default_partial_fill_matches_legacy_constants() {
         let s = ParameterStore::default();
         assert_eq!(s.partial_fill.overfill_tolerance, 0.001);
-        assert_eq!(s.partial_fill.cum_tolerance,      0.001);
-        assert_eq!(s.partial_fill.max_slippage_pct,   1.0);
+        assert_eq!(s.partial_fill.cum_tolerance, 0.001);
+        assert_eq!(s.partial_fill.max_slippage_pct, 1.0);
     }
 
     #[test]
     fn default_scalp_swing_and_sr_update_match_legacy() {
         let s = ParameterStore::default();
         assert_eq!(s.scalp_swing_threshold_min, 60);
-        assert_eq!(s.sr_update_every_secs,      30);
+        assert_eq!(s.sr_update_every_secs, 30);
     }
 
     #[test]
     fn default_trade_risk_matches_legacy_fallbacks() {
         let s = ParameterStore::default();
-        assert_eq!(s.trade_risk.take_profit_pct,   3.0);
-        assert_eq!(s.trade_risk.stop_loss_pct,     1.5);
+        assert_eq!(s.trade_risk.take_profit_pct, 3.0);
+        assert_eq!(s.trade_risk.stop_loss_pct, 1.5);
         assert_eq!(s.trade_risk.max_position_size, 0.5);
     }
 
@@ -373,7 +401,7 @@ mod tests {
         let mut s = ParameterStore::default();
         s.apply_optimization(4.5, 2.0, 0.75);
         assert!((s.trade_risk.take_profit_pct - 4.5).abs() < 1e-9);
-        assert!((s.trade_risk.stop_loss_pct   - 2.0).abs() < 1e-9);
+        assert!((s.trade_risk.stop_loss_pct - 2.0).abs() < 1e-9);
         assert!((s.trade_risk.max_position_size - 0.75).abs() < 1e-9);
     }
 
@@ -381,9 +409,9 @@ mod tests {
     fn apply_optimization_rejects_invalid_values() {
         let mut s = ParameterStore::default();
         s.apply_optimization(-1.0, 0.0, 2.0); // hepsi geçersiz
-        // Default'ta kalmalı
-        assert_eq!(s.trade_risk.take_profit_pct,   3.0);
-        assert_eq!(s.trade_risk.stop_loss_pct,     1.5);
+                                              // Default'ta kalmalı
+        assert_eq!(s.trade_risk.take_profit_pct, 3.0);
+        assert_eq!(s.trade_risk.stop_loss_pct, 1.5);
         assert_eq!(s.trade_risk.max_position_size, 0.5);
     }
 
@@ -392,8 +420,8 @@ mod tests {
         let mut s = ParameterStore::default();
         // Sadece TP geçerli, SL=0 (skip), max_pos > 1 (skip).
         s.apply_optimization(5.0, 0.0, 1.5);
-        assert_eq!(s.trade_risk.take_profit_pct,   5.0);
-        assert_eq!(s.trade_risk.stop_loss_pct,     1.5); // default kaldı
+        assert_eq!(s.trade_risk.take_profit_pct, 5.0);
+        assert_eq!(s.trade_risk.stop_loss_pct, 1.5); // default kaldı
         assert_eq!(s.trade_risk.max_position_size, 0.5); // default kaldı
     }
 
@@ -411,12 +439,20 @@ mod tests {
     fn observe_regime_change_triggers_tighten_and_reports_true() {
         let mut s = ParameterStore::default();
         s.observe_regime_with_now("Ranging", 1000); // ilk gözlem, seed
-        // Hysteresis: yeni rejim için ardışık 3 cycle gerek.
-        assert!(!s.observe_regime_with_now("HighVolatility", 1001), "1. tur henüz drift sayılmaz");
-        assert!(!s.observe_regime_with_now("HighVolatility", 1002), "2. tur henüz drift sayılmaz");
+                                                    // Hysteresis: yeni rejim için ardışık 3 cycle gerek.
+        assert!(
+            !s.observe_regime_with_now("HighVolatility", 1001),
+            "1. tur henüz drift sayılmaz"
+        );
+        assert!(
+            !s.observe_regime_with_now("HighVolatility", 1002),
+            "2. tur henüz drift sayılmaz"
+        );
         let changed = s.observe_regime_with_now("HighVolatility", 1003);
         assert!(changed, "3. ardışık görüşte drift confirmed olmalı");
-        let patch = s.regime_overrides.get("HighVolatility")
+        let patch = s
+            .regime_overrides
+            .get("HighVolatility")
             .expect("HV patch yazılmalı");
         assert!(patch.edge_thresholds.is_some());
         assert!(patch.trade_risk.is_some());
@@ -440,12 +476,23 @@ mod tests {
         let mut s = ParameterStore::default();
         s.observe_regime_with_now("Ranging", 1000); // seed
         for t in 1..30 {
-            let r = if t % 2 == 0 { "HighVolatility" } else { "Ranging" };
+            let r = if t % 2 == 0 {
+                "HighVolatility"
+            } else {
+                "Ranging"
+            };
             let changed = s.observe_regime_with_now(r, 1000 + t);
-            assert!(!changed, "sallanan rejim drift sayılmamalı (t={}): {}", t, r);
+            assert!(
+                !changed,
+                "sallanan rejim drift sayılmamalı (t={}): {}",
+                t, r
+            );
         }
-        assert!(s.regime_overrides.is_empty(),
-            "sallanma sırasında patch yazılmamalı: {:?}", s.regime_overrides);
+        assert!(
+            s.regime_overrides.is_empty(),
+            "sallanma sırasında patch yazılmamalı: {:?}",
+            s.regime_overrides
+        );
     }
 
     #[test]
@@ -453,7 +500,9 @@ mod tests {
         // İlk drift confirmed olsun.
         let mut s = ParameterStore::default();
         s.observe_regime_with_now("Ranging", 1000); // seed
-        for t in 1..=3 { s.observe_regime_with_now("HighVolatility", 1000 + t); }
+        for t in 1..=3 {
+            s.observe_regime_with_now("HighVolatility", 1000 + t);
+        }
         assert_eq!(s.last_observed_regime.as_deref(), Some("HighVolatility"));
         let first_drift_at = s.last_drift_at_secs;
         assert!(first_drift_at >= 1003);
@@ -465,8 +514,11 @@ mod tests {
             let changed = s.observe_regime_with_now("StrongUptrend", 1000 + t);
             assert!(!changed, "cooldown içinde drift bastırılmalı (t={})", t);
         }
-        assert_eq!(s.regime_overrides.len(), patches_after_first,
-            "cooldown içinde yeni patch yazılmamalı");
+        assert_eq!(
+            s.regime_overrides.len(),
+            patches_after_first,
+            "cooldown içinde yeni patch yazılmamalı"
+        );
 
         // Cooldown sonrası bir tur daha → confirmed.
         let after_cd = first_drift_at + DRIFT_COOLDOWN_SECS + 1;
@@ -484,13 +536,18 @@ mod tests {
         assert_eq!(fb.recent_pnl.len(), RegimeFeedback::WINDOW);
         assert_eq!(fb.total_trades, (RegimeFeedback::WINDOW + 5) as u32);
         // Kuyruğun en yeni elemanı son record olmalı (push_back)
-        assert_eq!(*fb.recent_pnl.back().unwrap(), (RegimeFeedback::WINDOW + 4) as f64);
+        assert_eq!(
+            *fb.recent_pnl.back().unwrap(),
+            (RegimeFeedback::WINDOW + 4) as f64
+        );
     }
 
     #[test]
     fn feedback_win_rate_counts_only_positive_pnl() {
         let mut fb = RegimeFeedback::default();
-        for v in [1.0, -2.0, 0.5, -1.0, 0.0] { fb.record(v); }
+        for v in [1.0, -2.0, 0.5, -1.0, 0.0] {
+            fb.record(v);
+        }
         // 5 trade'den 2'si > 0 → win_rate 0.4
         assert!((fb.win_rate() - 0.4).abs() < 1e-9);
     }
@@ -502,8 +559,10 @@ mod tests {
         for _ in 0..9 {
             assert!(!s.apply_trade_feedback("Ranging", -1.0));
         }
-        assert!(s.regime_overrides.is_empty(),
-            "WINDOW dolmadan tighten olmamalı");
+        assert!(
+            s.regime_overrides.is_empty(),
+            "WINDOW dolmadan tighten olmamalı"
+        );
     }
 
     #[test]
@@ -513,7 +572,10 @@ mod tests {
         for v in [-1.0, -1.0, -1.0, 0.5, -1.0, -1.0, -1.0, 0.3, -1.0, -1.0] {
             s.apply_trade_feedback("Ranging", v);
         }
-        let patch = s.regime_overrides.get("Ranging").expect("tighten patch yazılmalı");
+        let patch = s
+            .regime_overrides
+            .get("Ranging")
+            .expect("tighten patch yazılmalı");
         let e = patch.edge_thresholds.expect("edge tightened");
         let r = patch.trade_risk.expect("risk tightened");
         // Base 0.20 → 0.20*1.15 = 0.23
@@ -531,8 +593,10 @@ mod tests {
         for v in [1.0, 1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, 1.0] {
             s.apply_trade_feedback("Ranging", v);
         }
-        assert!(s.regime_overrides.get("Ranging").is_none(),
-            "yüksek win_rate'te patch yazılmamalı");
+        assert!(
+            s.regime_overrides.get("Ranging").is_none(),
+            "yüksek win_rate'te patch yazılmamalı"
+        );
     }
 
     #[test]
@@ -541,9 +605,9 @@ mod tests {
         // Hiç override yok → base ile aynı
         let er = s.edge_thresholds_for("Ranging");
         assert_eq!(er.cold, s.edge_thresholds.cold);
-        assert_eq!(er.hot,  s.edge_thresholds.hot);
+        assert_eq!(er.hot, s.edge_thresholds.hot);
         let tr = s.trade_risk_for("StrongUptrend");
-        assert_eq!(tr.take_profit_pct,   s.trade_risk.take_profit_pct);
+        assert_eq!(tr.take_profit_pct, s.trade_risk.take_profit_pct);
         assert_eq!(tr.max_position_size, s.trade_risk.max_position_size);
     }
 
@@ -551,13 +615,20 @@ mod tests {
     fn regime_override_only_replaces_specified_fields() {
         let mut s = ParameterStore::default();
         // HighVolatility için sadece edge eşiklerini sıkılaştır; trade_risk patch yok.
-        let strict_edges = EdgeThresholds { cold: 0.50, warm: 0.65, hot: 0.80,
-            cold_until: 0.05, warm_until: 0.30 };
-        s.set_regime_patch("HighVolatility",
-            RegimePatch::empty().with_edge(strict_edges));
+        let strict_edges = EdgeThresholds {
+            cold: 0.50,
+            warm: 0.65,
+            hot: 0.80,
+            cold_until: 0.05,
+            warm_until: 0.30,
+        };
+        s.set_regime_patch(
+            "HighVolatility",
+            RegimePatch::empty().with_edge(strict_edges),
+        );
 
         // HighVolatility için edge override aktif
-        assert!((s.edge_threshold_for("HighVolatility", 0.0)  - 0.50).abs() < 1e-9);
+        assert!((s.edge_threshold_for("HighVolatility", 0.0) - 0.50).abs() < 1e-9);
         assert!((s.edge_threshold_for("HighVolatility", 0.99) - 0.80).abs() < 1e-9);
         // Ama trade_risk hâlâ base
         let tr = s.trade_risk_for("HighVolatility");
@@ -574,17 +645,35 @@ mod tests {
         assert!(s.regime_directional_for("Ranging", true));
         assert!(!s.regime_directional_for("Ranging", false));
         // HighVolatility için policy: disiplin AÇIK; StrongUptrend için KAPALI.
-        s.set_regime_patch("HighVolatility",
-            RegimePatch::empty().with_policy(RegimePolicy { regime_directional: Some(true) }));
-        s.set_regime_patch("StrongUptrend",
-            RegimePatch::empty().with_policy(RegimePolicy { regime_directional: Some(false) }));
+        s.set_regime_patch(
+            "HighVolatility",
+            RegimePatch::empty().with_policy(RegimePolicy {
+                regime_directional: Some(true),
+            }),
+        );
+        s.set_regime_patch(
+            "StrongUptrend",
+            RegimePatch::empty().with_policy(RegimePolicy {
+                regime_directional: Some(false),
+            }),
+        );
         // Policy fallback'i EZER (her iki fallback değerinde de).
-        assert!(s.regime_directional_for("HighVolatility", false), "policy=true fallback=false'u ezmeli");
-        assert!(!s.regime_directional_for("StrongUptrend", true), "policy=false fallback=true'yu ezmeli");
+        assert!(
+            s.regime_directional_for("HighVolatility", false),
+            "policy=true fallback=false'u ezmeli"
+        );
+        assert!(
+            !s.regime_directional_for("StrongUptrend", true),
+            "policy=false fallback=true'yu ezmeli"
+        );
         // Policy'siz rejim hâlâ fallback.
         assert!(s.regime_directional_for("Ranging", true));
         // is_empty: yalnız policy taşıyan patch boş sayılmaz.
-        assert!(!RegimePatch::empty().with_policy(RegimePolicy { regime_directional: Some(true) }).is_empty());
+        assert!(!RegimePatch::empty()
+            .with_policy(RegimePolicy {
+                regime_directional: Some(true)
+            })
+            .is_empty());
     }
 
     #[test]
@@ -602,27 +691,41 @@ mod tests {
     fn regime_trade_risk_override_only_when_set() {
         let mut s = ParameterStore::default();
         // Ranging için pos boyutunu kıs, TP daralt.
-        let tight = TradeRiskParams { take_profit_pct: 1.5, stop_loss_pct: 0.8, max_position_size: 0.25 };
+        let tight = TradeRiskParams {
+            take_profit_pct: 1.5,
+            stop_loss_pct: 0.8,
+            max_position_size: 0.25,
+        };
         s.set_regime_patch("Ranging", RegimePatch::empty().with_trade_risk(tight));
 
         let r = s.trade_risk_for("Ranging");
-        assert_eq!(r.take_profit_pct,   1.5);
+        assert_eq!(r.take_profit_pct, 1.5);
         assert_eq!(r.max_position_size, 0.25);
         // Diğer rejimler base'de kalmalı
         let u = s.trade_risk_for("StrongUptrend");
-        assert_eq!(u.take_profit_pct,   3.0);
+        assert_eq!(u.take_profit_pct, 3.0);
         assert_eq!(u.max_position_size, 0.5);
     }
 
     #[test]
     fn regime_trail_target_for_reads_patch_or_none() {
         let mut s = ParameterStore::default();
-        assert_eq!(s.regime_trail_target_for("StrongUptrend"), None, "patch yok → None");
+        assert_eq!(
+            s.regime_trail_target_for("StrongUptrend"),
+            None,
+            "patch yok → None"
+        );
         s.set_regime_patch("StrongUptrend", RegimePatch::empty().with_trail_target(1.8));
         assert_eq!(s.regime_trail_target_for("StrongUptrend"), Some(1.8));
         // trade_risk patch'i target_trail_pct içermez → None kalır
-        s.set_regime_patch("Ranging", RegimePatch::empty().with_trade_risk(
-            TradeRiskParams { take_profit_pct: 1.5, stop_loss_pct: 0.8, max_position_size: 0.3 }));
+        s.set_regime_patch(
+            "Ranging",
+            RegimePatch::empty().with_trade_risk(TradeRiskParams {
+                take_profit_pct: 1.5,
+                stop_loss_pct: 0.8,
+                max_position_size: 0.3,
+            }),
+        );
         assert_eq!(s.regime_trail_target_for("Ranging"), None);
     }
 
@@ -631,11 +734,18 @@ mod tests {
         let mut s = ParameterStore::default();
         // SUPERTREND strateji default'u 1.2; rejim A/B 2.5 yazdı → rejim kazanır.
         s.set_regime_patch("StrongUptrend", RegimePatch::empty().with_trail_target(2.5));
-        let with_regime = s.target_trail_pct_resolved("ETHUSDT", "SUPERTREND", Some("StrongUptrend"));
-        assert!((with_regime - 2.5).abs() < 1e-9, "rejim hedefi strateji default'unu ezmeli");
+        let with_regime =
+            s.target_trail_pct_resolved("ETHUSDT", "SUPERTREND", Some("StrongUptrend"));
+        assert!(
+            (with_regime - 2.5).abs() < 1e-9,
+            "rejim hedefi strateji default'unu ezmeli"
+        );
         // Rejim yoksa (None) strateji default'una düşer (sıfır regresyon).
         let no_regime = s.target_trail_pct_resolved("ETHUSDT", "SUPERTREND", None);
-        assert!((no_regime - 1.2).abs() < 1e-9, "rejim None → strateji default");
+        assert!(
+            (no_regime - 1.2).abs() < 1e-9,
+            "rejim None → strateji default"
+        );
         // Patch'i olmayan rejim → strateji default.
         let other = s.target_trail_pct_resolved("ETHUSDT", "SUPERTREND", Some("Ranging"));
         assert!((other - 1.2).abs() < 1e-9);
@@ -648,24 +758,30 @@ mod tests {
         // Online feedback override (canlı gözlem) rejim A/B'sinin üstünde.
         s.trail_feedback.insert(
             ("ETHUSDT".into(), "SUPERTREND".into()),
-            TrailFeedback { target_override: Some(0.9), ..Default::default() },
+            TrailFeedback {
+                target_override: Some(0.9),
+                ..Default::default()
+            },
         );
         let r = s.target_trail_pct_resolved("ETHUSDT", "SUPERTREND", Some("StrongUptrend"));
-        assert!((r - 0.9).abs() < 1e-9, "online feedback rejim hedefini ezmeli");
+        assert!(
+            (r - 0.9).abs() < 1e-9,
+            "online feedback rejim hedefini ezmeli"
+        );
     }
 
     #[test]
     fn from_env_overrides_partial_fill_and_scalp_and_sr() {
         std::env::set_var("PARTIAL_FILL_MAX_SLIPPAGE_PCT", "2.5");
-        std::env::set_var("SCALP_SWING_THRESHOLD_MIN",     "15");
-        std::env::set_var("SR_UPDATE_EVERY_SECS",          "10");
+        std::env::set_var("SCALP_SWING_THRESHOLD_MIN", "15");
+        std::env::set_var("SR_UPDATE_EVERY_SECS", "10");
         let s = ParameterStore::from_env();
         std::env::remove_var("PARTIAL_FILL_MAX_SLIPPAGE_PCT");
         std::env::remove_var("SCALP_SWING_THRESHOLD_MIN");
         std::env::remove_var("SR_UPDATE_EVERY_SECS");
         assert!((s.partial_fill.max_slippage_pct - 2.5).abs() < 1e-9);
         assert_eq!(s.scalp_swing_threshold_min, 15);
-        assert_eq!(s.sr_update_every_secs,      10);
+        assert_eq!(s.sr_update_every_secs, 10);
         // Diğer alanlar default'ta kalmalı
         assert_eq!(s.partial_fill.overfill_tolerance, 0.001);
     }
@@ -677,27 +793,50 @@ mod tests {
     // hem config.market hem seed filtresi env_or("TRADE_MARKET","spot")'ten türer.
     #[test]
     fn from_env_edge_seed_filters_by_engine_market() {
-        use crate::robot::backtester::{EdgeScanReport, EdgeRow, WfCrossCheck};
+        use crate::robot::backtester::{EdgeRow, EdgeScanReport, WfCrossCheck};
         let mk = |market: &str, sym: &str, iv: &str, strat: &str| EdgeRow {
-            exchange: "binance".into(), market: market.into(), symbol: sym.into(),
-            interval: iv.into(), rows: 5000, gap_pct: 0.0, stale_days: 0.0,
-            best_strategy: strat.into(), take_profit_pct: 4.0, stop_loss_pct: 2.0,
-            max_position_size: 0.3, trades: 40, win_rate: 0.6, profit_factor: 1.5,
-            expectancy: 5.0, sharpe: 0.5, avg_daily_quote_volume: 1e9, profitable: true,
-            wf: WfCrossCheck { windows: 6, profitable_windows: 5, pooled_pf: 1.4, trades: 40 },
+            exchange: "binance".into(),
+            market: market.into(),
+            symbol: sym.into(),
+            interval: iv.into(),
+            rows: 5000,
+            gap_pct: 0.0,
+            stale_days: 0.0,
+            best_strategy: strat.into(),
+            take_profit_pct: 4.0,
+            stop_loss_pct: 2.0,
+            max_position_size: 0.3,
+            trades: 40,
+            win_rate: 0.6,
+            profit_factor: 1.5,
+            expectancy: 5.0,
+            sharpe: 0.5,
+            avg_daily_quote_volume: 1e9,
+            profitable: true,
+            wf: WfCrossCheck {
+                windows: 6,
+                profitable_windows: 5,
+                pooled_pf: 1.4,
+                trades: 40,
+            },
             wf_robust: true,
         };
         let report = EdgeScanReport {
-            generated_at: "t".into(), db_path: "d".into(), market_filter: None,
-            series_candidates: 2, series_scanned: 2, series_skipped: 0, profitable_count: 2,
+            generated_at: "t".into(),
+            db_path: "d".into(),
+            market_filter: None,
+            series_candidates: 2,
+            series_scanned: 2,
+            series_skipped: 0,
+            profitable_count: 2,
             summary: vec![],
             rows: vec![
-                mk("futures", "BTCUSDT",   "1d", "BB"),           // engine market → girer
-                mk("spot",    "ALPACAUSDT","1h", "MA_CROSSOVER"), // spot edge → futures engine'de elenir
+                mk("futures", "BTCUSDT", "1d", "BB"), // engine market → girer
+                mk("spot", "ALPACAUSDT", "1h", "MA_CROSSOVER"), // spot edge → futures engine'de elenir
             ],
         };
-        let path = std::env::temp_dir()
-            .join(format!("edge_seed_market_{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("edge_seed_market_{}.json", std::process::id()));
         let p = path.to_string_lossy().to_string();
         std::fs::write(&p, serde_json::to_string(&report).unwrap()).unwrap();
 
@@ -707,12 +846,20 @@ mod tests {
         let s = ParameterStore::from_env();
         std::env::remove_var("EDGE_SEED_REPORT");
         std::env::remove_var("TRADE_MARKET");
-        assert_eq!(s.symbol_strategy.get("BTCUSDT").map(String::as_str), Some("BB"),
-            "futures BTCUSDT seed'lenmeli");
-        assert_eq!(s.symbol_interval.get("BTCUSDT").map(String::as_str), Some("1d"),
-            "BTCUSDT seed TF'i 1d olmalı");
-        assert!(!s.symbol_strategy.contains_key("ALPACAUSDT"),
-            "spot ALPACAUSDT futures engine'de elenmeli");
+        assert_eq!(
+            s.symbol_strategy.get("BTCUSDT").map(String::as_str),
+            Some("BB"),
+            "futures BTCUSDT seed'lenmeli"
+        );
+        assert_eq!(
+            s.symbol_interval.get("BTCUSDT").map(String::as_str),
+            Some("1d"),
+            "BTCUSDT seed TF'i 1d olmalı"
+        );
+        assert!(
+            !s.symbol_strategy.contains_key("ALPACAUSDT"),
+            "spot ALPACAUSDT futures engine'de elenmeli"
+        );
 
         // EDGE_SEED_IGNORE_MARKET=1 → çapraz-market seed (ikisi de girer).
         std::env::set_var("TRADE_MARKET", "futures");
@@ -723,7 +870,10 @@ mod tests {
         std::env::remove_var("EDGE_SEED_REPORT");
         std::env::remove_var("TRADE_MARKET");
         let _ = std::fs::remove_file(&p);
-        assert!(s2.symbol_strategy.contains_key("BTCUSDT") && s2.symbol_strategy.contains_key("ALPACAUSDT"),
-            "IGNORE_MARKET ile her iki market de seed'lenir");
+        assert!(
+            s2.symbol_strategy.contains_key("BTCUSDT")
+                && s2.symbol_strategy.contains_key("ALPACAUSDT"),
+            "IGNORE_MARKET ile her iki market de seed'lenir"
+        );
     }
 }

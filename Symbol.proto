@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package matriks.analist;
+
+message SymbolTick {
+    string symbol_code = 1;      // Örn: "THYAO" veya "USDTRY"
+    int64 timestamp = 2;         // Unix Zaman Damgası (Milisaniye)
+    
+    // Yüzeysel Fiyat Verileri (KD1)
+    double last_price = 3;       // Son İşlem Fiyatı
+    double change_percentage = 4;// Günlük Değişim Yüzdesi
+    uint64 total_volume = 5;     // Toplam İşlem Hacmi (Adet)
+    double total_turnover = 6;   // Toplam İşlem Hacmi (TL Tutarı)
+    
+    // En İyi Alış / Satış Kademeleri
+    double best_bid_price = 7;   // En İyi Alış Fiyatı
+    uint32 best_bid_quantity = 8;// En İyi Alış Adeti
+    double best_ask_price = 9;   // En İyi Satış Fiyatı
+    uint32 best_ask_quantity = 10;// En İyi Satış Adeti
+}

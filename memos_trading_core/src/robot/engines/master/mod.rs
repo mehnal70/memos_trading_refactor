@@ -1,40 +1,41 @@
 // src/robot/engines/master.rs - Master Engine Otonom İnfaz Merkezi
-// Srivastava ATP - İşlevsel Çarklar Odası (Unified Master Engine - Final Safe Compilation)
+// İşlevsel Çarklar Odası (Unified Master Engine - Final Safe Compilation)
 
-use crate::prelude::*;
 use super::base::{EngineConfig, TradingEngine};
-use std::sync::{Arc, Mutex};
+use crate::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration};
 
 /// Anomali-tetikli ML retrain'in son fire epoch'u (saniye). 0 = hiç fire edilmedi.
 /// `perform_anomaly_recovery` her cycle çağrılır ama bu cooldown sayesinde
 /// ML trigger spam'i kapanır (default 300sn, `ANOMALY_ML_TRIGGER_COOLDOWN_SECS`).
 static ANOMALY_ML_LAST_TRIGGER_EPOCH: AtomicU64 = AtomicU64::new(0);
+static ANOMALY_OPERATIONAL_LAST_LOG_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 /// Sembol bazlı log throttle: `symbol|kind` → son emit epoch. Aynı sembol için
 /// "DataIngest empty" log'u her cycle (500ms) tekrarlanmasın diye throttle'lanır
 /// (örn. 300sn, env `LOG_DATAINGEST_COOLDOWN_SECS`). Map büyümesi sınırlı —
 /// sembol sayısı orchestrator'la beraber tipik <100. Algoritma logger ile ortak
 /// ([`crate::robot::infra::throttle::Throttle`]); burası process-global tek instance.
-static LOG_THROTTLE: std::sync::OnceLock<crate::robot::infra::throttle::Throttle>
-    = std::sync::OnceLock::new();
+static LOG_THROTTLE: std::sync::OnceLock<crate::robot::infra::throttle::Throttle> =
+    std::sync::OnceLock::new();
 
 /// Phase C: TRAILING_STOP kapanışları sonrası 60sn olgunluk gözlem kuyruğu.
 /// close_paper_position TrailingStop branch'ı buraya enqueue eder; periyodik
 /// processor (spawn_trail_feedback_processor) olgunlaşmış kayıtları evalue edip
 /// ParameterStore.record_trailing_outcome'a iletir. Static — AppState alanı eklemiyoruz.
-static PENDING_TRAIL_OBS: std::sync::OnceLock<std::sync::Mutex<
-    std::collections::VecDeque<crate::robot::parameters::PendingTrailObservation>
->> = std::sync::OnceLock::new();
+static PENDING_TRAIL_OBS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::VecDeque<crate::robot::parameters::PendingTrailObservation>>,
+> = std::sync::OnceLock::new();
 
 /// Delisted sembol tespit sayacı: sembol → ardışık fetch hatası sayısı.
 /// Eşik (DELISTED_DETECTION_THRESHOLD env, default 3) aşılınca
 /// orchestrator'dan çıkarılır + live pozisyonu varsa force-close. Başarılı
 /// fetch sayacı sıfırlar (geçici Binance hatasının yanlış pozitif olmaması için).
-static DELISTED_FAIL_COUNTERS: std::sync::OnceLock<std::sync::Mutex<
-    std::collections::HashMap<String, u32>
->> = std::sync::OnceLock::new();
+static DELISTED_FAIL_COUNTERS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, u32>>,
+> = std::sync::OnceLock::new();
 
 fn delisted_counters() -> &'static std::sync::Mutex<std::collections::HashMap<String, u32>> {
     DELISTED_FAIL_COUNTERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
@@ -60,22 +61,28 @@ pub fn delisted_record_success(symbol: &str) {
 
 /// Sayacı sorgular (test ve teşhis için).
 pub fn delisted_failure_count(symbol: &str) -> u32 {
-    delisted_counters().lock().ok().and_then(|g| g.get(symbol).copied()).unwrap_or(0)
+    delisted_counters()
+        .lock()
+        .ok()
+        .and_then(|g| g.get(symbol).copied())
+        .unwrap_or(0)
 }
 
 /// Eşik (env DELISTED_DETECTION_THRESHOLD, default 3). 0 verilirse
 /// auto-detect kapanır (manuel müdahale için).
 pub fn delisted_detection_threshold() -> u32 {
     std::env::var("DELISTED_DETECTION_THRESHOLD")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(3)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3)
 }
 
 /// Delisted olarak mühürlenmiş semboller (purge sonrası). `symbol_eligible_for_live`
 /// bunları reddeder → price_poll/cycle/download/hydrate (hepsi eligible kullanıyor)
 /// artık yoklamaz → ApiError storm + "Recovering" sticky biter, sembol geri gelmez.
 /// Oturum-içi (restart'ta price_poll ~threshold×poll_secs içinde yeniden tespit eder).
-static DELISTED_SKIP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>>
-    = std::sync::OnceLock::new();
+static DELISTED_SKIP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
 
 fn delisted_skip_set() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     DELISTED_SKIP.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
@@ -83,12 +90,18 @@ fn delisted_skip_set() -> &'static std::sync::Mutex<std::collections::HashSet<St
 
 /// Sembolü delisted-skip setine ekle (purge_delisted_symbol çağırır).
 pub fn mark_delisted_skip(symbol: &str) {
-    if let Ok(mut s) = delisted_skip_set().lock() { s.insert(symbol.to_string()); }
+    if let Ok(mut s) = delisted_skip_set().lock() {
+        s.insert(symbol.to_string());
+    }
 }
 
 /// Sembol delisted-skip setinde mi (eligibility gate okur).
 pub fn is_delisted_skipped(symbol: &str) -> bool {
-    delisted_skip_set().lock().ok().map(|s| s.contains(symbol)).unwrap_or(false)
+    delisted_skip_set()
+        .lock()
+        .ok()
+        .map(|s| s.contains(symbol))
+        .unwrap_or(false)
 }
 
 /// 🗂️ Binance exchangeInfo sembol-statü registry'si (symbol → status, örn "TRADING"/
@@ -97,7 +110,7 @@ pub fn is_delisted_skipped(symbol: &str) -> bool {
 /// okur → status != TRADING olan sembol (ALPACAUSDT BREAK gibi halted/delisted)
 /// otoritatif dışlanır (heuristic'e gerek yok; de/re-list otomatik yansır).
 static SYMBOL_STATUS: std::sync::OnceLock<
-    std::sync::RwLock<std::collections::HashMap<String, String>>
+    std::sync::RwLock<std::collections::HashMap<String, String>>,
 > = std::sync::OnceLock::new();
 
 fn symbol_status_map() -> &'static std::sync::RwLock<std::collections::HashMap<String, String>> {
@@ -129,7 +142,7 @@ pub fn symbol_status_registry_len() -> usize {
 }
 
 fn trail_obs_queue() -> &'static std::sync::Mutex<
-    std::collections::VecDeque<crate::robot::parameters::PendingTrailObservation>
+    std::collections::VecDeque<crate::robot::parameters::PendingTrailObservation>,
 > {
     PENDING_TRAIL_OBS.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
 }
@@ -137,7 +150,9 @@ fn trail_obs_queue() -> &'static std::sync::Mutex<
 pub fn enqueue_trail_observation(obs: crate::robot::parameters::PendingTrailObservation) {
     if let Ok(mut q) = trail_obs_queue().lock() {
         // Kuyruğu sınırla — pathological case'de 1000+ gözlem birikmesin.
-        while q.len() >= 500 { q.pop_front(); }
+        while q.len() >= 500 {
+            q.pop_front();
+        }
         q.push_back(obs);
     }
 }
@@ -156,6 +171,20 @@ pub(crate) fn push_state_log(state: &Arc<Mutex<AppState>>, msg: String) {
     }
 }
 
+/// AppState kilidini poison durumunda da geri kazanır.
+/// Uzun süreli motor döngülerinde tek bir panic yüzünden zincirleme `unwrap` düşüşünü önler.
+pub(crate) fn lock_state_recover<'a>(
+    state: &'a Arc<Mutex<AppState>>,
+) -> std::sync::MutexGuard<'a, AppState> {
+    match state.lock() {
+        Ok(guard) => guard,
+        Err(poison) => {
+            log::warn!("AppState lock poisoned: recovery mode ile devam ediliyor");
+            poison.into_inner()
+        }
+    }
+}
+
 /// `state` kilidini kısa süreliğine alıp `trading_logger` Arc'ını clone'lar; varsa
 /// `make_event()` ile üretilen olayı yazar. Kilit yalnız clone süresince tutulur,
 /// IO (`log_event`) kilit DIŞINDA yapılır. Olay closure ile **lazy** üretilir →
@@ -167,10 +196,254 @@ pub(crate) fn emit_trade_event(
     state: &Arc<Mutex<AppState>>,
     make_event: impl FnOnce() -> crate::robot::infra::logger::TradeEvent,
 ) {
-    let logger = state.lock().ok().and_then(|s| s.trading_logger.clone());
-    if let Some(logger) = logger {
-        let _ = logger.log_event(&make_event());
+    let (logger, event_bus) = state
+        .lock()
+        .ok()
+        .map(|s| (s.trading_logger.clone(), s.event_bus.clone()))
+        .unwrap_or((None, None));
+
+    if logger.is_none() && event_bus.is_none() {
+        return;
     }
+
+    let event = make_event();
+    if let Some(logger) = logger {
+        let _ = logger.log_event(&event);
+    }
+    if let Some(bus) = event_bus {
+        let _ = bus.publish_trade_event(&event);
+    }
+}
+
+/// TradeEvent dışı kanonik olayları EventBus'a yayınlar (market/pipeline/system).
+/// EventBus kapalıysa sessizce no-op.
+pub(crate) fn emit_canonical_event(
+    state: &Arc<Mutex<AppState>>,
+    domain: &str,
+    event_type: &str,
+    venue: &str,
+    symbol: &str,
+    payload: serde_json::Value,
+) {
+    let event_bus = state.lock().ok().and_then(|s| s.event_bus.clone());
+    if let Some(bus) = event_bus {
+        let _ = bus.publish(crate::robot::infra::event_bus::CanonicalEvent {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            domain: domain.to_string(),
+            event_type: event_type.to_string(),
+            venue: venue.to_string(),
+            symbol: symbol.to_string(),
+            payload,
+        });
+    }
+}
+
+pub(crate) fn record_decision_audit(
+    state: &Arc<Mutex<AppState>>,
+    symbol: &str,
+    strategy: &str,
+    signal: &str,
+    regime: &str,
+    edge: f64,
+    edge_threshold: f64,
+    ml_confidence: f64,
+    stage: &str,
+    outcome: &str,
+    reason: &str,
+    bar_timestamp: Option<String>,
+    signal_interval: &str,
+) {
+    if let Ok(mut st) = state.lock() {
+        if let Ok(mut decisions) = st.fleet.latest_decisions.write() {
+            let policy = crate::robot::config_engine::OtonomConfigEngine::load_central_config()
+                .decision_policy;
+            let previous_shadow = decisions.get(symbol).map(|audit| {
+                (
+                    audit.shadow_signal.clone(),
+                    audit.shadow_status.clone(),
+                    audit.shadow_reason.clone(),
+                )
+            });
+            let signal_upper = signal.to_ascii_uppercase();
+            let outcome_lower = outcome.to_ascii_lowercase();
+            let decision = if signal_upper == "HOLD" || outcome_lower == "no_signal" {
+                "NO_TRADE"
+            } else {
+                "EVALUATED"
+            };
+            let reason_code = reason
+                .trim()
+                .to_ascii_uppercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect::<String>();
+            let risk_status = if stage.eq_ignore_ascii_case("risk") {
+                outcome.to_ascii_uppercase()
+            } else {
+                "NOT_EVALUATED".to_string()
+            };
+            let execution_status = if stage.eq_ignore_ascii_case("execution")
+                || stage.eq_ignore_ascii_case("entry")
+                || stage.eq_ignore_ascii_case("position")
+            {
+                outcome.to_ascii_uppercase()
+            } else {
+                "NOT_SUBMITTED".to_string()
+            };
+            decisions.insert(
+                symbol.to_string(),
+                crate::robot::robotic_loop::DecisionAudit {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    symbol: symbol.to_string(),
+                    strategy: strategy.to_string(),
+                    signal: signal.to_string(),
+                    regime: regime.to_string(),
+                    edge,
+                    edge_threshold,
+                    ml_confidence,
+                    stage: stage.to_string(),
+                    outcome: outcome.to_string(),
+                    reason: reason.to_string(),
+                    bar_timestamp,
+                    signal_interval: signal_interval.to_string(),
+                    regime_interval: policy.regime_interval,
+                    setup_interval: policy.setup_interval,
+                    trigger_interval: policy.trigger_interval,
+                    decision: decision.to_string(),
+                    reason_code,
+                    data_quality: "NOT_RECORDED".to_string(),
+                    risk_status,
+                    execution_status,
+                    shadow_signal: previous_shadow
+                        .as_ref()
+                        .map(|shadow| shadow.0.clone())
+                        .unwrap_or_default(),
+                    shadow_status: previous_shadow
+                        .as_ref()
+                        .map(|shadow| shadow.1.clone())
+                        .filter(|status| !status.is_empty())
+                        .unwrap_or_else(|| "NOT_EVALUATED".to_string()),
+                    shadow_reason: previous_shadow
+                        .as_ref()
+                        .map(|shadow| shadow.2.clone())
+                        .unwrap_or_default(),
+                },
+            );
+        }
+        let outcome_key = outcome.to_ascii_lowercase();
+        let stage_key = stage.to_ascii_lowercase();
+        let counter = format!("decision.{}.{}", stage_key, outcome_key);
+        *st.fleet.autonomy_counters.entry(counter).or_insert(0) += 1;
+        if stage_key == "risk" {
+            let risk_key = if outcome_key == "accepted" {
+                "risk.gate.allow"
+            } else {
+                "risk.gate.block"
+            };
+            *st.fleet
+                .autonomy_counters
+                .entry(risk_key.to_string())
+                .or_insert(0) += 1;
+        }
+    }
+}
+
+pub(crate) fn record_shadow_decision(
+    state: &Arc<Mutex<AppState>>,
+    symbol: &str,
+    signal: &str,
+    status: &str,
+    reason: &str,
+) {
+    if let Ok(mut st) = state.lock() {
+        if let Ok(mut decisions) = st.fleet.latest_decisions.write() {
+            if let Some(audit) = decisions.get_mut(symbol) {
+                audit.shadow_signal = signal.to_string();
+                audit.shadow_status = status.to_string();
+                audit.shadow_reason = reason.to_string();
+            }
+        }
+        let counter_key = match status {
+            "EVALUATED" => Some("shadow.total_evaluated"),
+            "INSUFFICIENT_DATA" => Some("shadow.total_insufficient_data"),
+            "DATA_ERROR" | "STRATEGY_ERROR" => Some("shadow.total_errors"),
+            _ => None,
+        };
+        if let Some(key) = counter_key {
+            *st.fleet
+                .autonomy_counters
+                .entry(key.to_string())
+                .or_insert(0) += 1;
+        }
+        if status == "EVALUATED" {
+            let key = if signal == "BUY" || signal == "SELL" {
+                "shadow.total_aligned"
+            } else {
+                "shadow.total_divergent"
+            };
+            *st.fleet
+                .autonomy_counters
+                .entry(key.to_string())
+                .or_insert(0) += 1;
+        }
+    }
+}
+
+pub(crate) fn combine_shadow_signals(
+    setup_signal: crate::core::types::Signal,
+    trigger_signal: crate::core::types::Signal,
+) -> (&'static str, &'static str) {
+    match (setup_signal, trigger_signal) {
+        (crate::core::types::Signal::Buy, crate::core::types::Signal::Buy) => {
+            ("BUY", "setup_trigger_aligned")
+        }
+        (crate::core::types::Signal::Sell, crate::core::types::Signal::Sell) => {
+            ("SELL", "setup_trigger_aligned")
+        }
+        _ => ("HOLD", "setup_trigger_not_aligned"),
+    }
+}
+
+pub(crate) fn emit_pipeline_step_event(
+    state: &Arc<Mutex<AppState>>,
+    step_label: &str,
+    status: crate::robot::data_pipeline::StepStatus,
+    last_run_secs: u64,
+    overdue_secs: u64,
+) {
+    emit_canonical_event(
+        state,
+        "pipeline",
+        "PIPELINE_STEP",
+        "internal",
+        step_label,
+        serde_json::json!({
+            "step": step_label,
+            "status": format!("{:?}", status),
+            "last_run_secs": last_run_secs,
+            "overdue_secs": overdue_secs,
+        }),
+    );
+}
+
+pub(crate) fn emit_pipeline_anomaly_event(
+    state: &Arc<Mutex<AppState>>,
+    severity: crate::robot::data_pipeline::AnomalySeverity,
+    kind: crate::robot::data_pipeline::AnomalyKind,
+    message: &str,
+) {
+    emit_canonical_event(
+        state,
+        "pipeline",
+        "PIPELINE_ANOMALY",
+        "internal",
+        "pipeline",
+        serde_json::json!({
+            "severity": format!("{:?}", severity),
+            "kind": format!("{:?}", kind),
+            "message": message,
+        }),
+    );
 }
 
 /// Env değişkenini `T`'ye parse eder; eksik/geçersizse `default`. Per-call (cache yok)
@@ -193,8 +466,70 @@ pub(crate) fn env_truthy(key: &str) -> bool {
 /// `AUTO_INTERVAL_CANDIDATES` ile override eder (örn. yalnız "1h,4h,1d"). Geçersiz/boş → default.
 pub(crate) fn auto_interval_candidates() -> Vec<String> {
     let raw = std::env::var("AUTO_INTERVAL_CANDIDATES").unwrap_or_else(|_| "15m,1h,4h,1d".into());
-    let v: Vec<String> = raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-    if v.is_empty() { vec!["15m".into(), "1h".into(), "4h".into(), "1d".into()] } else { v }
+    let v: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if v.is_empty() {
+        return vec!["15m".into(), "1h".into(), "4h".into(), "1d".into()];
+    } else {
+        v
+    }
+}
+
+/// Trend-Following Strict modu açık mı? (varsayılan kapalı)
+/// Env: TREND_STRICT_MODE=1
+pub(crate) fn trend_strict_mode_enabled() -> bool {
+    env_truthy("TREND_STRICT_MODE")
+}
+
+/// Trend-Following Strict strateji havuzu (TEK KAYNAK).
+/// Varsayılan: SUPERTREND,EMA_CROSSOVER,DONCHIAN,MA_CROSSOVER
+/// Override: TREND_STRICT_STRATEGY_POOL=SUPERTREND,DONCHIAN,...
+pub(crate) fn trend_strict_strategy_pool() -> Vec<String> {
+    let raw = std::env::var("TREND_STRICT_STRATEGY_POOL")
+        .unwrap_or_else(|_| "SUPERTREND,EMA_CROSSOVER,DONCHIAN,MA_CROSSOVER".into());
+    let pool: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if pool.is_empty() {
+        vec![
+            "SUPERTREND".into(),
+            "EMA_CROSSOVER".into(),
+            "DONCHIAN".into(),
+            "MA_CROSSOVER".into(),
+        ]
+    } else {
+        pool
+    }
+}
+
+/// Verilen strateji havuzunu Trend-Strict moduna göre filtreler.
+/// Strict kapalıysa giriş havuzunu olduğu gibi döndürür.
+pub(crate) fn enforce_trend_strict_pool(pool: Vec<String>) -> Vec<String> {
+    if !trend_strict_mode_enabled() {
+        return pool;
+    }
+    let strict = trend_strict_strategy_pool();
+    let mut out: Vec<String> = Vec::new();
+    for s in strict {
+        if pool.iter().any(|p| p.eq_ignore_ascii_case(&s)) {
+            out.push(s);
+        }
+    }
+    if out.is_empty() {
+        vec![
+            "SUPERTREND".into(),
+            "EMA_CROSSOVER".into(),
+            "DONCHIAN".into(),
+            "MA_CROSSOVER".into(),
+        ]
+    } else {
+        out
+    }
 }
 
 /// Boot'ta env'den BİR KEZ okunan runtime ayar paketi. `AppState.tuning` alanında
@@ -298,6 +633,15 @@ pub struct RuntimeTuning {
     pub max_concurrent_longs: u32,
     /// 🔢 Eş-zamanlı açık SHORT pozisyon tavanı (0 → sınırsız). Env MAX_CONCURRENT_SHORTS.
     pub max_concurrent_shorts: u32,
+    /// 🏛️ Venue bazlı eş-zamanlı açık pozisyon tavanı (toplam long+short).
+    /// Key: exchange token (`binance`,`mt5`,`ibkr`), değer: cap. 0/yok = sınırsız.
+    /// Env: VENUE_MAX_CONCURRENT_OPEN="binance:6,mt5:4,ibkr:4"
+    pub venue_max_concurrent_open: std::collections::HashMap<crate::core::types::Exchange, u32>,
+    /// 📉 Venue bazlı günlük realize zarar limiti (%). Gün içinde (UTC) kapalı işlemlerden
+    /// toplam negatif net PnL bu eşiği aşarsa o venue'de yeni açılış bloklanır.
+    /// Başlangıç sermayesine göre hesaplanır. 0/yok = kapalı.
+    /// Env: VENUE_DAILY_LOSS_PCT="binance:1.0,mt5:1.0,ibkr:1.0"
+    pub venue_daily_loss_pct: std::collections::HashMap<crate::core::types::Exchange, f64>,
     /// ⏳ Re-entry cooldown (sn): bir sembolde pozisyon kapandıktan sonra bu süre
     /// içinde YENİ açılış engellenir — churn/flip-flop (aç→kapa→hemen aç) koruması.
     /// 0 → kapalı (default, sıfır regresyon). Önerilen ~60. Env REENTRY_COOLDOWN_SECS.
@@ -353,12 +697,77 @@ pub struct RuntimeTuning {
     /// `SEED_STRATEGY_PRIORITY` (0/false/off → eski davranış: ScalpSwing her sembolde önce).
     /// [[project_edge_scan]] [[feedback_autonomy_first]].
     pub seed_strategy_priority: bool,
+    /// ⚖️ Blend çekirdeği (BLEND_FACTOR) aktifken ScalpSwing overlay izinli mi?
+    /// false ise çekirdek 3L/3S (top_k/top_k) kurulduğunda fırsatçı overlay tamamen kapanır.
+    /// Default true (overlay açık, ama aşağıdaki delta/slot limitleriyle güvenli).
+    /// Env `BLEND_OVERLAY_ENABLE`.
+    pub blend_overlay_enable: bool,
+    /// ⚖️ Blend çekirdeği aktifken ScalpSwing overlay için izin verilen azami açık
+    /// kanal-pozisyon sayısı (Scalp+Swing toplam, 0 = kapalı). Sembol-tekliği kuralı yine geçerli.
+    /// Env `BLEND_OVERLAY_MAX_OPEN`.
+    pub blend_overlay_max_open: u32,
+    /// ⚖️ Blend çekirdeği aktifken izin verilen azami net yönsel delta
+    /// |(blend_long-blend_short) + (overlay_long-overlay_short)|.
+    /// Default 1: çekirdek nötr kalır, overlay hafif yönsel sapma alabilir.
+    /// Env `BLEND_OVERLAY_MAX_NET_DELTA`.
+    pub blend_overlay_max_net_delta: i32,
+    /// ⏱️ Blend overlay (Scalp/Swing) bir bacak en fazla bu kadar sn açık kalır.
+    /// Süre dolunca açık overlay pozisyonu otomatik kapanır (çekirdek 3L/3S'e dönüş).
+    /// 0 => süre limiti kapalı. Env `BLEND_OVERLAY_MAX_HOLDING_SECS`.
+    pub blend_overlay_max_holding_secs: u64,
+    /// 🧠 Scalp/Swing fırsat seçiminde 15m fırsat-hafızası bias'ı aktif mi?
+    /// Açıkken MemoryOpportunitySnapshot (scalp_bias/swing_bias) skor seçiminde kullanılır.
+    /// Env `SCALP_SWING_MEM15M_ENABLE`.
+    pub scalp_swing_mem15m_enable: bool,
+    /// 🧠 15m fırsat-hafızası için asgari bar sayısı. Altı ise bias uygulanmaz.
+    /// Env `SCALP_SWING_MEM15M_MIN_BARS`.
+    pub scalp_swing_mem15m_min_bars: usize,
+    /// 🧠 15m fırsat-hafızasının fırsat skoruna etkisi (additif ağırlık).
+    /// Env `SCALP_SWING_MEM15M_BIAS_WEIGHT`.
+    pub scalp_swing_mem15m_bias_weight: f64,
+    /// 🧠 Scalp için 5m fırsat-hafızası bias'ı aktif mi?
+    /// Açıkken 5m MemoryOpportunitySnapshot scalp seçiminde kullanılır.
+    /// Env `SCALP_SWING_MEM5M_ENABLE`.
+    pub scalp_swing_mem5m_enable: bool,
+    /// 🧠 5m fırsat-hafızası için asgari bar sayısı. Altı ise bias uygulanmaz.
+    /// Env `SCALP_SWING_MEM5M_MIN_BARS`.
+    pub scalp_swing_mem5m_min_bars: usize,
+    /// 🧠 5m fırsat-hafızasının scalp skoruna etkisi (additif ağırlık).
+    /// Env `SCALP_SWING_MEM5M_BIAS_WEIGHT`.
+    pub scalp_swing_mem5m_bias_weight: f64,
     /// 🌍 Bölge/IP bloğu devre-kesici cooldown (sn): borsa SİSTEMİK reddederse (HTTP 451/403/
     /// 401/418/429, -2015/-1003) canlı emir denemesi bu süre boyunca durdurulur — API'yi
     /// dövmeyi kes (IP-ban tırmanışı önle), tek Critical alarm. Süre dolunca tek deneme
     /// (auto-probe): geçerse devre kapanır, yine bloklanırsa cooldown yenilenir. Paper akışı
     /// ETKİLENMEZ. Default 300. Env `LIVE_BLOCK_COOLDOWN_SECS` (0 → devre-kesici kapalı).
     pub live_block_cooldown_secs: u64,
+    /// Risk kapısı HALT süresi (sn). Bu süre boyunca yeni pozisyon açılmaz. 0 → kapalı.
+    pub risk_halt_cooldown_secs: u64,
+    /// Risk kapısı SAFE-MODE süresi (sn). 0 → kapalı.
+    pub safe_mode_cooldown_secs: u64,
+    /// SAFE-MODE aktifken tahsisat çarpanı (0<m<=1). 1.0 → etkisiz.
+    pub safe_mode_alloc_mult: f64,
+    /// 🕯️ Mum-sembolik gating (A.5.3): true ise yüksek güvenli zıt symbolic bias,
+    /// giriş sinyalini bloklayabilir. Default false (opt-in, non-invaziv rollout).
+    /// Env `SYMBOLIC_GATING_ENABLE`.
+    pub symbolic_gating_enable: bool,
+    /// Symbolic gating için asgari güven eşiği [0,1]. Varsayılan 0.75.
+    /// Env `SYMBOLIC_GATING_MIN_CONF`.
+    pub symbolic_gating_min_conf: f64,
+    /// Symbolic gate kapsamı: boşsa tüm semboller; doluysa yalnız bu listede.
+    /// Env `SYMBOLIC_GATING_SYMBOLS` (virgülle; `*`/`all` tüm semboller demektir).
+    pub symbolic_gating_symbols: std::collections::HashSet<String>,
+    /// Symbolic gate için adaptif eşik optimizasyonu (A.5.B/C):
+    /// alignment/conflict sağlığına göre min_conf dinamik ayarlanır.
+    /// Varsayılan kapalı (opt-in). Env `SYMBOLIC_GATING_ADAPTIVE`.
+    pub symbolic_gating_adaptive: bool,
+    /// Adaptif min_conf alt sınırı [0,1]. Env `SYMBOLIC_GATING_ADAPTIVE_MIN_CONF`.
+    pub symbolic_gating_adaptive_min_conf: f64,
+    /// Adaptif min_conf üst sınırı [0,1]. Env `SYMBOLIC_GATING_ADAPTIVE_MAX_CONF`.
+    pub symbolic_gating_adaptive_max_conf: f64,
+    /// Hedef alignment yüzdesi (0..100). Altına düşerse gate eşiği sıkılaşır.
+    /// Env `SYMBOLIC_GATING_TARGET_ALIGNMENT_PCT`.
+    pub symbolic_gating_target_alignment_pct: f64,
 }
 
 impl Default for RuntimeTuning {
@@ -390,20 +799,42 @@ impl Default for RuntimeTuning {
             fallback_sl_pct: 1.5,
             stale_feed_max_age_secs: -1, // -1 = auto (interval-farkında: 2×interval). 0=kapalı, >0=sabit override.
             signal_closed_bar_only: true, // giriş kararı kapalı-barda (live=backtest); çıkışlar etkilenmez
-            max_concurrent_longs: 5,   // dokümante edilen niyet (adaptive_params); 0=sınırsız
+            max_concurrent_longs: 5,      // dokümante edilen niyet (adaptive_params); 0=sınırsız
             max_concurrent_shorts: 2,
+            venue_max_concurrent_open: std::collections::HashMap::new(),
+            venue_daily_loss_pct: std::collections::HashMap::new(),
             reentry_cooldown_secs: 0,
             regime_adaptive_pctl: None,
             regime_directional: false,
             regime_strategy_fit: false,
-            data_gate_enabled: false,   // opt-in (sıfır regresyon); açınca bayat/sparse elenir
+            data_gate_enabled: false, // opt-in (sıfır regresyon); açınca bayat/sparse elenir
             data_min_rows: 100,
-            data_max_gap_pct: 90.0,     // gevşek (mevcut veri ~%22-49 gappy); Faz 2 sonrası sık
-            data_max_stale_bars: 10,    // son bar en fazla 10×interval yaşında
-            backfill_enabled: true,     // veri-doğruluğu (gap'i doldur); bounded → güvenli
-            backfill_max_requests: 50,  // 50×1000 = ~50k bar/cycle; büyük gap cycle'larda yakınsar
+            data_max_gap_pct: 90.0, // gevşek (mevcut veri ~%22-49 gappy); Faz 2 sonrası sık
+            data_max_stale_bars: 10, // son bar en fazla 10×interval yaşında
+            backfill_enabled: true, // veri-doğruluğu (gap'i doldur); bounded → güvenli
+            backfill_max_requests: 50, // 50×1000 = ~50k bar/cycle; büyük gap cycle'larda yakınsar
             seed_strategy_priority: true, // keşfedilmiş edge'i olan sembol o stratejiyle işlem görür (ScalpSwing baypas etmez)
+            blend_overlay_enable: true,
+            blend_overlay_max_open: 2,
+            blend_overlay_max_net_delta: 1,
+            blend_overlay_max_holding_secs: 14_400,
+            scalp_swing_mem5m_enable: true,
+            scalp_swing_mem5m_min_bars: 20,
+            scalp_swing_mem5m_bias_weight: 0.20,
+            scalp_swing_mem15m_enable: true,
+            scalp_swing_mem15m_min_bars: 20,
+            scalp_swing_mem15m_bias_weight: 0.20,
             live_block_cooldown_secs: 300, // bölge/IP bloğunda 5dk canlı emir durdur (auto-probe ile aç)
+            risk_halt_cooldown_secs: 300,  // kritik DD/günlük kayıpta 5dk yeni giriş yok
+            safe_mode_cooldown_secs: 300,  // safe-mode 5dk boyunca boyutu kısar
+            safe_mode_alloc_mult: 0.5,     // safe-mode'da yarım boyut
+            symbolic_gating_enable: false,
+            symbolic_gating_min_conf: 0.75,
+            symbolic_gating_symbols: std::collections::HashSet::new(),
+            symbolic_gating_adaptive: false,
+            symbolic_gating_adaptive_min_conf: 0.65,
+            symbolic_gating_adaptive_max_conf: 0.90,
+            symbolic_gating_target_alignment_pct: 55.0,
         }
     }
 }
@@ -415,59 +846,123 @@ impl RuntimeTuning {
         let d = Self::default();
         let commission_rate = {
             let v = env_parse("COMMISSION_RATE", d.commission_rate);
-            if v.is_finite() && v >= 0.0 { v } else { d.commission_rate }
+            if v.is_finite() && v >= 0.0 {
+                v
+            } else {
+                d.commission_rate
+            }
         };
         Self {
             force_live_exchanges: Self::parse_force_live_exchanges(),
             commission_rate,
             let_winners_run: env_truthy("LET_WINNERS_RUN"),
             strategy_select_eval: env_truthy("STRATEGY_SELECT_EVAL"),
-            min_holding_secs_strategy: env_parse("MIN_HOLDING_SECS_STRATEGY", d.min_holding_secs_strategy),
-            max_entry_price_dev_pct: env_parse("MAX_ENTRY_PRICE_DEVIATION_PCT", d.max_entry_price_dev_pct),
+            min_holding_secs_strategy: env_parse(
+                "MIN_HOLDING_SECS_STRATEGY",
+                d.min_holding_secs_strategy,
+            ),
+            max_entry_price_dev_pct: env_parse(
+                "MAX_ENTRY_PRICE_DEVIATION_PCT",
+                d.max_entry_price_dev_pct,
+            ),
             candle_freshness_secs: env_parse("CANDLE_FRESHNESS_SECS", d.candle_freshness_secs),
-            log_dataingest_cooldown_secs: env_parse("LOG_DATAINGEST_COOLDOWN_SECS", d.log_dataingest_cooldown_secs),
-            risk_block_log_cooldown_secs: env_parse("RISK_BLOCK_LOG_COOLDOWN_SECS", d.risk_block_log_cooldown_secs),
-            regime_context_ttl_secs: env_parse("REGIME_CONTEXT_TTL_SECS", d.regime_context_ttl_secs),
+            log_dataingest_cooldown_secs: env_parse(
+                "LOG_DATAINGEST_COOLDOWN_SECS",
+                d.log_dataingest_cooldown_secs,
+            ),
+            risk_block_log_cooldown_secs: env_parse(
+                "RISK_BLOCK_LOG_COOLDOWN_SECS",
+                d.risk_block_log_cooldown_secs,
+            ),
+            regime_context_ttl_secs: env_parse(
+                "REGIME_CONTEXT_TTL_SECS",
+                d.regime_context_ttl_secs,
+            ),
             // REGIME_GBT default açık (0/false → kapat). GBT_EDGE_LEGACY default kapalı.
-            regime_gbt: !matches!(std::env::var("REGIME_GBT").ok().as_deref(), Some("0") | Some("false") | Some("off")),
+            regime_gbt: !matches!(
+                std::env::var("REGIME_GBT").ok().as_deref(),
+                Some("0") | Some("false") | Some("off")
+            ),
             gbt_edge_legacy: env_truthy("GBT_EDGE_LEGACY"),
             use_limit_entry: env_truthy("USE_LIMIT_ENTRY"),
             limit_entry_timeout_ms: env_parse("LIMIT_ENTRY_TIMEOUT_MS", d.limit_entry_timeout_ms),
-            limit_entry_max_attempts: env_parse("LIMIT_ENTRY_MAX_ATTEMPTS", d.limit_entry_max_attempts),
-            limit_entry_max_spread_bps: env_parse("LIMIT_ENTRY_MAX_SPREAD_BPS", d.limit_entry_max_spread_bps),
+            limit_entry_max_attempts: env_parse(
+                "LIMIT_ENTRY_MAX_ATTEMPTS",
+                d.limit_entry_max_attempts,
+            ),
+            limit_entry_max_spread_bps: env_parse(
+                "LIMIT_ENTRY_MAX_SPREAD_BPS",
+                d.limit_entry_max_spread_bps,
+            ),
             // Default açık (0/false/off → kapat) — opt-in maker'ın trade kaçırmaması için.
-            limit_entry_fallback_market: !matches!(std::env::var("LIMIT_ENTRY_FALLBACK_MARKET").ok().as_deref(), Some("0") | Some("false") | Some("off")),
+            limit_entry_fallback_market: !matches!(
+                std::env::var("LIMIT_ENTRY_FALLBACK_MARKET").ok().as_deref(),
+                Some("0") | Some("false") | Some("off")
+            ),
             maker_commission_rate: {
                 let v = env_parse("MAKER_COMMISSION_RATE", commission_rate);
-                if v.is_finite() && v >= 0.0 { v } else { commission_rate }
+                if v.is_finite() && v >= 0.0 {
+                    v
+                } else {
+                    commission_rate
+                }
             },
             base_alloc_fraction: {
                 let v = env_parse("BASE_ALLOC_FRACTION", d.base_alloc_fraction);
-                if v.is_finite() && v > 0.0 { v } else { d.base_alloc_fraction }
+                if v.is_finite() && v > 0.0 {
+                    v
+                } else {
+                    d.base_alloc_fraction
+                }
             },
             alloc_floor_fraction: {
                 let v = env_parse("ALLOC_FLOOR_FRACTION", d.alloc_floor_fraction);
-                if v.is_finite() && v >= 0.0 { v } else { d.alloc_floor_fraction }
+                if v.is_finite() && v >= 0.0 {
+                    v
+                } else {
+                    d.alloc_floor_fraction
+                }
             },
             // Pencereler en az 1 (0 → istatistik anlamsız); geçersizde default.
-            kelly_loss_streak_window: env_parse("KELLY_LOSS_STREAK_WINDOW", d.kelly_loss_streak_window).max(1),
+            kelly_loss_streak_window: env_parse(
+                "KELLY_LOSS_STREAK_WINDOW",
+                d.kelly_loss_streak_window,
+            )
+            .max(1),
             kelly_stats_window: env_parse("KELLY_STATS_WINDOW", d.kelly_stats_window).max(1),
             fallback_tp_pct: {
                 let v = env_parse("FALLBACK_TP_PCT", d.fallback_tp_pct);
-                if v.is_finite() && v > 0.0 { v } else { d.fallback_tp_pct }
+                if v.is_finite() && v > 0.0 {
+                    v
+                } else {
+                    d.fallback_tp_pct
+                }
             },
             fallback_sl_pct: {
                 let v = env_parse("FALLBACK_SL_PCT", d.fallback_sl_pct);
-                if v.is_finite() && v > 0.0 { v } else { d.fallback_sl_pct }
+                if v.is_finite() && v > 0.0 {
+                    v
+                } else {
+                    d.fallback_sl_pct
+                }
             },
-            stale_feed_max_age_secs: env_parse("STALE_FEED_MAX_AGE_SECS", d.stale_feed_max_age_secs),
+            stale_feed_max_age_secs: env_parse(
+                "STALE_FEED_MAX_AGE_SECS",
+                d.stale_feed_max_age_secs,
+            ),
             // Default açık (0/false/off → kapat) — giriş kararı kapalı-barda; live=backtest, repaint churn yok.
-            signal_closed_bar_only: !matches!(std::env::var("SIGNAL_CLOSED_BAR_ONLY").ok().as_deref(), Some("0") | Some("false") | Some("off")),
-            max_concurrent_longs:  env_parse("MAX_CONCURRENT_LONGS", d.max_concurrent_longs),
+            signal_closed_bar_only: !matches!(
+                std::env::var("SIGNAL_CLOSED_BAR_ONLY").ok().as_deref(),
+                Some("0") | Some("false") | Some("off")
+            ),
+            max_concurrent_longs: env_parse("MAX_CONCURRENT_LONGS", d.max_concurrent_longs),
             max_concurrent_shorts: env_parse("MAX_CONCURRENT_SHORTS", d.max_concurrent_shorts),
+            venue_max_concurrent_open: Self::parse_exchange_u32_map("VENUE_MAX_CONCURRENT_OPEN"),
+            venue_daily_loss_pct: Self::parse_exchange_f64_map("VENUE_DAILY_LOSS_PCT"),
             reentry_cooldown_secs: env_parse("REENTRY_COOLDOWN_SECS", d.reentry_cooldown_secs),
             // (0,1) aralığında geçerli persentil → Some; aksi (set edilmemiş/0/1/NaN) → None (sabit eşik).
-            regime_adaptive_pctl: std::env::var("REGIME_ADAPTIVE_PCTL").ok()
+            regime_adaptive_pctl: std::env::var("REGIME_ADAPTIVE_PCTL")
+                .ok()
                 .and_then(|s| s.parse::<f64>().ok())
                 .filter(|p| p.is_finite() && *p > 0.0 && *p < 1.0),
             regime_directional: env_truthy("REGIME_DIRECTIONAL"),
@@ -477,11 +972,135 @@ impl RuntimeTuning {
             data_max_gap_pct: env_parse("DATA_GATE_MAX_GAP_PCT", d.data_max_gap_pct),
             data_max_stale_bars: env_parse("DATA_GATE_MAX_STALE_BARS", d.data_max_stale_bars),
             // Default açık (0/false/off → kapat) — gap doldurma veri-doğruluğu; bounded.
-            backfill_enabled: !matches!(std::env::var("BACKFILL_ENABLED").ok().as_deref(), Some("0") | Some("false") | Some("off")),
-            backfill_max_requests: env_parse("BACKFILL_MAX_REQUESTS", d.backfill_max_requests).max(1),
+            backfill_enabled: !matches!(
+                std::env::var("BACKFILL_ENABLED").ok().as_deref(),
+                Some("0") | Some("false") | Some("off")
+            ),
+            backfill_max_requests: env_parse("BACKFILL_MAX_REQUESTS", d.backfill_max_requests)
+                .max(1),
             // Default açık (0/false/off → kapat) — keşfedilmiş edge sembolde ScalpSwing'i baypas etmesin.
-            seed_strategy_priority: !matches!(std::env::var("SEED_STRATEGY_PRIORITY").ok().as_deref(), Some("0") | Some("false") | Some("off")),
-            live_block_cooldown_secs: env_parse("LIVE_BLOCK_COOLDOWN_SECS", d.live_block_cooldown_secs),
+            seed_strategy_priority: !matches!(
+                std::env::var("SEED_STRATEGY_PRIORITY").ok().as_deref(),
+                Some("0") | Some("false") | Some("off")
+            ),
+            // Default açık (0/false/off → kapat) — blend çekirdeği üstüne kontrollü overlay.
+            blend_overlay_enable: !matches!(
+                std::env::var("BLEND_OVERLAY_ENABLE").ok().as_deref(),
+                Some("0") | Some("false") | Some("off")
+            ),
+            blend_overlay_max_open: env_parse("BLEND_OVERLAY_MAX_OPEN", d.blend_overlay_max_open),
+            blend_overlay_max_net_delta: env_parse(
+                "BLEND_OVERLAY_MAX_NET_DELTA",
+                d.blend_overlay_max_net_delta,
+            ),
+            blend_overlay_max_holding_secs: env_parse(
+                "BLEND_OVERLAY_MAX_HOLDING_SECS",
+                d.blend_overlay_max_holding_secs,
+            ),
+            scalp_swing_mem5m_enable: !matches!(
+                std::env::var("SCALP_SWING_MEM5M_ENABLE").ok().as_deref(),
+                Some("0") | Some("false") | Some("off")
+            ),
+            scalp_swing_mem5m_min_bars: env_parse(
+                "SCALP_SWING_MEM5M_MIN_BARS",
+                d.scalp_swing_mem5m_min_bars,
+            )
+            .max(8),
+            scalp_swing_mem5m_bias_weight: {
+                let v = env_parse(
+                    "SCALP_SWING_MEM5M_BIAS_WEIGHT",
+                    d.scalp_swing_mem5m_bias_weight,
+                );
+                if v.is_finite() {
+                    v.clamp(0.0, 1.0)
+                } else {
+                    d.scalp_swing_mem5m_bias_weight
+                }
+            },
+            scalp_swing_mem15m_enable: !matches!(
+                std::env::var("SCALP_SWING_MEM15M_ENABLE").ok().as_deref(),
+                Some("0") | Some("false") | Some("off")
+            ),
+            scalp_swing_mem15m_min_bars: env_parse(
+                "SCALP_SWING_MEM15M_MIN_BARS",
+                d.scalp_swing_mem15m_min_bars,
+            )
+            .max(8),
+            scalp_swing_mem15m_bias_weight: {
+                let v = env_parse(
+                    "SCALP_SWING_MEM15M_BIAS_WEIGHT",
+                    d.scalp_swing_mem15m_bias_weight,
+                );
+                if v.is_finite() {
+                    v.clamp(0.0, 1.0)
+                } else {
+                    d.scalp_swing_mem15m_bias_weight
+                }
+            },
+            live_block_cooldown_secs: env_parse(
+                "LIVE_BLOCK_COOLDOWN_SECS",
+                d.live_block_cooldown_secs,
+            ),
+            risk_halt_cooldown_secs: env_parse(
+                "RISK_HALT_COOLDOWN_SECS",
+                d.risk_halt_cooldown_secs,
+            ),
+            safe_mode_cooldown_secs: env_parse(
+                "SAFE_MODE_COOLDOWN_SECS",
+                d.safe_mode_cooldown_secs,
+            ),
+            safe_mode_alloc_mult: {
+                let v = env_parse("SAFE_MODE_ALLOC_MULT", d.safe_mode_alloc_mult);
+                if v.is_finite() && v > 0.0 && v <= 1.0 {
+                    v
+                } else {
+                    d.safe_mode_alloc_mult
+                }
+            },
+            symbolic_gating_enable: env_truthy("SYMBOLIC_GATING_ENABLE"),
+            symbolic_gating_min_conf: {
+                let v = env_parse("SYMBOLIC_GATING_MIN_CONF", d.symbolic_gating_min_conf);
+                if v.is_finite() {
+                    v.clamp(0.0, 1.0)
+                } else {
+                    d.symbolic_gating_min_conf
+                }
+            },
+            symbolic_gating_symbols: Self::parse_symbolic_gating_symbols(),
+            symbolic_gating_adaptive: env_truthy("SYMBOLIC_GATING_ADAPTIVE"),
+            symbolic_gating_adaptive_min_conf: {
+                let v = env_parse(
+                    "SYMBOLIC_GATING_ADAPTIVE_MIN_CONF",
+                    d.symbolic_gating_adaptive_min_conf,
+                );
+                if v.is_finite() {
+                    v.clamp(0.0, 1.0)
+                } else {
+                    d.symbolic_gating_adaptive_min_conf
+                }
+            },
+            symbolic_gating_adaptive_max_conf: {
+                let v = env_parse(
+                    "SYMBOLIC_GATING_ADAPTIVE_MAX_CONF",
+                    d.symbolic_gating_adaptive_max_conf,
+                );
+                if v.is_finite() {
+                    v.clamp(0.0, 1.0)
+                } else {
+                    d.symbolic_gating_adaptive_max_conf
+                }
+            },
+            symbolic_gating_target_alignment_pct: {
+                let v = env_parse(
+                    "SYMBOLIC_GATING_TARGET_ALIGNMENT_PCT",
+                    d.symbolic_gating_target_alignment_pct,
+                );
+                if v.is_finite() {
+                    v.clamp(0.0, 100.0)
+                } else {
+                    d.symbolic_gating_target_alignment_pct
+                }
+            },
         }
     }
 
@@ -499,7 +1118,8 @@ impl RuntimeTuning {
     /// ATR% dağılımından adaptif Volatile sınırı; değilse sabit (`Default`) eşikler.
     /// Tek nokta: hem RegimeContext sınıflandırması hem Volatile→IDLE gate'i bunu kullanır.
     pub fn regime_thresholds(
-        &self, candles: &[crate::core::types::Candle],
+        &self,
+        candles: &[crate::core::types::Candle],
     ) -> crate::robot::logic::market_regime::RegimeThresholds {
         use crate::robot::logic::market_regime::{adaptive_thresholds, RegimeThresholds};
         match self.regime_adaptive_pctl {
@@ -523,16 +1143,99 @@ impl RuntimeTuning {
         out
     }
 
+    fn parse_symbolic_gating_symbols() -> std::collections::HashSet<String> {
+        let raw = std::env::var("SYMBOLIC_GATING_SYMBOLS").unwrap_or_default();
+        let mut out: std::collections::HashSet<String> = raw
+            .split([',', ';', ' '])
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_ascii_uppercase())
+            .collect();
+        // Evrensel kapsam token'ı varsa boş sete dön: helper boş seti "tümü" yorumlar.
+        if out.contains("*") || out.contains("ALL") {
+            out.clear();
+        }
+        out
+    }
+
+    fn parse_exchange_u32_map(
+        var_name: &str,
+    ) -> std::collections::HashMap<crate::core::types::Exchange, u32> {
+        use crate::core::types::Exchange;
+        let raw = std::env::var(var_name).unwrap_or_default();
+        let mut out = std::collections::HashMap::new();
+        for item in raw.split([',', ';']) {
+            let Some((k, v)) = item.split_once(':') else {
+                continue;
+            };
+            let Some(ex) = Exchange::from_token(k.trim()) else {
+                continue;
+            };
+            let Some(cap) = v.trim().parse::<u32>().ok() else {
+                continue;
+            };
+            out.insert(ex, cap);
+        }
+        out
+    }
+
+    fn parse_exchange_f64_map(
+        var_name: &str,
+    ) -> std::collections::HashMap<crate::core::types::Exchange, f64> {
+        use crate::core::types::Exchange;
+        let raw = std::env::var(var_name).unwrap_or_default();
+        let mut out = std::collections::HashMap::new();
+        for item in raw.split([',', ';']) {
+            let Some((k, v)) = item.split_once(':') else {
+                continue;
+            };
+            let Some(ex) = Exchange::from_token(k.trim()) else {
+                continue;
+            };
+            let Some(pct) = v.trim().parse::<f64>().ok() else {
+                continue;
+            };
+            if pct.is_finite() && pct >= 0.0 {
+                out.insert(ex, pct);
+            }
+        }
+        out
+    }
+
+    /// Symbolic gating bu sembolde aktif mi?
+    /// - `symbolic_gating_enable=false` => her zaman false
+    /// - `symbolic_gating_symbols` boş => tüm semboller
+    /// - dolu => sembol (ham veya @venue'suz bare) eşleşmeli
+    pub fn symbolic_gating_enabled_for(&self, symbol: &str) -> bool {
+        if !self.symbolic_gating_enable {
+            return false;
+        }
+        if self.symbolic_gating_symbols.is_empty() {
+            return true;
+        }
+        let sym_u = symbol.trim().to_ascii_uppercase();
+        if self.symbolic_gating_symbols.contains(&sym_u) {
+            return true;
+        }
+        let (bare, _) = crate::robot::venue::registry::split_venue_tag(symbol);
+        self.symbolic_gating_symbols
+            .contains(&bare.trim().to_ascii_uppercase())
+    }
+
     /// Sembol canlı cycle'a (DataIngest + trade) uygun mu? Borsasının canlı feed'i
     /// varsa ya da operatör force ettiyse true. **Tüm market-bazlı dışlama tek nokta** —
     /// motorun başka hiçbir yerinde borsa-adı sabiti olmamalı.
     pub fn symbol_eligible_for_live(&self, symbol: &str) -> bool {
         // Delisted tespit edilmiş sembol → her zaman uygun değil (tüm seçim noktaları
         // bu gate'i kullandığı için tek noktada dışlanır).
-        if is_delisted_skipped(symbol) { return false; }
+        if is_delisted_skipped(symbol) {
+            return false;
+        }
         // exchangeInfo statü registry'si: açıkça TRADING-dışı (BREAK/HALT/delisted) → uygun değil.
         // (Bilinmeyen sembol registry dolmadan izinli; refresh job + boot hydrate doldurur.)
-        if !is_symbol_tradeable(symbol) { return false; }
+        if !is_symbol_tradeable(symbol) {
+            return false;
+        }
         // Borsa belirleme: açık venue etiketi (örn. "EURUSD@mt5") varsa ona saygı duy
         // (split_venue_tag tek-kaynak) — aksi halde "EURUSD" şekil-heuristic'iyle yanlışlıkla
         // BIST'e (feed yok) sınıflanıp uygunsuz görünürdü. Etiketsiz → şekil-sınıflandırma.
@@ -546,19 +1249,25 @@ impl RuntimeTuning {
 /// 0 verilirse price sanity guard kapanır (test ve operatör override için).
 pub fn price_deviation_threshold_from_env() -> f64 {
     std::env::var("MAX_ENTRY_PRICE_DEVIATION_PCT")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(5.0)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5.0)
 }
 
 /// Entry ile reference (DB son mum) arasındaki yüzde sapma. Reference <= 0 ise 0 döner.
 pub fn price_deviation_pct(entry: f64, reference: f64) -> f64 {
     if reference > 0.0 {
         ((entry - reference).abs() / reference) * 100.0
-    } else { 0.0 }
+    } else {
+        0.0
+    }
 }
 
 /// Price sanity sınırı aşıldı mı? `max_dev_pct <= 0` ise guard kapalı (false döner).
 pub fn price_deviation_exceeds(entry: f64, reference: f64, max_dev_pct: f64) -> bool {
-    if max_dev_pct <= 0.0 || reference <= 0.0 { return false; }
+    if max_dev_pct <= 0.0 || reference <= 0.0 {
+        return false;
+    }
     price_deviation_pct(entry, reference) > max_dev_pct
 }
 
@@ -573,7 +1282,10 @@ pub fn candle_is_fresh(candle_ts: &chrono::DateTime<chrono::Utc>) -> bool {
 /// Saf freshness kontrolü: 0 <= (now - ts) <= max_age_secs. `candle_is_fresh` bunun
 /// env-default sarmalayıcısı (testler default'la çağırıyor); hot-path RuntimeTuning'den
 /// gelen cached eşikle bu saf sürümü çağırır → per-call getenv yok.
-pub fn candle_is_fresh_within(candle_ts: &chrono::DateTime<chrono::Utc>, max_age_secs: i64) -> bool {
+pub fn candle_is_fresh_within(
+    candle_ts: &chrono::DateTime<chrono::Utc>,
+    max_age_secs: i64,
+) -> bool {
     let age_secs = (chrono::Utc::now() - *candle_ts).num_seconds();
     age_secs >= 0 && age_secs <= max_age_secs
 }
@@ -593,6 +1305,104 @@ pub struct Engine {
     pub strategy_manager: Box<dyn StrategyLifecycleManager + Send>,
 }
 
+impl Engine {
+    /// Faz A telemetri: strateji adını indikatör etiketlerine indirger.
+    /// Amaç: karar/kapanış sayaçlarında ortak namespace (indicator.*) üretmek.
+    pub(crate) fn indicator_tags_for_strategy(strategy_name: &str) -> &'static [&'static str] {
+        let s = strategy_name.trim().to_ascii_uppercase();
+        match s.as_str() {
+            "XS_MOMENTUM" => &["xs_momentum"],
+            "FUNDING_CARRY" => &["funding_carry"],
+            "BLEND_FACTOR" => &["blend_factor"],
+            "RSI" => &["rsi"],
+            "STOCH_RSI" => &["stoch_rsi", "rsi"],
+            "MACD" => &["macd", "ma"],
+            "MA_CROSSOVER" | "EMA" => &["ma"],
+            "BB" => &["bb", "volatility"],
+            "ADX" => &["adx", "trend"],
+            "SUPERTREND" => &["atr", "trend"],
+            "VWAP" => &["vwap"],
+            "CCI" => &["cci", "momentum"],
+            "DONCHIAN" => &["donchian", "breakout"],
+            "ICT_COMPOSITE" => &["rsi", "ma", "atr", "momentum"],
+            _ => &["generic"],
+        }
+    }
+
+    /// `indicator.<tag>.<suffix>` sayaçlarını arttırır.
+    pub(crate) fn bump_indicator_counters(st: &mut AppState, strategy_name: &str, suffix: &str) {
+        for tag in Self::indicator_tags_for_strategy(strategy_name) {
+            let key = format!("indicator.{}.{}", tag, suffix);
+            *st.fleet.autonomy_counters.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    /// Tek indikatör telemetri anahtarını N kadar arttırır (saf sayaç yardımı).
+    pub(crate) fn bump_indicator_counter_by(
+        st: &mut AppState,
+        strategy_name: &str,
+        suffix: &str,
+        by: u64,
+    ) {
+        if by == 0 {
+            return;
+        }
+        for tag in Self::indicator_tags_for_strategy(strategy_name) {
+            let key = format!("indicator.{}.{}", tag, suffix);
+            *st.fleet.autonomy_counters.entry(key).or_insert(0) += by;
+        }
+    }
+}
+
+impl Engine {
+    /// 🗄️ Sembol → kanonik okuma anahtarı: `(exchange, market, bare_symbol)`.
+    ///
+    /// TEK KAYNAK: `venue_registry.route(symbol)` + `VenueAdapter::storage_namespace()`.
+    /// Mum okuyan HER yol (canlı cycle, backtest job'ı, screener, tuner, HTF) bunu
+    /// kullanmalı — global `config.market` KULLANILMAMALI: çok-venue profilde
+    /// (`VENUES=binance:futures,mt5:cfd`) tek global değer MT5 sembollerini yanlış
+    /// kovada aratıyordu (ölçüm: AUDUSD 15m'de 3508 bar dururken 68 bar okunuyordu).
+    ///
+    /// ⚠️ Sembol ETİKETLİ olmalı (`EURUSD@mt5`) ya da şekil-sınıflandırması doğru
+    /// çıkmalı: çıplak `EURUSD` `Exchange::classify` ile BIST sanılır (6 büyük harf
+    /// kuralı). Pinned/AUTO listeleri etiketli tuttuğu sürece güvenli.
+    ///
+    /// `None` → sembol hiçbir venue'ya route edilemedi (registry boş vb.); çağıran
+    /// eski market-agnostik okumaya düşebilir.
+    pub(crate) fn resolve_read_ns(
+        state: &Arc<Mutex<AppState>>,
+        symbol: &str,
+    ) -> Option<(String, String, String)> {
+        state.lock().ok().and_then(|st| {
+            st.venue_registry.route(symbol).map(|(v, bare)| {
+                let (ex, mk) = v.storage_namespace();
+                (ex.to_string(), mk.to_string(), bare.to_string())
+            })
+        })
+    }
+
+    /// 🗄️ Route-farkında mum okuma: sembolü venue'suna çözüp kanonik `(exchange,
+    /// market)` kovasından ÇIPLAK sembolle okur. Route edilemezse (registry boş /
+    /// tanınmayan sembol) eski market-agnostik okumaya düşer — davranış bozulmaz.
+    ///
+    /// Mum okuyan job/tuner/screener yolları `read_candles_market(db, sym, iv,
+    /// &config.market, n)` yerine BUNU kullanmalı (global market çok-venue'da yanlış).
+    pub(crate) fn read_candles_routed(
+        state: &Arc<Mutex<AppState>>,
+        db_path: &str,
+        symbol: &str,
+        interval: &str,
+        limit: usize,
+    ) -> crate::Result<Vec<crate::core::types::Candle>> {
+        match Self::resolve_read_ns(state, symbol) {
+            Some((ex, mk, bare)) => crate::persistence::reader::read_candles_ns(
+                db_path, &bare, interval, &ex, &mk, limit,
+            ),
+            None => crate::persistence::reader::read_candles(db_path, symbol, interval, limit),
+        }
+    }
+}
+
 /// Bir pozisyonun kapanış sebebi — `ClosedTradeModel.exit_reason` string'i bu enum'dan üretilir.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitReason {
@@ -601,29 +1411,35 @@ pub enum ExitReason {
     TrailingStop,
     Breakeven,
     StrategySignal,
+    /// Borsa tarafında kapanmış (SL/TP tetikledi, likidasyon ya da manuel) — mutabakat
+    /// tespit etti. Gerçek fill fiyatı bilinmediği için son bilinen fiyat kullanılır.
+    /// ÖNCEDEN: bu durum `TrailingStop` olarak YALAN yazılıyordu → çıkış istatistikleri
+    /// ve onları besleyen adaptif katman bozuluyordu.
+    ExchangeClosed,
 }
 
 impl ExitReason {
     pub fn as_str(self) -> &'static str {
         match self {
-            ExitReason::StopLoss        => "STOP_LOSS",
-            ExitReason::TakeProfit      => "TAKE_PROFIT",
-            ExitReason::TrailingStop    => "TRAILING_STOP",
-            ExitReason::Breakeven       => "BREAKEVEN",
-            ExitReason::StrategySignal  => "STRATEGY_SIGNAL",
+            ExitReason::StopLoss => "STOP_LOSS",
+            ExitReason::TakeProfit => "TAKE_PROFIT",
+            ExitReason::TrailingStop => "TRAILING_STOP",
+            ExitReason::Breakeven => "BREAKEVEN",
+            ExitReason::ExchangeClosed => "EXCHANGE_CLOSED",
+            ExitReason::StrategySignal => "STRATEGY_SIGNAL",
         }
     }
     pub fn emoji(self) -> &'static str {
         match self {
-            ExitReason::StopLoss        => "🔻",
-            ExitReason::TakeProfit      => "🎯",
-            ExitReason::TrailingStop    => "🪤",
-            ExitReason::Breakeven       => "⚖️",
-            ExitReason::StrategySignal  => "🏁",
+            ExitReason::StopLoss => "🔻",
+            ExitReason::TakeProfit => "🎯",
+            ExitReason::TrailingStop => "🪤",
+            ExitReason::Breakeven => "⚖️",
+            ExitReason::ExchangeClosed => "🔗",
+            ExitReason::StrategySignal => "🏁",
         }
     }
 }
-
 
 #[cfg(test)]
 mod tuning_tests {
@@ -633,53 +1449,75 @@ mod tuning_tests {
 
     fn calm_candles(n: usize) -> Vec<Candle> {
         // Sıkı bantlı (düşük ATR%) yükseliş — adaptif sınır absolute 7.0'ın altına insin.
-        (0..n).map(|i| {
-            let c = 100.0 + i as f64;
-            Candle {
-                timestamp: Utc.timestamp_opt(1_700_000_000 + i as i64 * 60, 0).unwrap(),
-                open: c, high: c + 0.5, low: c - 0.5, close: c,
-                volume: 1.0, symbol: "T".into(), interval: "1m".into(),
-            }
-        }).collect()
+        (0..n)
+            .map(|i| {
+                let c = 100.0 + i as f64;
+                Candle {
+                    timestamp: Utc.timestamp_opt(1_700_000_000 + i as i64 * 60, 0).unwrap(),
+                    open: c,
+                    high: c + 0.5,
+                    low: c - 0.5,
+                    close: c,
+                    volume: 1.0,
+                    symbol: "T".into(),
+                    interval: "1m".into(),
+                }
+            })
+            .collect()
     }
 
     #[test]
     fn regime_thresholds_none_is_default() {
         // regime_adaptive_pctl=None → sabit eşik (mevcut davranış birebir).
-        let t = RuntimeTuning { regime_adaptive_pctl: None, ..RuntimeTuning::default() };
+        let t = RuntimeTuning {
+            regime_adaptive_pctl: None,
+            ..RuntimeTuning::default()
+        };
         assert_eq!(t.regime_thresholds(&calm_candles(80)), Default::default());
     }
 
     #[test]
     fn regime_thresholds_adaptive_is_symbol_relative() {
         // Some(pctl) → sembolün kendi dağılımından adaptif Volatile sınırı (< absolute 7.0).
-        let t = RuntimeTuning { regime_adaptive_pctl: Some(0.90), ..RuntimeTuning::default() };
+        let t = RuntimeTuning {
+            regime_adaptive_pctl: Some(0.90),
+            ..RuntimeTuning::default()
+        };
         let thr = t.regime_thresholds(&calm_candles(80));
-        assert!(thr.atr_volatile_pct < 7.0 && thr.atr_volatile_pct > 0.0,
-            "adaptif sınır absolute'ın altında olmalı: {}", thr.atr_volatile_pct);
-        assert_eq!((thr.adx_ranging, thr.adx_trending), (20.0, 25.0), "ADX bandları sabit kalır");
+        assert!(
+            thr.atr_volatile_pct < 7.0 && thr.atr_volatile_pct > 0.0,
+            "adaptif sınır absolute'ın altında olmalı: {}",
+            thr.atr_volatile_pct
+        );
+        assert_eq!(
+            (thr.adx_ranging, thr.adx_trending),
+            (20.0, 25.0),
+            "ADX bandları sabit kalır"
+        );
     }
 }
 
 // ── Faz 1: impl Engine sorumluluk modüllerine bölündü (davranış birebir) ──
-mod loop_core;
-pub(crate) mod book_core; // kesitsel kitap ORTAK motoru (momentum⊕carry DRY çekirdek)
-pub(crate) mod xs_live; // kesitsel relatif-güç (momentum) adanmış mod — book_core ince sarmalayıcı
-pub(crate) mod carry_live; // funding-carry adanmış mod — book_core ince sarmalayıcı
 pub(crate) mod blend_live; // iki-faktör z-score harman adanmış mod (Faz 2) — book_core ince sarmalayıcı
-pub(crate) mod graded_entry; // kademeli giriş (XS hariç): rejime-göre pyramiding/averaging, HTF-teyitli
+pub(crate) mod book_core; // kesitsel kitap ORTAK motoru (momentum⊕carry DRY çekirdek)
+pub(crate) mod carry_live; // funding-carry adanmış mod — book_core ince sarmalayıcı
 mod edge_regime;
-mod infra_fleet;
-mod fleet_tuners;
 mod fleet_sync;
-mod userdata;
-mod positions;
-mod positions_close;
+mod fleet_tuners;
+pub(crate) mod graded_entry; // kademeli giriş (XS hariç): rejime-göre pyramiding/averaging, HTF-teyitli
+mod infra_fleet;
 mod jobs;
-mod jobs_screener;
 mod jobs_backtest;
 mod jobs_download;
+mod jobs_screener;
+mod loop_core;
 mod persistence;
+mod positions;
+mod positions_close;
+mod symbolic_candles; // mum-sembolik tanılama (A.5.1 dry-run telemetri)
+mod userdata;
+pub(crate) mod venue_profile;
+pub(crate) mod xs_live; // kesitsel relatif-güç (momentum) adanmış mod — book_core ince sarmalayıcı
 
 // Edge-filter parse helper: backtest ve ML retrain job ortak kullanir (Faz 2 paylasimli tek-nokta).
 
@@ -692,23 +1530,30 @@ mod persistence;
 ///   - geçersiz metin → `default` (sessiz fallback)
 /// Serbest fonksiyon → env'siz unit-test edilebilir.
 pub(crate) fn parse_edge_filter(
-    raw: Option<String>, default: Option<f64>, on_value: f64,
+    raw: Option<String>,
+    default: Option<f64>,
+    on_value: f64,
 ) -> Option<f64> {
     match raw {
         None => default,
         Some(v) => {
             let v = v.trim();
-            if v.eq_ignore_ascii_case("0") || v.eq_ignore_ascii_case("false")
-                || v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("none") {
+            if v.eq_ignore_ascii_case("0")
+                || v.eq_ignore_ascii_case("false")
+                || v.eq_ignore_ascii_case("off")
+                || v.eq_ignore_ascii_case("none")
+            {
                 None
-            } else if v.eq_ignore_ascii_case("1") || v.eq_ignore_ascii_case("true")
-                || v.eq_ignore_ascii_case("on") {
+            } else if v.eq_ignore_ascii_case("1")
+                || v.eq_ignore_ascii_case("true")
+                || v.eq_ignore_ascii_case("on")
+            {
                 Some(on_value)
             } else {
                 match v.parse::<f64>() {
                     Ok(f) if f > 0.0 => Some(f),
-                    Ok(_) => None,        // ≤0 → kapalı
-                    Err(_) => default,    // çöp girdi → default
+                    Ok(_) => None,     // ≤0 → kapalı
+                    Err(_) => default, // çöp girdi → default
                 }
             }
         }
@@ -728,21 +1573,65 @@ mod edge_filter_tests {
     #[test]
     fn off_tokens_disable() {
         for t in ["0", "false", "FALSE", "off", "none", "  off  "] {
-            assert_eq!(parse_edge_filter(Some(t.into()), Some(0.20), 0.20), None, "token={t}");
+            assert_eq!(
+                parse_edge_filter(Some(t.into()), Some(0.20), 0.20),
+                None,
+                "token={t}"
+            );
         }
     }
 
     #[test]
     fn on_tokens_use_on_value() {
         for t in ["1", "true", "TRUE", "on"] {
-            assert_eq!(parse_edge_filter(Some(t.into()), None, 0.20), Some(0.20), "token={t}");
+            assert_eq!(
+                parse_edge_filter(Some(t.into()), None, 0.20),
+                Some(0.20),
+                "token={t}"
+            );
         }
     }
 
     #[test]
     fn float_override() {
-        assert_eq!(parse_edge_filter(Some("0.35".into()), None, 0.20), Some(0.35));
+        assert_eq!(
+            parse_edge_filter(Some("0.35".into()), None, 0.20),
+            Some(0.35)
+        );
         assert_eq!(parse_edge_filter(Some("-1".into()), Some(0.20), 0.20), None); // ≤0 → kapalı
-        assert_eq!(parse_edge_filter(Some("çöp".into()), Some(0.20), 0.20), Some(0.20)); // fallback
+        assert_eq!(
+            parse_edge_filter(Some("çöp".into()), Some(0.20), 0.20),
+            Some(0.20)
+        ); // fallback
+    }
+}
+
+#[cfg(test)]
+mod shadow_signal_tests {
+    use super::combine_shadow_signals;
+    use crate::core::types::Signal;
+
+    #[test]
+    fn aligned_buy_and_sell_signals_are_preserved() {
+        assert_eq!(
+            combine_shadow_signals(Signal::Buy, Signal::Buy),
+            ("BUY", "setup_trigger_aligned")
+        );
+        assert_eq!(
+            combine_shadow_signals(Signal::Sell, Signal::Sell),
+            ("SELL", "setup_trigger_aligned")
+        );
+    }
+
+    #[test]
+    fn hold_or_conflicting_signals_are_not_trade_candidates() {
+        assert_eq!(
+            combine_shadow_signals(Signal::Buy, Signal::Sell),
+            ("HOLD", "setup_trigger_not_aligned")
+        );
+        assert_eq!(
+            combine_shadow_signals(Signal::Hold, Signal::Buy),
+            ("HOLD", "setup_trigger_not_aligned")
+        );
     }
 }

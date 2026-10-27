@@ -1,32 +1,36 @@
 // src/core/model.rs - Memos Trading Core Library (Srivastava ATP - Master Veri Kontratı)
 // Bu modül saf veri yapısıdır; hiçbir kilit (lock) veya iş parçacığı (thread) bağımlılığı taşımaz.
 
-use serde::{Serialize, Deserialize};
-use std::fmt;
 use crate::core::math;
 use crate::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::{fmt, println};
 
 // =============================================================================
 // 1. YAPILANDIRMA VE BELLEK MODELLERİ (Eski config.rs'ten Tahliye Edilen Parçalar)
 // =============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum TradingMode { Backtest, Paper, Live }
+pub enum TradingMode {
+    Backtest,
+    Paper,
+    Live,
+}
 
 impl TradingMode {
     /// Env değerinden parse — case-insensitive. Bilinmeyen değer Paper'a düşer (güvenli default).
     pub fn from_env_str(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
-            "live"     => TradingMode::Live,
-            "backtest" => TradingMode::Backtest,
-            _          => TradingMode::Paper, // "paper", "", "anything" → Paper
+            "live" => return TradingMode::Live,
+            "backtest" => return TradingMode::Backtest,
+            _ => return TradingMode::Paper,
         }
     }
     pub fn as_str(&self) -> &'static str {
         match self {
-            TradingMode::Live     => "Live",
-            TradingMode::Paper    => "Paper",
-            TradingMode::Backtest => "Backtest",
+            TradingMode::Live => return "Live",
+            TradingMode::Paper => return "Paper",
+            TradingMode::Backtest => return "Backtest",
         }
     }
 }
@@ -62,18 +66,33 @@ pub struct OptimizedParamsCache {
 
 impl Default for OptimizedParamsCache {
     fn default() -> Self {
-        Self {
-            ma_fast: 5, ma_slow: 20,
-            rsi_period: 14, rsi_ob: 70.0, rsi_os: 30.0,
-            bb_period: 20, bb_std_dev: 2.0,
-            macd_fast: 12, macd_slow: 26, macd_signal: 9,
-            stoch_k: 14, stoch_ob: 80.0, stoch_os: 20.0,
-            ema_fast: 5, ema_slow: 20,
-            donchian_period: 20, williams_period: 14, cci_period: 20,
-            stoch_rsi_period: 14, supertrend_period: 10, supertrend_mult: 3.0,
-            ict_fvg_lookback: 5, smc_swing_lb: 10,
-            best_strategy: None, last_updated: None,
-        }
+        return Self {
+            ma_fast: 5,
+            ma_slow: 20,
+            rsi_period: 14,
+            rsi_ob: 70.0,
+            rsi_os: 30.0,
+            bb_period: 20,
+            bb_std_dev: 2.0,
+            macd_fast: 12,
+            macd_slow: 26,
+            macd_signal: 9,
+            stoch_k: 14,
+            stoch_ob: 80.0,
+            stoch_os: 20.0,
+            ema_fast: 5,
+            ema_slow: 20,
+            donchian_period: 20,
+            williams_period: 14,
+            cci_period: 20,
+            stoch_rsi_period: 14,
+            supertrend_period: 10,
+            supertrend_mult: 3.0,
+            ict_fvg_lookback: 5,
+            smc_swing_lb: 10,
+            best_strategy: None,
+            last_updated: None,
+        };
     }
 }
 
@@ -89,20 +108,13 @@ pub struct SessionFilterConfig {
 pub struct RoboticLoopConfig {
     pub exchange: String,
     pub market: String,
-    /// 🏛️ Aktif venue'lar (borsa+market). Env `VENUES="binance:futures,bybit:spot"`;
-    /// boşsa tek-eleman [exchange:market] (geriye-uyum). Operatör çoklu-piyasa seçimi
-    /// bununla yapılır → `VenueRegistry::from_specs`. [[project_venue_multimarket]]
+    pub venue_profile: crate::core::types::VenueProfile,
     pub venues: Vec<crate::core::types::VenueSpec>,
     pub symbol: String,
     pub interval: String,
     pub interval_secs: u64,
     pub capital: f64,
-    /// 📊 PAYLAŞILAN piyasa-veri DB'si (candles + funding_rates). Tüm profiller AYNI
-    /// db_path'i kullanır → mum bir kez indirilir, hepsi paylaşır.
     pub db_path: String,
-    /// 🗂️ PROFİL-BAZLI state DB'si (account_state + open_positions_snapshot). Profil
-    /// başına ayrı → paper/live equity+pozisyon BİRBİRİNE KARIŞMAZ. Env STATE_DB_PATH;
-    /// set değilse db_path'e düşer (geriye-uyum: tek-DB eski davranış). [[project_profiles]]
     pub state_db_path: String,
     pub trade_amount: f64,
     pub download_enabled: bool,
@@ -127,25 +139,30 @@ pub struct RoboticLoopConfig {
     pub pinned_symbols: Vec<String>,
     pub optimized_params: OptimizedParamsCache,
     pub session_filter: SessionFilterConfig,
-
-    // GÜVENLİK VE PERFORMANS ENTEGRASYONU (src/core/config.rs'ten Geldi)
     pub api_key: Option<String>,
     pub secret_key: Option<String>,
     pub trading_mode: TradingMode,
-    pub request_delay_ms: u64, 
+    pub request_delay_ms: u64,
     pub max_retries: u32,
     pub http_timeout_sec: u64,
 }
 
 impl Default for RoboticLoopConfig {
     fn default() -> Self {
-        Self {
+        return Self {
             exchange: "binance".into(),
             market: "futures".into(),
-            venues: vec![crate::core::types::VenueSpec::new(
-                crate::core::types::Exchange::Binance,
-                crate::core::types::Market::Futures,
-            )],
+            venue_profile: crate::core::types::VenueProfile::Default,
+            venues: vec![
+                crate::core::types::VenueSpec::new(
+                    crate::core::types::Exchange::Binance,
+                    crate::core::types::Market::Futures,
+                ),
+                crate::core::types::VenueSpec::new(
+                    crate::core::types::Exchange::Mt5,
+                    crate::core::types::Market::Spot,
+                ),
+            ],
             symbol: "BTCUSDT".into(),
             interval: "1m".into(),
             interval_secs: 60,
@@ -175,33 +192,49 @@ impl Default for RoboticLoopConfig {
             pinned_symbols: vec!["BTCUSDT".into(), "ETHUSDT".into()],
             optimized_params: OptimizedParamsCache::default(),
             session_filter: SessionFilterConfig::default(),
-            
-            // Performans ve Güvenlik Varsayılanları
             api_key: None,
             secret_key: None,
             trading_mode: TradingMode::Paper,
             request_delay_ms: 2000,
             max_retries: 5,
             http_timeout_sec: 30,
-        }
+        };
     }
 }
-
 impl RoboticLoopConfig {
-    /// Akıcı (Fluent) Builder API Entegrasyonu
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        return Self::default();
+    }
 
-    /// Env değişkenlerinden runtime config'i kurar — **tüm interface'ler (rtc_tui,
-    /// rtc_headless, …) için TEK kaynak**. Eskiden her main aynı env okumasını kopyalıyordu
-    /// ve diverge etmişti (TUI `TRADE_INTERVAL`'i düşürmüş → her zaman 1m). Tek nokta →
-    /// tekrar yok, divergence imkânsız. Tanınan env'ler:
-    ///   TRADE_SYMBOL (BTCUSDT) · TRADE_MARKET (spot) · TRADE_INTERVAL (1m) · DB_PATH
-    ///   (data/trader.db) · TRADING_MODE (Paper; legacy BINANCE_PAPER_MODE=false→Live) ·
-    ///   STARTING_CAPITAL · BINANCE_API_KEY/SECRET. Geri kalan alanlar `Default`.
+    fn parse_symbol_csv(raw: &str) -> Vec<String> {
+        raw.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    fn fallback_pinned_symbols_from_env() -> Vec<String> {
+        let mut out = Vec::new();
+        for key in [
+            "AUTO_BINANCE_SYMBOLS",
+            "AUTO_MT5_SYMBOLS",
+            "AUTO_IBKR_SYMBOLS",
+            "AUTO_BIST_SYMBOLS",
+        ] {
+            if let Ok(raw) = std::env::var(key) {
+                out.extend(Self::parse_symbol_csv(&raw));
+            }
+        }
+        out
+    }
+
     pub fn from_env() -> Self {
         let trading_mode = if let Ok(v) = std::env::var("TRADING_MODE") {
             TradingMode::from_env_str(&v)
-        } else if std::env::var("BINANCE_PAPER_MODE").map(|v| v == "false").unwrap_or(false) {
+        } else if std::env::var("BINANCE_PAPER_MODE")
+            .map(|v| v == "false")
+            .unwrap_or(false)
+        {
             TradingMode::Live
         } else {
             TradingMode::Paper
@@ -210,25 +243,33 @@ impl RoboticLoopConfig {
         let capital = crate::core::env::env_parse::<f64>("STARTING_CAPITAL")
             .filter(|v| v.is_finite() && *v > 0.0)
             .unwrap_or(d.capital);
-        Self {
-            symbol:   crate::core::env::env_or("TRADE_SYMBOL", "BTCUSDT"),
-            // candles tablosunun exchange sütununu belirler (UNIQUE key'in parçası). MT5/dünya
-            // verisini izole namespace'te tutmak için TRADE_EXCHANGE=mt5 → engine download_mt5 ile
-            // AYNI satırlara yazar (çift satır olmaz; read_candles_market market-saf okur).
+        let venue_profile = std::env::var("TRADE_PROFILE")
+            .ok()
+            .and_then(|value| crate::core::types::VenueProfile::from_token(&value))
+            .unwrap_or(d.venue_profile);
+
+        return Self {
+            symbol: crate::core::env::env_or("TRADE_SYMBOL", "BTCUSDT"),
             exchange: crate::core::env::env_or("TRADE_EXCHANGE", &d.exchange),
-            market:   crate::core::env::env_or("TRADE_MARKET", "spot"),
+            market: crate::core::env::env_or("TRADE_MARKET", "spot"),
+            venue_profile,
             interval: crate::core::env::env_or("TRADE_INTERVAL", "1m"),
-            db_path:  crate::core::env::env_or("DB_PATH", "data/trader.db"),
-            // STATE_DB_PATH set değilse db_path'e düşer (tek-DB geriye-uyum).
-            state_db_path: std::env::var("STATE_DB_PATH").ok()
+            db_path: crate::core::env::env_or("DB_PATH", "data/trader.db"),
+            state_db_path: std::env::var("STATE_DB_PATH")
+                .ok()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| crate::core::env::env_or("DB_PATH", "data/trader.db")),
+            download_enabled: crate::core::env::env_bool("DOWNLOAD_ENABLED")
+                .unwrap_or(d.download_enabled),
+            download_every_mins: crate::core::env::env_parse_or(
+                "DOWNLOAD_EVERY_MINS",
+                d.download_every_mins,
+            )
+            .max(1),
             trading_mode,
             capital,
-            api_key:    crate::core::env::env_opt("BINANCE_API_KEY"),
+            api_key: crate::core::env::env_opt("BINANCE_API_KEY"),
             secret_key: crate::core::env::env_opt("BINANCE_API_SECRET"),
-            // VENUES="binance:futures,bybit:spot" → aktif venue listesi. Boş/geçersiz ise
-            // tek-eleman [exchange:market] (geriye-uyum; market = TRADE_MARKET yukarıda çözüldü).
             venues: {
                 let raw = crate::core::env::env_or("VENUES", "");
                 let parsed: Vec<crate::core::types::VenueSpec> = raw
@@ -236,58 +277,63 @@ impl RoboticLoopConfig {
                     .filter_map(crate::core::types::VenueSpec::parse_token)
                     .collect();
                 if parsed.is_empty() {
-                    vec![crate::core::types::VenueSpec::new(
-                        crate::core::types::Exchange::from_token(&d.exchange)
-                            .unwrap_or(crate::core::types::Exchange::Binance),
-                        crate::core::types::Market::from_label(
-                            &crate::core::env::env_or("TRADE_MARKET", "spot"),
-                        ),
-                    )]
+                    // Başlangıçta MT5 pinli sembolleri de route edebilmek için varsayılan
+                    // venue seti Binance + MT5 olarak korunur. VENUES override yoksa bu
+                    // değer, sembolün explicit @mt5 etiketini registry üzerinden çözebilmelidir.
+                    d.venues
+                        .iter()
+                        .map(|spec| {
+                            crate::core::types::VenueSpec::with_profile(
+                                spec.exchange,
+                                spec.market,
+                                venue_profile,
+                            )
+                        })
+                        .collect()
                 } else {
                     parsed
                 }
             },
-            // PINNED_SYMBOLS="EURUSD@mt5,XAUUSD@mt5" → orchestrator'a doğrudan kaydedilen elit
-            // sembol listesi (screener'dan bağımsız). Venue etiketi (@mt5) korunur → routing +
-            // eligibility tag-farkında çalışır. Boşsa default ([BTCUSDT,ETHUSDT]) korunur.
             pinned_symbols: {
                 let raw = crate::core::env::env_or("PINNED_SYMBOLS", "");
-                let parsed: Vec<String> = raw
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if parsed.is_empty() { d.pinned_symbols.clone() } else { parsed }
+                let parsed = Self::parse_symbol_csv(&raw);
+                if parsed.is_empty() {
+                    let fallback = Self::fallback_pinned_symbols_from_env();
+                    if fallback.is_empty() {
+                        d.pinned_symbols.clone()
+                    } else {
+                        fallback
+                    }
+                } else {
+                    parsed
+                }
             },
             ..d
-        }
+        };
     }
 
     pub fn with_exchange(mut self, exchange: impl Into<String>) -> Self {
         self.exchange = exchange.into();
-        self
+        return self;
     }
 
     pub fn with_trading_mode(mut self, mode: TradingMode) -> Self {
         self.trading_mode = mode;
-        self
+        return self;
     }
 
-    /// API anahtarını hiyerarşik (Secret Store > Config > Env) ve güvenli getirir
     pub fn get_api_key(&self) -> Option<String> {
-        crate::core::security::secure_store::get_secret("api_key") // secure_store kütüphanenizin yoluna göre güncelleyin
+        return crate::core::security::secure_store::get_secret("api_key")
             .or_else(|| self.api_key.clone())
-            .or_else(|| crate::core::env::env_opt("BINANCE_API_KEY"))
+            .or_else(|| crate::core::env::env_opt("BINANCE_API_KEY"));
     }
 
-    /// Secret key'i hiyerarşik ve güvenli getirir
     pub fn get_secret_key(&self) -> Option<String> {
-        crate::core::security::secure_store::get_secret("secret_key")
+        return crate::core::security::secure_store::get_secret("secret_key")
             .or_else(|| self.secret_key.clone())
-            .or_else(|| crate::core::env::env_opt("BINANCE_API_SECRET"))
+            .or_else(|| crate::core::env::env_opt("BINANCE_API_SECRET"));
     }
 }
-
 // =============================================================================
 // 2. ATOMİK VERİ SNAPSHOT MODELLERİ (TUI & Android İletişim Dilimleri)
 // =============================================================================
@@ -299,11 +345,34 @@ pub struct FinanceSnapshot {
     pub open_pnl: f64,
     pub starting_capital: f64,
     pub total_fees: f64,
+    #[serde(default)]
+    pub balance: Option<f64>,
+    #[serde(default)]
+    pub currency: Option<String>,
+    #[serde(default)]
+    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub status: memos_venue_api::AccountSnapshotStatus,
+    #[serde(default)]
+    pub venue_accounts: std::collections::BTreeMap<String, memos_venue_api::AccountSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VenuePortfolioSnapshot {
+    pub venue: String,
+    pub account_keys: Vec<String>,
+    pub balance: Option<f64>,
+    pub equity: Option<f64>,
+    pub open_pnl: f64,
+    pub realized_pnl: f64,
+    pub total_fees: f64,
+    pub position_count: usize,
+    pub closed_trade_count: usize,
 }
 
 impl FinanceSnapshot {
     pub fn net_pnl(&self) -> f64 {
-        self.realize_pnl + self.open_pnl - self.total_fees
+        return self.realize_pnl + self.open_pnl - self.total_fees;
     }
 }
 
@@ -327,95 +396,103 @@ pub struct PipelineStep {
     pub overdue_secs: i64,
 }
 
-/// 💱 Live mode'da bir sembol için açık olan borsa emirlerinin referansı.
-/// AppState.finance.live_orders[symbol] altında saklanır. Açılışta entry/SL/TP
-/// order_id'leri yazılır; kapatma anında cancel_all_orders yerine bu hedefli
-/// id'ler kullanılır → paralel sembollerin emirleri etkilenmez.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LiveOrderRefs {
-    /// Açılış market emrinin id'si (audit trail için, cancel edilmez)
     #[serde(default)]
     pub entry_order_id: Option<String>,
-    /// Stop-loss emrinin id'si
     #[serde(default)]
     pub sl_order_id: Option<String>,
-    /// Take-profit emrinin id'si
     #[serde(default)]
     pub tp_order_id: Option<String>,
-    /// Mühürlendiği zaman (RFC3339)
     #[serde(default)]
     pub placed_at: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub side: String,
+    #[serde(default)]
+    pub quantity: f64,
+    #[serde(default)]
+    pub filled_quantity: f64,
+    #[serde(default)]
+    pub remaining_quantity: f64,
+    #[serde(default)]
+    pub limit_price: Option<f64>,
+    #[serde(default)]
+    pub account: Option<String>,
 }
 
-/// PositionModel.market serde default — eski snapshot'larda alan yoksa "spot".
-fn default_position_market() -> String { "spot".to_string() }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UncertainOrderState {
+    pub symbol: String,
+    pub side: String,
+    pub requested_quantity: f64,
+    pub filled_quantity: f64,
+    pub broker_order_id: Option<String>,
+    pub status: String,
+    pub reason: String,
+    pub created_at: String,
+    pub last_checked_at: String,
+    pub resolved_at: Option<String>,
+    #[serde(default)]
+    pub healthy_reconcile_count: u32,
+}
+
+fn default_position_market() -> String {
+    return "spot".to_string();
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionModel {
-    /// Pozisyonun tekil kimliği. IntelligenceHub.track_trade ↔ learn_from_exit eşlemesi için.
-    /// UUID v4 string. Eski serialize'lı pozisyonlarda boş gelir (serde default).
     #[serde(default)]
     pub pos_id: String,
     pub symbol: String,
+    #[serde(default)]
+    pub venue: Option<memos_venue_api::VenueKey>,
     pub entry_price: f64,
     pub current_price: f64,
     pub qty: f64,
     pub leverage: f64,
-    /// Pozisyonun açıldığı pazar: "spot" / "futures" (TUI'de "Tür" kolonu + leverage
-    /// ile gösterilir). Açılışta engine config.market'ından doldurulur. Eski serialize'lı
-    /// pozisyonlar (serde default) → "spot" (geriye uyum: recovery snapshot'ları).
     #[serde(default = "default_position_market")]
     pub market: String,
-    /// Pozisyonun açıldığı zaman dilimi (per-symbol trade TF). edge_scan seed /
-    /// symbol_interval ile global config'ten farklı olabilir (örn. BTCUSDT 1d-BB).
-    /// Açılışta `candles.last().interval`'dan mühürlenir → TUI "TF" kolonu operatöre
-    /// hangi sembolün hangi TF'de işlendiğini gösterir. Eski serialize'lı pozisyonlar
-    /// (serde default) → "" (TUI'de "—"). [[project_edge_scan]].
     #[serde(default)]
     pub interval: String,
     pub is_long: bool,
     pub trade_type: String,
     pub opened_at: String,
-
-    // === Pozisyon Yönetimi (Risk Exit Çekirdeği) ===
-    /// Statik stop loss seviyesi (long için entry'nin altı, short için üstü).
-    /// 0.0 ise SL devre dışı (geriye uyumluluk: eski serialize'lı pozisyonlar).
     #[serde(default)]
     pub stop_loss: f64,
-    /// Statik take profit seviyesi.
     #[serde(default)]
     pub take_profit: f64,
-    /// Trailing stop seviyesi — ATR × atr_trail_mult uzaklıkta, en uygun fiyatı kovalar.
-    /// Long: max_favorable_price - delta; Short: min_favorable_price + delta.
     #[serde(default)]
     pub trailing_stop: f64,
-    /// Pozisyon açıldıktan sonra ulaşılan en uygun (long için en yüksek, short için en düşük) fiyat.
-    /// Trailing stop ve breakeven kararı bu rakama göre verilir.
     #[serde(default)]
     pub max_favorable_price: f64,
-    /// Breakeven aktif mi? Aktif olduktan sonra SL = entry_price'a sabitlenir.
     #[serde(default)]
     pub breakeven_activated: bool,
-    /// ScalpSwing kanal sınıflandırması. None = Regular (varsayılan, eski
-    /// serialize edilmiş pozisyonlar). ScalpEngine / SwingEngine fırsat
-    /// üretirse Some(Scalp/Swing) olarak mühürlenir; ScalpSwingStats ve
-    /// auto_tune feedback loop bu alanı okur.
     #[serde(default)]
     pub kind: Option<crate::robot::scalp_swing::TradeType>,
-    /// Açılışta ödenen giriş komisyonu (USD). Kapanışta NET P&L için saklanır
-    /// (net_pnl = gross − entry_commission − exit_commission). Eski serialize'lı /
-    /// kurtarılan pozisyonlar → 0.0 (serde default; net≈gross−exit, kabul edilebilir).
     #[serde(default)]
     pub entry_commission: f64,
 }
 
 impl PositionModel {
+    pub fn canonical_key(&self) -> Option<memos_venue_api::CanonicalPositionKey> {
+        self.venue
+            .map(|venue| memos_venue_api::CanonicalPositionKey::new(venue, self.symbol.clone()))
+    }
+
     pub fn calculate_pnl(&self) -> f64 {
-        math::calculate_pnl(self.entry_price, self.current_price, self.qty, self.is_long)
+        return math::calculate_pnl(self.entry_price, self.current_price, self.qty, self.is_long);
     }
 
     pub fn roe(&self) -> f64 {
-        math::calculate_roe(self.entry_price, self.current_price, self.leverage, self.is_long)
+        return math::calculate_roe(
+            self.entry_price,
+            self.current_price,
+            self.leverage,
+            self.is_long,
+        );
     }
 }
 
@@ -431,27 +508,18 @@ pub struct AiBrainSnapshot {
     pub mc_ruin_prob: f64,
     pub is_evolution_active: bool,
     pub next_evolution_secs: u64,
-
-    // === IntelligenceHub canlı verileri (AI Center paneli) ===
-    /// Aktif strateji adı (live_strategy). Backtest job otonom değiştirir.
     #[serde(default)]
     pub live_strategy: String,
-    /// AutonomousController state: Observe/Optimize/Trade/SafeMode/Halted
     #[serde(default)]
     pub controller_state: String,
-    /// AutonomousController cycle sayacı (her IntelligenceHub tick'inde +1)
     #[serde(default)]
     pub controller_cycle: u64,
-    /// Ardışık kayıp işlem sayısı (5+ ⇒ SafeMode tetikleyicisi)
     #[serde(default)]
     pub consecutive_failures: u32,
-    /// Hub.pending_trades — açık olup hub.learn_from_exit beklenen pozisyon sayısı
     #[serde(default)]
     pub pending_trades: usize,
-    /// Drift skor tarihçesi (son 60 nokta) — AI Center sparkline için
     #[serde(default)]
     pub drift_series: Vec<f64>,
-    /// brain.best_params'tan kritik 3'lü: TP / SL / Position Size
     #[serde(default)]
     pub best_tp_pct: f64,
     #[serde(default)]
@@ -463,8 +531,6 @@ pub struct AiBrainSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketAnalysisModel {
     pub symbol: String,
-    /// İşlem piyasası (spot/futures/…) — Market Gözetimi "Piyasa" sütunu. Motor tek market koşar
-    /// (config.market) → tüm market_fleet sembolleri bunu paylaşır. Boş (eski snapshot) → "—".
     #[serde(default)]
     pub market: String,
     pub current_price: f64,
@@ -474,16 +540,29 @@ pub struct MarketAnalysisModel {
     pub nearest_resistance: Option<f64>,
 }
 
-/// 🛡️ Srivastava ATP - Destek ve Direnç Bölgesi Veri Modeli
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SrZoneModel {
-    pub zone_type: String,     // "SUPPORT" | "RESISTANCE"
-    pub price_low: f64,        // Bölgenin taban fiyatı
-    pub price_high: f64,       // Bölgenin tavan fiyatı
-    pub strength: f64,         // Bölgenin hacimsel/istatistiksel gücü
-    pub touch_count: u32,      // Fiyatın bu bölgeye kaç kez temas ettiği
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VenueSymbolSnapshot {
+    pub venue: String,
+    pub symbol: String,
+    pub market: String,
+    pub status: String,
+    pub tradeable: bool,
+    pub current_price: f64,
+    pub change_24h: f64,
+    pub last_candle_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub candle_status: String,
+    pub filters_status: String,
+    pub source: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SrZoneModel {
+    pub zone_type: String,
+    pub price_low: f64,
+    pub price_high: f64,
+    pub strength: f64,
+    pub touch_count: u32,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub timestamp: String,
@@ -499,38 +578,89 @@ pub struct ClosedTradeModel {
     pub pnl_pct: f64,
     pub exit_reason: String,
     pub closed_at: String,
-    /// Pozisyonun açıldığı an (RFC3339). Holding period hesaplamak için close anında
-    /// `PositionModel.opened_at`'tan kopyalanır. Eski serialize'lı kayıtlar için boş
-    /// gelir (serde default) — scalp/swing istatistiklerinde böyle satırlar atlanır.
     #[serde(default)]
     pub opened_at: String,
-    /// Pozisyonun çözülmüş leverage değeri (1.0 = spot, >1 = futures).
-    /// close anında PositionModel.leverage'tan kopyalanır. Eski kayıtlar için
-    /// default 1.0 (serde) — geriye uyumlu.
     #[serde(default = "default_leverage_one")]
     pub leverage: f64,
-    /// Komisyon-DAHİL net P&L (USD) = gross `pnl` − round-trip komisyon. Dürüst gösterim için
-    /// (bir BREAKEVEN gross 0 olsa da round-trip fee'yi yansıtır). `pnl` (gross) win-rate/strateji
-    /// skorlama/attribution tüketicileri için DEĞİŞMEDEN kalır. Eski/DB kayıt → gross'a eşitlenir.
     #[serde(default)]
     pub net_pnl: f64,
-    /// Net P&L yüzdesi (net_pnl / notional × 100). Eski/DB kayıt → pnl_pct.
     #[serde(default)]
     pub net_pnl_pct: f64,
-    /// Round-trip toplam komisyon (giriş + çıkış, USD). Eski/DB kayıt → 0.0.
     #[serde(default)]
     pub commission: f64,
-    /// Pozisyonun giriş fiyatı. close anında `PositionModel.entry_price`'tan kopyalanır.
-    /// TUI/Telegram "kapanmış işlemler" gösteriminde giriş↔çıkış farkı görünsün diye. Eski kayıt → 0.0.
     #[serde(default)]
     pub entry_price: f64,
-    /// Pozisyonun gerçekleşen çıkış (kapanış) fiyatı. close anında hesaplanan `exit_price`'tan
-    /// kopyalanır (SL/TP/trailing seviyesi ya da StrategySignal'da live/son-mum fiyatı). Eski kayıt → 0.0.
     #[serde(default)]
     pub exit_price: f64,
+    #[serde(default)]
+    pub strategy: String,
+    #[serde(default)]
+    pub venue: String,
+    #[serde(default)]
+    pub pyramid_tranches: u8,
+    /// Borsa tarafı işlem referansı (MT5 deal ticket / Binance orderId). Mutabakatın
+    /// DEDUP anahtarı: boş değilse (venue, exchange_ref) çifti tekildir. Eski kayıtlar
+    /// için serde default "" (geriye-uyum).
+    #[serde(default)]
+    pub exchange_ref: String,
 }
 
-fn default_leverage_one() -> f64 { 1.0 }
+impl ClosedTradeModel {
+    /// Returns whether the record is a local trailing-stop settlement created for
+    /// an adopted broker position before broker confirmation existed.
+    pub fn is_unconfirmed_adopt_close(&self) -> bool {
+        self.strategy == "MANUEL_ADOPT"
+            && self.exchange_ref.starts_with("adopt_")
+            && self.exit_reason == "TRAILING_STOP"
+    }
+
+    /// Returns the settled PnL used by all performance views.
+    /// Legacy records may have a zero `net_pnl` while carrying a gross `pnl`.
+    pub fn effective_net_pnl(&self) -> f64 {
+        if self.net_pnl == 0.0 && self.pnl != 0.0 && self.commission == 0.0 {
+            self.pnl
+        } else {
+            self.net_pnl
+        }
+    }
+
+    /// Returns whether two records represent the same settled position.
+    ///
+    /// Broker references and local position IDs are authoritative. Legacy records
+    /// without a reference use a conservative field-based fallback.
+    pub fn same_identity(&self, other: &Self) -> bool {
+        if !self.exchange_ref.is_empty() && !other.exchange_ref.is_empty() {
+            return self.venue == other.venue && self.exchange_ref == other.exchange_ref;
+        }
+        self.venue == other.venue
+            && self.symbol == other.symbol
+            && self.opened_at == other.opened_at
+            && (self.entry_price - other.entry_price).abs() < 1e-8
+            && (self.exit_price - other.exit_price).abs() < 1e-8
+            && self.exit_reason == other.exit_reason
+    }
+
+    /// Removes repeated settlement records while preserving their first arrival order.
+    pub fn deduplicate(trades: &mut Vec<Self>) -> usize {
+        if trades.len() < 2 {
+            return 0;
+        }
+        let original_len = trades.len();
+        let mut unique: Vec<Self> = Vec::with_capacity(original_len);
+        for trade in trades.drain(..) {
+            if !unique.iter().any(|existing| existing.same_identity(&trade)) {
+                unique.push(trade);
+            }
+        }
+        let removed = original_len - unique.len();
+        *trades = unique;
+        removed
+    }
+}
+
+fn default_leverage_one() -> f64 {
+    return 1.0;
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeDistribution {
@@ -545,13 +675,10 @@ pub struct ChartSnapshot {
     pub distributions: Vec<TradeDistribution>,
     pub total_closed_pnl: f64,
     pub total_trade_count: usize,
-    /// Equity tarihçesi (en eski → en yeni). Sparkline'da çizilir.
     #[serde(default)]
     pub equity_series: Vec<f64>,
-    /// Anlık drawdown yüzdesi (zirve ⇒ şu an), 0..100.
     #[serde(default)]
     pub current_drawdown_pct: f64,
-    /// Zirve equity (rapor için).
     #[serde(default)]
     pub peak_equity: f64,
 }
@@ -575,6 +702,154 @@ pub struct TradeTypeStats {
     pub current_streak: i32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpportunitySnapshotModel {
+    pub symbol: String,
+    pub interval: String,
+    pub bars: usize,
+    pub span_minutes: usize,
+    pub opportunity_score: f64,
+    pub phase: String,
+    pub rsi_14: f64,
+    pub momentum_pct: f64,
+    pub volatility_pct: f64,
+    pub trend_bias: f64,
+    pub scalp_bias: f64,
+    pub swing_bias: f64,
+    pub last_ts: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DataCoverageModel {
+    pub expected_symbols: usize,
+    pub evaluated_symbols: usize,
+    pub fresh_symbols: usize,
+    pub stale_symbols: usize,
+    pub missing_symbols: usize,
+    pub max_age_secs: Option<i64>,
+    pub freshness_budget_secs: i64,
+    pub status: String,
+    pub priority: String,
+    pub stale_symbol_names: Vec<String>,
+    pub missing_symbol_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DownloadProgressModel {
+    pub active: bool,
+    pub total_symbols: usize,
+    pub completed_symbols: usize,
+    pub current_symbol: String,
+    pub current_interval: String,
+    pub current_phase: String,
+    pub last_completed_symbol: String,
+    pub fetched_candles: usize,
+    pub failed_symbols: usize,
+    #[serde(default)]
+    pub failed_symbol_names: Vec<String>,
+    pub last_error: String,
+    pub started_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BistDataStatusModel {
+    pub data_source: String,
+    pub source_sync_status: String,
+    pub latest_candle: Option<String>,
+    pub latest_age_secs: Option<i64>,
+    pub expected_symbols: usize,
+    pub fresh_symbols: usize,
+    pub stale_symbols: usize,
+    pub rejected_rows: usize,
+    pub market_state: String,
+    pub daily_candle_expectation: String,
+    pub soak_health: String,
+    pub readiness_status: String,
+    pub execution_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DecisionTraceModel {
+    pub timestamp: String,
+    pub symbol: String,
+    pub outcome: String,
+    pub strategy: String,
+    pub regime: String,
+    pub edge: Option<f64>,
+    pub pyramid_limit: usize,
+    pub max_atr_pct: f64,
+    pub reason: String,
+    #[serde(default)]
+    pub shadow_signal: String,
+    #[serde(default)]
+    pub shadow_status: String,
+    #[serde(default)]
+    pub shadow_reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VenueHealthModel {
+    pub venue: String,
+    pub watched_symbols: usize,
+    pub priced_symbols: usize,
+    pub data_status: String,
+    pub bridge_status: String,
+    pub oldest_price_age_secs: Option<i64>,
+    #[serde(default)]
+    pub connectivity_status: String,
+    #[serde(default)]
+    pub account_status: String,
+    #[serde(default)]
+    pub protection_status: String,
+    #[serde(default)]
+    pub reconciliation_status: String,
+    #[serde(default)]
+    pub exposure_status: String,
+    #[serde(default)]
+    pub overall_status: String,
+    #[serde(default)]
+    pub execution_status: String,
+    #[serde(default)]
+    pub readiness_status: String,
+    #[serde(default)]
+    pub readiness_blockers: Vec<String>,
+    #[serde(default)]
+    pub symbol_filters_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StrategyPerformanceModel {
+    pub venue: String,
+    pub strategy: String,
+    pub trades: u32,
+    pub net_pnl: f64,
+    pub win_rate: f64,
+    pub profit_factor: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PyramidPerformanceModel {
+    pub tranches: u8,
+    pub trades: u32,
+    pub net_pnl: f64,
+    pub win_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VenueRuntimeSnapshot {
+    pub scheduler_phase: String,
+    pub scheduler_cycle_started_epoch: i64,
+    pub scheduler_cycle_completed_epoch: i64,
+    pub consecutive_failures: u32,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RuntimeLockDiagnosticSnapshot {
+    pub owner: String,
+    pub phase: String,
+    pub started_epoch: i64,
+}
 // =============================================================================
 // 3. MERKEZİ ÜST YAPI (MISSION CONTROL SNAPSHOT)
 // =============================================================================
@@ -584,10 +859,13 @@ pub struct MissionControl {
     pub finance: FinanceSnapshot,
     pub positions: Vec<PositionModel>,
     pub fleet: Vec<WorkerModel>,
-    /// Ana döngünün anlık fazı: Booting/Scanning/Executing/Recovering/Stopped/Idle.
     #[serde(default)]
     pub phase: String,
     pub pipeline_steps: Vec<PipelineStep>,
+    #[serde(default)]
+    pub decision_pipeline_steps: Vec<PipelineStep>,
+    #[serde(default)]
+    pub runtime_pipeline_steps: Vec<PipelineStep>,
     pub ai_brain: AiBrainSnapshot,
     pub market_fleet: Vec<MarketAnalysisModel>,
     pub logs: Vec<LogEntry>,
@@ -597,27 +875,52 @@ pub struct MissionControl {
     pub repair_log: Vec<String>,
     pub scalp_stats: TradeTypeStats,
     pub swing_stats: TradeTypeStats,
+    #[serde(default)]
+    pub opportunity_snapshots: Vec<OpportunitySnapshotModel>,
+    #[serde(default)]
+    pub data_coverage: DataCoverageModel,
+    #[serde(default)]
+    pub download_progress: DownloadProgressModel,
+    #[serde(default)]
+    pub bist_data_status: BistDataStatusModel,
+    #[serde(default)]
+    pub decision_trace: Vec<DecisionTraceModel>,
+    #[serde(default)]
+    pub venue_health: Vec<VenueHealthModel>,
+    #[serde(default)]
+    pub strategy_performance: Vec<StrategyPerformanceModel>,
+    #[serde(default)]
+    pub pyramid_performance: Vec<PyramidPerformanceModel>,
     pub active_anomalies: usize,
-    /// Anomalilerin tip-başı dağılımı (DataStall/ApiError/Drift/RiskBreach/Custom).
-    /// Boot anında 50 anomaly varsa hangisinin baskın olduğunu görmek için.
-    /// `serde(default)` → eski snapshot'lar geriye uyumlu.
     #[serde(default)]
     pub anomalies_by_kind: std::collections::BTreeMap<String, usize>,
+    #[serde(default)]
+    pub autonomy_counters: std::collections::BTreeMap<String, u64>,
+    #[serde(default)]
+    pub indicator_health: std::collections::BTreeMap<String, f64>,
+    #[serde(default)]
+    pub symbolic_health: std::collections::BTreeMap<String, f64>,
+    #[serde(default)]
+    pub mt5_bridge_healthy: bool,
+    #[serde(default)]
+    pub mt5_bridge_last_error: Option<String>,
+    #[serde(default)]
+    pub venue_accounts: std::collections::BTreeMap<String, memos_venue_api::AccountSnapshot>,
+    #[serde(default)]
+    pub venue_runtime: std::collections::BTreeMap<String, VenueRuntimeSnapshot>,
+    #[serde(default)]
+    pub runtime_lock_diagnostic: RuntimeLockDiagnosticSnapshot,
+    #[serde(default)]
+    pub venue_portfolios: Vec<VenuePortfolioSnapshot>,
+    #[serde(default)]
+    pub venue_symbols: Vec<VenueSymbolSnapshot>,
 }
 
-/// Strateji etiketini insan-okunabilir biçime normalleştirir.
-///
-/// "Default" / "Auto" / "AUTO" / "" → "Otonom (rejime göre)".
-/// Aksi durumlarda raw değer döner. Bridge, heartbeat_writer ve TradingLogger
-/// bu fonksiyonu çağırır; tek nokta = tutarlı görünüm.
 pub fn normalize_strategy_label(raw: &str) -> String {
-    if raw.eq_ignore_ascii_case("default")
-        || raw.eq_ignore_ascii_case("auto")
-        || raw.is_empty()
-    {
-        "Otonom (rejime göre)".to_string()
+    if raw.eq_ignore_ascii_case("default") || raw.eq_ignore_ascii_case("auto") || raw.is_empty() {
+        return "Otonom (rejime göre)".to_string();
     } else {
-        raw.to_string()
+        return raw.to_string();
     }
 }
 
@@ -629,34 +932,54 @@ pub fn normalize_strategy_label(raw: &str) -> String {
 pub struct OrderId(pub u64);
 
 impl fmt::Display for OrderId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{}", self.0) }
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        return write!(f, "{}", self.0);
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OrderSide { #[serde(rename = "BUY")] Buy, #[serde(rename = "SELL")] Sell }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OrderSide {
+    #[serde(rename = "BUY")]
+    Buy,
+    #[serde(rename = "SELL")]
+    Sell,
+}
 
 impl fmt::Display for OrderSide {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self { OrderSide::Buy => write!(f, "BUY"), OrderSide::Sell => write!(f, "SELL") }
+        match self {
+            OrderSide::Buy => return write!(f, "BUY"),
+            OrderSide::Sell => return write!(f, "SELL"),
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderStatus {
-    #[serde(rename = "NEW")] New,
-    #[serde(rename = "PARTIALLY_FILLED")] PartiallyFilled,
-    #[serde(rename = "FILLED")] Filled,
-    #[serde(rename = "CANCELED")] Canceled,
-    #[serde(rename = "REJECTED")] Rejected,
-    #[serde(rename = "EXPIRED")] Expired,
+    #[serde(rename = "NEW")]
+    New,
+    #[serde(rename = "PARTIALLY_FILLED")]
+    PartiallyFilled,
+    #[serde(rename = "FILLED")]
+    Filled,
+    #[serde(rename = "CANCELED")]
+    Canceled,
+    #[serde(rename = "REJECTED")]
+    Rejected,
+    #[serde(rename = "EXPIRED")]
+    Expired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderType {
-    #[serde(rename = "LIMIT")] Limit,
-    #[serde(rename = "MARKET")] Market,
-    #[serde(rename = "STOP_LOSS")] StopLoss,
-    #[serde(rename = "TAKE_PROFIT")] TakeProfit,
+    #[serde(rename = "LIMIT")]
+    Limit,
+    #[serde(rename = "MARKET")]
+    Market,
+    #[serde(rename = "STOP_LOSS")]
+    StopLoss,
+    #[serde(rename = "TAKE_PROFIT")]
+    TakeProfit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -674,40 +997,75 @@ pub struct Order {
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
     pub raw_data: Option<String>,
 }
-
 impl Default for Order {
     fn default() -> Self {
-        Self {
-            id: None, symbol: String::new(), side: OrderSide::Buy, order_type: OrderType::Market,
-            quantity: 0.0, price: None, stop_price: None, filled_quantity: 0.0,
-            status: OrderStatus::New, average_price: 0.0, created_at: None, raw_data: None,
-        }
+        return Self {
+            id: None,
+            symbol: String::new(),
+            side: OrderSide::Buy,
+            order_type: OrderType::Market,
+            quantity: 0.0,
+            price: None,
+            stop_price: None,
+            filled_quantity: 0.0,
+            status: OrderStatus::New,
+            average_price: 0.0,
+            created_at: None,
+            raw_data: None,
+        };
     }
 }
 
 impl Order {
     pub fn market(symbol: String, side: OrderSide, quantity: f64) -> Self {
-        Self { symbol, side, order_type: OrderType::Market, quantity, ..Default::default() }
+        return Self {
+            symbol,
+            side,
+            order_type: OrderType::Market,
+            quantity,
+            ..Default::default()
+        };
     }
-    
+
     pub fn limit(symbol: String, side: OrderSide, quantity: f64, price: f64) -> Self {
-        Self { symbol, side, order_type: OrderType::Limit, quantity, price: Some(price), ..Default::default() }
+        return Self {
+            symbol,
+            side,
+            order_type: OrderType::Limit,
+            quantity,
+            price: Some(price),
+            ..Default::default()
+        };
     }
-    
+
     pub fn stop_loss(symbol: String, quantity: f64, stop_price: f64) -> Self {
-        Self { symbol, side: OrderSide::Sell, order_type: OrderType::StopLoss, quantity, stop_price: Some(stop_price), ..Default::default() }
+        return Self {
+            symbol,
+            side: OrderSide::Sell,
+            order_type: OrderType::StopLoss,
+            quantity,
+            stop_price: Some(stop_price),
+            ..Default::default()
+        };
     }
-    
+
     pub fn take_profit(symbol: String, quantity: f64, price: f64) -> Self {
-        Self { symbol, side: OrderSide::Sell, order_type: OrderType::TakeProfit, quantity, price: Some(price), ..Default::default() }
+        return Self {
+            symbol,
+            side: OrderSide::Sell,
+            order_type: OrderType::TakeProfit,
+            quantity,
+            price: Some(price),
+            ..Default::default()
+        };
     }
-    
-    pub fn remaining_quantity(&self) -> f64 { 
-        self.quantity - self.filled_quantity 
+
+    pub fn remaining_quantity(&self) -> f64 {
+        return self.quantity - self.filled_quantity;
     }
-    
-    pub fn is_fully_filled(&self) -> bool { 
-        (self.quantity - self.filled_quantity).abs() < f64::EPSILON 
+
+    pub fn is_fully_filled(&self) -> bool {
+        return (self.quantity - self.filled_quantity).abs() < f64::EPSILON;
     }
 }
 
@@ -715,23 +1073,21 @@ impl Order {
 // 6. BORSA SEMBOL DETAYLARI (SYMBOL INFO)
 // =============================================================================
 
-/// 📊 Srivastava ATP - Borsa Sembolü Teknik ve Regülatif Kuralları
-/// Borsadan (Binance/BIST) çekilen emir hassasiyetleri ve kısıtlamaları.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolInfo {
     pub symbol: String,
-    pub status: String,            // "TRADING" | "BREAK"
-    pub base_asset: String,        // Örn: "BTC"
-    pub quote_asset: String,       // Örn: "USDT"
-    pub price_precision: u8,       // Fiyat virgülden sonra kaç basamak? (Örn: 2)
-    pub qty_precision: u8,         // Miktar virgülden sonra kaç basamak? (Örn: 5)
-    pub min_notional: f64,         // Minimum işlem dolar hacmi barajı (Örn: 5.0 USDT)
-    pub max_leverage: Option<u32>, // Kaldıraçlı pazar için maksimum kaldıraç sınırı
+    pub status: String,
+    pub base_asset: String,
+    pub quote_asset: String,
+    pub price_precision: u8,
+    pub qty_precision: u8,
+    pub min_notional: f64,
+    pub max_leverage: Option<u32>,
 }
 
 impl Default for SymbolInfo {
     fn default() -> Self {
-        Self {
+        return Self {
             symbol: "BTCUSDT".to_string(),
             status: "TRADING".to_string(),
             base_asset: "BTC".to_string(),
@@ -740,58 +1096,7 @@ impl Default for SymbolInfo {
             qty_precision: 5,
             min_notional: 5.0,
             max_leverage: Some(125),
-        }
-    }
-}
-
-/// 🧮 Borsa-tarafı emir filtreleri (Binance exchangeInfo'dan çekilir).
-/// Live mode'da `place_market_order` öncesi qty bu filtrelerden geçer; aksi halde
-/// Binance `-1013 Filter failure: LOT_SIZE / MIN_NOTIONAL` döner.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SymbolFilters {
-    /// LOT_SIZE.stepSize — qty bu çarpana yuvarlanmalı (örn. 0.001 → qty 0.1234 → 0.123).
-    pub step_size: f64,
-    /// LOT_SIZE.minQty — qty bu değerin altındaysa emir reddedilir.
-    pub min_qty: f64,
-    /// PRICE_FILTER.tickSize — fiyat bu çarpana yuvarlanmalı (SL/TP için).
-    pub tick_size: f64,
-    /// MIN_NOTIONAL.minNotional veya NOTIONAL.notional — qty*price bu değerin altındaysa red.
-    pub min_notional: f64,
-}
-
-impl Default for SymbolFilters {
-    fn default() -> Self {
-        Self { step_size: 0.0, min_qty: 0.0, tick_size: 0.0, min_notional: 0.0 }
-    }
-}
-
-impl SymbolFilters {
-    /// Qty'yi stepSize'a aşağı yuvarlar. step_size 0 ise qty'yi aynen döndürür.
-    pub fn round_qty_down(&self, qty: f64) -> f64 {
-        if self.step_size <= 0.0 { return qty; }
-        (qty / self.step_size).floor() * self.step_size
-    }
-
-    /// Fiyatı tickSize'a yuvarlar (en yakın). tick_size 0 ise price'ı aynen döndürür.
-    pub fn round_price(&self, price: f64) -> f64 {
-        if self.tick_size <= 0.0 { return price; }
-        (price / self.tick_size).round() * self.tick_size
-    }
-
-    /// Emirin filtrelerden geçip geçmediğini sınar. Dönüş: yuvarlanmış qty veya Err(sebep).
-    pub fn validate(&self, qty: f64, price: f64) -> Result<f64, String> {
-        let rounded = self.round_qty_down(qty);
-        if rounded <= 0.0 {
-            return Err(format!("stepSize sonrası qty=0 (input={:.8}, step={:.8})", qty, self.step_size));
-        }
-        if self.min_qty > 0.0 && rounded < self.min_qty {
-            return Err(format!("qty {:.8} < minQty {:.8}", rounded, self.min_qty));
-        }
-        let notional = rounded * price;
-        if self.min_notional > 0.0 && notional < self.min_notional {
-            return Err(format!("notional ${:.4} < minNotional ${:.4}", notional, self.min_notional));
-        }
-        Ok(rounded)
+        };
     }
 }
 
@@ -799,8 +1104,6 @@ impl SymbolFilters {
 // 7. SİMÜLASYON VE KAĞIT TİCARETİ ÖZETİ (PAPER TRADING RESULT)
 // =============================================================================
 
-/// 🔬 Srivastava ATP - Backtest ve Simülasyon Raporlama Modeli
-/// Robotun geçmiş testlerden veya sanal işlemlerden elde ettiği adli performans karnesi.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaperTradingResult {
     pub symbol: String,
@@ -808,24 +1111,31 @@ pub struct PaperTradingResult {
     pub total_trades: u32,
     pub win_trades: u32,
     pub loss_trades: u32,
-    pub win_rate: f64,             // 0.0 - 1.0 arası başarı oranı
-    pub profit_factor: f64,        // Toplam Kazanç / Toplam Kayıp rasyosu
-    pub total_pnl_usd: f64,        // Net kazanılan/kaybedilen dolar miktarı
-    pub max_drawdown_pct: f64,     // Kasada görülen en büyük tepe-dip düşüş yüzdesi
-    pub sharpe_ratio: f64,         // Riski ayarlanmış getiri rasyosu
-    pub tested_at: String,         // Testin yapıldığı zaman damgası "YYYY-MM-DD HH:MM"
+    pub win_rate: f64,
+    pub profit_factor: f64,
+    pub total_pnl_usd: f64,
+    pub max_drawdown_pct: f64,
+    pub sharpe_ratio: f64,
+    pub tested_at: String,
 }
 
 impl PaperTradingResult {
-    /// Simülasyonun istatistiksel olarak başarılı (güvenli) olup olmadığını doğrular
     pub fn is_edge_confirmed(&self) -> bool {
-        self.win_rate >= 0.45 && self.profit_factor > 1.25 && self.max_drawdown_pct < 15.0
+        return self.win_rate >= 0.45 && self.profit_factor > 1.25 && self.max_drawdown_pct < 15.0;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::robot::venue::VenueRegistry;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn env_lock() -> &'static Mutex<()> {
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn normalize_strategy_label_handles_sentinels() {
@@ -842,4 +1152,31 @@ mod tests {
         assert_eq!(normalize_strategy_label("SUPERTREND"), "SUPERTREND");
         assert_eq!(normalize_strategy_label("Bollinger"), "Bollinger");
     }
+
+    #[test]
+    fn from_env_keeps_mt5_venue_when_no_venues_override_is_set() {
+        let _guard = env_lock().lock().unwrap();
+        let prev_venues = std::env::var("VENUES").ok();
+        std::env::remove_var("VENUES");
+        let config = RoboticLoopConfig::from_env();
+        let registry = VenueRegistry::from_specs(&config.venues, None);
+        let routed = registry.route("EURUSD@mt5");
+
+        assert!(
+            routed.is_some(),
+            "MT5 etiketli sembol registry üzerinden yönlendirilemedi"
+        );
+        assert_eq!(
+            routed.unwrap().0.exchange(),
+            crate::core::types::Exchange::Mt5
+        );
+
+        match prev_venues {
+            Some(v) => std::env::set_var("VENUES", v),
+            None => std::env::remove_var("VENUES"),
+        }
+    }
 }
+// SymbolFilters venue contract'ına taşındı (Adım 2). Eski yol korunur:
+// `crate::core::model::SymbolFilters` → `memos_venue_api::types::SymbolFilters`.
+pub use memos_venue_api::types::SymbolFilters;

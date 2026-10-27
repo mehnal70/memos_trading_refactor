@@ -3,7 +3,7 @@ pub use finnhub::FinnhubFetcher;
 // robot/data_fetcher/mod.rs - Data fetcher modules
 
 pub mod websocket;
-pub use websocket::{BinanceKlineUpdate, BinanceKline, parse_kline, validate_ohlcv};
+pub use websocket::{parse_kline, validate_ohlcv, BinanceKline, BinanceKlineUpdate};
 
 pub mod binance;
 pub use binance::BinanceFetcher;

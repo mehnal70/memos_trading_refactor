@@ -6,9 +6,9 @@
 // 3. Fonksiyonel anomali ve metrik değerlendirme
 // 4. Kapsüllü hata yönetimi ve Reset lojiği
 
-use chrono::{DateTime, Utc};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::robot::logic::portfolio::PortfolioMetrics;
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone)]
 pub struct MonitorConfig {
@@ -33,11 +33,19 @@ pub struct Monitor {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum MonitorAction { Continue, Pause, Restart, Stop }
+pub enum MonitorAction {
+    Continue,
+    Pause,
+    Restart,
+    Stop,
+}
 
 impl Monitor {
     pub fn new(config: MonitorConfig) -> Self {
-        Self { config, state: MonitorState::default() }
+        Self {
+            config,
+            state: MonitorState::default(),
+        }
     }
 
     /// §84.5: Otonom Denetim Döngüsü - Karar Matrisi
@@ -47,7 +55,7 @@ impl Monitor {
         self.state.last_metrics = Some(metrics.clone());
 
         // Hiyerarşik Karar Mekanizması (if/else yerine Match-Guard)
-        
+
         match () {
             // 1. Kritik Hata Freni (En yüksek öncelik)
             _ if self.state.error_count > self.config.critical_error_limit => MonitorAction::Stop,
@@ -56,12 +64,12 @@ impl Monitor {
             _ if ml_score.unwrap_or(0.0) > 0.9 => {
                 self.state.anomaly_detected = true;
                 MonitorAction::Restart
-            },
+            }
 
             // 3. Performans Koridor Denetimi
             _ if metrics.closed_trades_count > 10 || metrics.open_positions_count > 0 => {
                 self.evaluate_performance(metrics)
-            },
+            }
 
             _ => MonitorAction::Continue,
         }
@@ -74,8 +82,8 @@ impl Monitor {
             Some(s) if s > 0.9 => {
                 self.state.anomaly_detected = true;
                 MonitorAction::Restart
-            },
-            _ => MonitorAction::Continue
+            }
+            _ => MonitorAction::Continue,
         }
     }
 
@@ -83,7 +91,7 @@ impl Monitor {
     #[cfg(not(target_arch = "wasm32"))]
     fn evaluate_performance(&self, m: &PortfolioMetrics) -> MonitorAction {
         let dd_limit = self.config.max_drawdown_pct / 100.0;
-        
+
         match () {
             _ if m.win_rate < self.config.min_win_rate => MonitorAction::Pause,
             _ if m.total_pnl < 0.0 && m.max_drawdown > dd_limit => MonitorAction::Pause,
@@ -91,6 +99,10 @@ impl Monitor {
         }
     }
 
-    pub fn log_error(&mut self)    { self.state.error_count += 1; }
-    pub fn reset_errors(&mut self) { self.state.error_count = 0; }
+    pub fn log_error(&mut self) {
+        self.state.error_count += 1;
+    }
+    pub fn reset_errors(&mut self) {
+        self.state.error_count = 0;
+    }
 }

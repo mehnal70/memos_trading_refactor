@@ -66,11 +66,21 @@ pub struct TradeQualityConfig {
     pub htf_require_alignment: bool,
 }
 
-fn default_trend_filter_enabled() -> bool { true }
-fn default_trend_margin() -> f64 { 0.5 }
-fn default_volume_min_ratio() -> f64 { 0.7 }
-fn default_rsi_extreme_ob() -> f64 { 80.0 }
-fn default_rsi_extreme_os() -> f64 { 20.0 }
+fn default_trend_filter_enabled() -> bool {
+    true
+}
+fn default_trend_margin() -> f64 {
+    0.5
+}
+fn default_volume_min_ratio() -> f64 {
+    0.7
+}
+fn default_rsi_extreme_ob() -> f64 {
+    80.0
+}
+fn default_rsi_extreme_os() -> f64 {
+    20.0
+}
 
 /// Trend yönü
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,12 +93,20 @@ pub enum TrendBias {
 /// Kalite filtresi bloğunun nedeni — log ve sayaç güncelleme için
 #[derive(Debug, Clone)]
 pub enum FilterBlock {
-    RrTooLow    { rr: f64, min_rr: f64 },
-    Volatility  { avg_range_pct: f64 },
+    RrTooLow {
+        rr: f64,
+        min_rr: f64,
+    },
+    Volatility {
+        avg_range_pct: f64,
+    },
     TrendBearish,
     TrendBullish,
     /// Destek/Direnç bağlamı min_quality puanının altında
-    SrQualityTooLow { quality: f64, min_quality: f64 },
+    SrQualityTooLow {
+        quality: f64,
+        min_quality: f64,
+    },
 }
 
 // ── Fonksiyonlar ─────────────────────────────────────────────────────────────
@@ -99,9 +117,12 @@ pub enum FilterBlock {
 /// `(high - low) / close` ortalaması → %cinsinden.
 pub fn average_range_pct(candles: &[Candle], lookback: usize) -> Option<f64> {
     let n = candles.len().min(lookback);
-    if n == 0 { return None; }
+    if n == 0 {
+        return None;
+    }
     let recent = &candles[candles.len() - n..];
-    let total: f64 = recent.iter()
+    let total: f64 = recent
+        .iter()
         .filter(|c| c.close > 0.0)
         .map(|c| (c.high - c.low).abs() / c.close * 100.0)
         .sum();
@@ -122,10 +143,14 @@ pub fn trend_bias(
     margin_pct: f64,
 ) -> Option<TrendBias> {
     use crate::core::indicators::CoreIndicatorEngine;
-    if candles.len() < long_period + 1 { return None; }
+    if candles.len() < long_period + 1 {
+        return None;
+    }
     let short_sma = CoreIndicatorEngine::sma(candles, short_period);
-    let long_sma  = CoreIndicatorEngine::sma(candles, long_period);
-    if long_sma <= 0.0 { return None; }
+    let long_sma = CoreIndicatorEngine::sma(candles, long_period);
+    if long_sma <= 0.0 {
+        return None;
+    }
     let diff_pct = (short_sma - long_sma).abs() / long_sma * 100.0;
     if diff_pct < margin_pct {
         return Some(TrendBias::Neutral);
@@ -140,10 +165,7 @@ pub fn trend_bias(
 /// Win rate'e göre kalite eşiklerini uyarlamalı ayarla.
 ///
 /// Döndürür: `(min_rr, volatility_max_pct)`
-pub fn adjust_quality_thresholds(
-    win_rate: f64,
-    quality: &TradeQualityConfig,
-) -> (f64, f64) {
+pub fn adjust_quality_thresholds(win_rate: f64, quality: &TradeQualityConfig) -> (f64, f64) {
     if !quality.adaptive_enabled {
         return (quality.min_rr, quality.volatility_max_pct);
     }
@@ -188,19 +210,22 @@ pub fn check_quality_filters(
 /// `Ok(())` → entry kalitesi yeterli, devam.
 /// `Err(FilterBlock::SrQualityTooLow)` → kötü entry noktası, engellendi.
 pub fn check_sr_filter(
-    is_buy:           bool,
-    buy_quality:      f64,
-    sell_quality:     f64,
-    min_buy_quality:  f64,
+    is_buy: bool,
+    buy_quality: f64,
+    sell_quality: f64,
+    min_buy_quality: f64,
     min_sell_quality: f64,
 ) -> Result<(), FilterBlock> {
     let (quality, min_quality) = if is_buy {
-        (buy_quality,  min_buy_quality)
+        (buy_quality, min_buy_quality)
     } else {
         (sell_quality, min_sell_quality)
     };
     if quality < min_quality {
-        return Err(FilterBlock::SrQualityTooLow { quality, min_quality });
+        return Err(FilterBlock::SrQualityTooLow {
+            quality,
+            min_quality,
+        });
     }
     Ok(())
 }
@@ -240,15 +265,23 @@ mod tests {
     use chrono::Utc;
 
     fn make_candle(close: f64, high: f64, low: f64) -> Candle {
-        Candle { timestamp: Utc::now(), open: close, high, low, close, volume: 1.0,
-            symbol: "TEST".into(), interval: "1h".into() }
+        Candle {
+            timestamp: Utc::now(),
+            open: close,
+            high,
+            low,
+            close,
+            volume: 1.0,
+            symbol: "TEST".into(),
+            interval: "1h".into(),
+        }
     }
 
     #[test]
     fn average_range_basic() {
         let candles = vec![
-            make_candle(100.0, 102.0, 98.0),  // range = 4/100 = 4%
-            make_candle(100.0, 103.0, 97.0),  // range = 6/100 = 6%
+            make_candle(100.0, 102.0, 98.0), // range = 4/100 = 4%
+            make_candle(100.0, 103.0, 97.0), // range = 6/100 = 6%
         ];
         let r = average_range_pct(&candles, 10).unwrap();
         assert!((r - 5.0).abs() < 0.001);
@@ -257,15 +290,25 @@ mod tests {
     #[test]
     fn adjust_thresholds_low_winrate() {
         let q = TradeQualityConfig {
-            min_rr: 1.2, volatility_min_pct: 0.05, volatility_max_pct: 3.0,
-            trend_short_period: 20, trend_long_period: 50,
-            trend_filter_enabled: true, trend_margin_pct: 0.5,
+            min_rr: 1.2,
+            volatility_min_pct: 0.05,
+            volatility_max_pct: 3.0,
+            trend_short_period: 20,
+            trend_long_period: 50,
+            trend_filter_enabled: true,
+            trend_margin_pct: 0.5,
             adaptive_enabled: true,
-            min_rr_tight: 1.5, min_rr_loose: 1.1,
-            volatility_max_tight: 2.0, volatility_max_loose: 3.5,
-            win_rate_low: 40.0, win_rate_high: 55.0,
-            volume_filter_enabled: false, volume_min_ratio: 0.7,
-            rsi_extreme_filter_enabled: false, rsi_extreme_ob: 80.0, rsi_extreme_os: 20.0,
+            min_rr_tight: 1.5,
+            min_rr_loose: 1.1,
+            volatility_max_tight: 2.0,
+            volatility_max_loose: 3.5,
+            win_rate_low: 40.0,
+            win_rate_high: 55.0,
+            volume_filter_enabled: false,
+            volume_min_ratio: 0.7,
+            rsi_extreme_filter_enabled: false,
+            rsi_extreme_ob: 80.0,
+            rsi_extreme_os: 20.0,
             htf_require_alignment: false,
         };
         let (rr, vol) = adjust_quality_thresholds(35.0, &q);
@@ -275,18 +318,14 @@ mod tests {
 
     #[test]
     fn rr_filter_blocks_low_rr() {
-        let candles: Vec<Candle> = (0..20)
-            .map(|_| make_candle(100.0, 101.0, 99.0))
-            .collect();
+        let candles: Vec<Candle> = (0..20).map(|_| make_candle(100.0, 101.0, 99.0)).collect();
         let result = check_quality_filters(0.9, 1.2, &candles, 0.5, 5.0);
         assert!(matches!(result, Err(FilterBlock::RrTooLow { .. })));
     }
 
     #[test]
     fn rr_filter_passes() {
-        let candles: Vec<Candle> = (0..20)
-            .map(|_| make_candle(100.0, 101.5, 98.5))
-            .collect();
+        let candles: Vec<Candle> = (0..20).map(|_| make_candle(100.0, 101.5, 98.5)).collect();
         let result = check_quality_filters(2.0, 1.2, &candles, 0.5, 5.0);
         assert!(result.is_ok());
     }

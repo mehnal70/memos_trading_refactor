@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Memos BIST refresh worker every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=30
+Unit=memos-bist-refresh.service
+
+[Install]
+WantedBy=timers.target

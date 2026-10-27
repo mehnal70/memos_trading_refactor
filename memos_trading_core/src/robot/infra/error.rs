@@ -5,7 +5,7 @@
 pub trait ErrorLogger: Send + Sync {
     fn log_error(&self, context: &str, msg: &str);
     fn log_info(&self, context: &str, msg: &str);
-    
+
     // Opsiyonel: Kritik uyarılar için genişletilebilir
     fn log_warn(&self, context: &str, msg: &str) {
         println!("[WARN][{}] {}", context, msg);

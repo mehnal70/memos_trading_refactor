@@ -1,13 +1,13 @@
 // robot/order_management/mock.rs - Otonom Test ve Backtest Emir Yöneticisi
 
-use crate::core::model::{OrderId,OrderStatus,OrderSide,OrderType};
+use super::base::OrderManager;
 use crate::core::model::Order;
+use crate::core::model::{OrderId, OrderSide, OrderStatus, OrderType};
 use crate::Result as MemosTradingResult;
 use async_trait::async_trait;
-use super::base::OrderManager;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::collections::HashMap;
 
 /// MockOrderManager: Borsayı simüle eden, hata ve kayma (slippage) enjekte edebilen yapı.
 pub struct MockOrderManager {
@@ -52,7 +52,11 @@ impl MockOrderManager {
     }
 }
 
-impl Default for MockOrderManager { fn default() -> Self { Self::new() } }
+impl Default for MockOrderManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl OrderManager for MockOrderManager {
@@ -85,9 +89,17 @@ impl OrderManager for MockOrderManager {
         }
 
         self.orders.write().await.insert(order_id, order_mut);
-        println!("✅ Mock Emir: ID={}, {} {}", order_id, order.symbol, 
-            if order.order_type == OrderType::Market { "Dolduruldu" } else { "Yerleştirildi" });
-        
+        println!(
+            "✅ Mock Emir: ID={}, {} {}",
+            order_id,
+            order.symbol,
+            if order.order_type == OrderType::Market {
+                "Dolduruldu"
+            } else {
+                "Yerleştirildi"
+            }
+        );
+
         Ok(order_id)
     }
 
@@ -97,33 +109,61 @@ impl OrderManager for MockOrderManager {
             if order.status != OrderStatus::Filled {
                 order.status = OrderStatus::Canceled;
                 Ok(())
-            } else { Err("Gerçekleşmiş emir iptal edilemez".into()) }
-        } else { Err("Emir bulunamadı".into()) }
+            } else {
+                Err("Gerçekleşmiş emir iptal edilemez".into())
+            }
+        } else {
+            Err("Emir bulunamadı".into())
+        }
     }
 
     async fn get_order_status(&self, order_id: OrderId) -> MemosTradingResult<OrderStatus> {
-        self.orders.read().await.get(&order_id).map(|o| o.status).ok_or("Emir bulunamadı".into())
+        self.orders
+            .read()
+            .await
+            .get(&order_id)
+            .map(|o| o.status)
+            .ok_or("Emir bulunamadı".into())
     }
 
     async fn get_order(&self, order_id: OrderId) -> MemosTradingResult<Order> {
-        self.orders.read().await.get(&order_id).cloned().ok_or("Emir bulunamadı".into())
+        self.orders
+            .read()
+            .await
+            .get(&order_id)
+            .cloned()
+            .ok_or("Emir bulunamadı".into())
     }
 
     async fn list_active_orders(&self, symbol: Option<&str>) -> MemosTradingResult<Vec<Order>> {
         let orders = self.orders.read().await;
-        Ok(orders.values().filter(|o| {
-            let status_ok = o.status == OrderStatus::New || o.status == OrderStatus::PartiallyFilled;
-            let symbol_ok = symbol.is_none() || symbol == Some(&o.symbol);
-            status_ok && symbol_ok
-        }).cloned().collect())
+        Ok(orders
+            .values()
+            .filter(|o| {
+                let status_ok =
+                    o.status == OrderStatus::New || o.status == OrderStatus::PartiallyFilled;
+                let symbol_ok = symbol.is_none() || symbol == Some(&o.symbol);
+                status_ok && symbol_ok
+            })
+            .cloned()
+            .collect())
     }
 
-    async fn get_order_history(&self, symbol: Option<&str>, limit: Option<usize>) -> MemosTradingResult<Vec<Order>> {
+    async fn get_order_history(
+        &self,
+        symbol: Option<&str>,
+        limit: Option<usize>,
+    ) -> MemosTradingResult<Vec<Order>> {
         let orders = self.orders.read().await;
-        let mut history: Vec<_> = orders.values()
-            .filter(|o| symbol.is_none() || symbol == Some(&o.symbol)).cloned().collect();
+        let mut history: Vec<_> = orders
+            .values()
+            .filter(|o| symbol.is_none() || symbol == Some(&o.symbol))
+            .cloned()
+            .collect();
         history.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        if let Some(lim) = limit { history.truncate(lim); }
+        if let Some(lim) = limit {
+            history.truncate(lim);
+        }
         Ok(history)
     }
 }

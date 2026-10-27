@@ -15,8 +15,7 @@ use crate::robot::data_fetcher::websocket::validate_ohlcv;
 
 const ISY_BASE: &str =
     "https://www.isyatirim.com.tr/_Layouts/15/IsYatirim.Website/Common/Data.aspx/HisseTekno";
-const ISY_REFERER: &str =
-    "https://www.isyatirim.com.tr/tr-tr/analiz/hisse/Sayfalar/default.aspx";
+const ISY_REFERER: &str = "https://www.isyatirim.com.tr/tr-tr/analiz/hisse/Sayfalar/default.aspx";
 const ISY_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
@@ -33,7 +32,10 @@ impl Default for IsYatirimFetcher {
 impl IsYatirimFetcher {
     pub fn new() -> Self {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::ACCEPT, "application/json, text/plain, */*".parse().unwrap());
+        headers.insert(
+            reqwest::header::ACCEPT,
+            "application/json, text/plain, */*".parse().unwrap(),
+        );
         headers.insert(reqwest::header::REFERER, ISY_REFERER.parse().unwrap());
         headers.insert("X-Requested-With", "XMLHttpRequest".parse().unwrap());
         Self {
@@ -66,9 +68,13 @@ impl IsYatirimFetcher {
 
     /// `HisseTekno` yanıtını (`{"value":[...]}`) `Candle`'a parse et — SAF (ağsız test). Alanlar:
     /// HGDG_ACILIS(open)/HGDG_MAX(high)/HGDG_MIN(low)/HGDG_KAPANIS(close)/HGDG_HACIM(volume)/HGDG_TARIH.
-    pub fn parse_hisse_tekno(body: &str, out_symbol: &str, interval: &str) -> Result<Vec<Candle>, String> {
-        let v: serde_json::Value =
-            serde_json::from_str(body).map_err(|e| format!("İşYatırım JSON parse [{out_symbol}]: {e}"))?;
+    pub fn parse_hisse_tekno(
+        body: &str,
+        out_symbol: &str,
+        interval: &str,
+    ) -> Result<Vec<Candle>, String> {
+        let v: serde_json::Value = serde_json::from_str(body)
+            .map_err(|e| format!("İşYatırım JSON parse [{out_symbol}]: {e}"))?;
         let rows = v
             .get("value")
             .and_then(|x| x.as_array())
@@ -76,7 +82,11 @@ impl IsYatirimFetcher {
 
         let mut candles = Vec::with_capacity(rows.len());
         for row in rows {
-            let date = match row.get("HGDG_TARIH").and_then(|x| x.as_str()).and_then(Self::parse_date) {
+            let date = match row
+                .get("HGDG_TARIH")
+                .and_then(|x| x.as_str())
+                .and_then(Self::parse_date)
+            {
                 Some(d) => d,
                 None => continue,
             };
@@ -96,7 +106,11 @@ impl IsYatirimFetcher {
             if let Some(ndt) = date.and_hms_opt(0, 0, 0) {
                 candles.push(Candle {
                     timestamp: Utc.from_utc_datetime(&ndt),
-                    open, high, low, close, volume,
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume,
                     symbol: out_symbol.to_string(),
                     interval: interval.to_string(),
                 });
@@ -110,18 +124,31 @@ impl IsYatirimFetcher {
     /// Tek tarih-penceresi ham gövde çek (DD-MM-YYYY).
     async fn fetch_window(&self, symbol: &str, start: &str, end: &str) -> Result<String, String> {
         let url = format!("{ISY_BASE}?hisse={symbol}&startdate={start}&enddate={end}");
-        let resp = self.client.get(&url).send().await
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
             .map_err(|e| format!("İşYatırım bağlantı [{symbol}]: {e}"))?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(format!("İşYatırım HTTP {status} [{symbol}] (401 → TR-IP/header gerekebilir)"));
+            return Err(format!(
+                "İşYatırım HTTP {status} [{symbol}] (401 → TR-IP/header gerekebilir)"
+            ));
         }
-        resp.text().await.map_err(|e| format!("İşYatırım gövde [{symbol}]: {e}"))
+        resp.text()
+            .await
+            .map_err(|e| format!("İşYatırım gövde [{symbol}]: {e}"))
     }
 
     /// `years_back` yıl geriye GÜNLÜK OHLC. Endpoint aralık-cap'ine karşı YIL-YIL pagine eder,
     /// birleştirir (dedup+artan). `out_symbol` üretilen mumun sembolü (çıplak, ör. THYAO).
-    pub async fn fetch_daily(&self, symbol: &str, out_symbol: &str, years_back: i32) -> Result<Vec<Candle>, String> {
+    pub async fn fetch_daily(
+        &self,
+        symbol: &str,
+        out_symbol: &str,
+        years_back: i32,
+    ) -> Result<Vec<Candle>, String> {
         let now = Utc::now();
         let cur_year = now.year();
         let start_year = cur_year - years_back.max(1) + 1;
@@ -161,9 +188,18 @@ mod tests {
 
     #[test]
     fn parse_dates_multi_format() {
-        assert_eq!(IsYatirimFetcher::parse_date("18-06-2024"), NaiveDate::from_ymd_opt(2024, 6, 18));
-        assert_eq!(IsYatirimFetcher::parse_date("18.06.2024"), NaiveDate::from_ymd_opt(2024, 6, 18));
-        assert_eq!(IsYatirimFetcher::parse_date("2024-06-18"), NaiveDate::from_ymd_opt(2024, 6, 18));
+        assert_eq!(
+            IsYatirimFetcher::parse_date("18-06-2024"),
+            NaiveDate::from_ymd_opt(2024, 6, 18)
+        );
+        assert_eq!(
+            IsYatirimFetcher::parse_date("18.06.2024"),
+            NaiveDate::from_ymd_opt(2024, 6, 18)
+        );
+        assert_eq!(
+            IsYatirimFetcher::parse_date("2024-06-18"),
+            NaiveDate::from_ymd_opt(2024, 6, 18)
+        );
         assert_eq!(IsYatirimFetcher::parse_date("saçma"), None);
     }
 

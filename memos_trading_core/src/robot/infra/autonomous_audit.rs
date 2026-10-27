@@ -1,9 +1,9 @@
 // robot/autonomous_audit.rs - Otonom Trader Audit & Tracking Sistemi
 
-use serde::{Serialize, Deserialize};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use chrono::Utc;
 
 /// Aşama durumu
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -57,7 +57,7 @@ pub struct CycleRecord {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub total_duration_ms: u128,
-    pub status: String,  // RUNNING, COMPLETED, ERROR
+    pub status: String, // RUNNING, COMPLETED, ERROR
     pub stages: Vec<StageRecord>,
     pub summary: CycleSummary,
     pub error_message: Option<String>,
@@ -109,13 +109,14 @@ impl CycleRecord {
         self.status = "COMPLETED".to_string();
 
         // Özet hesapla
-        self.summary.errors_count = self.stages
+        self.summary.errors_count = self
+            .stages
             .iter()
             .filter(|s| s.status == AuditStageStatus::Error)
             .count();
 
         if !self.stages.is_empty() {
-            self.summary.average_stage_duration_ms = 
+            self.summary.average_stage_duration_ms =
                 self.stages.iter().map(|s| s.duration_ms).sum::<u128>() / self.stages.len() as u128;
         }
     }
@@ -142,10 +143,10 @@ impl AutonomousAuditLogger {
         if !Path::new(logs_dir).exists() {
             let _ = fs::create_dir_all(logs_dir);
         }
-        
+
         Self {
             logs_dir: logs_dir.to_string(),
-            max_files: 100,  // Son 100 cycle logunu tut
+            max_files: 100, // Son 100 cycle logunu tut
         }
     }
 
@@ -159,8 +160,7 @@ impl AutonomousAuditLogger {
         );
 
         let json = cycle.to_json_string();
-        fs::write(&filename, json)
-            .map_err(|e| format!("JSON yazılamadı: {}", e))?;
+        fs::write(&filename, json).map_err(|e| format!("JSON yazılamadı: {}", e))?;
 
         println!("📝 Cycle {} kaydı: {}", cycle.cycle_id, filename);
         self.cleanup_old_files()?;
@@ -170,18 +170,15 @@ impl AutonomousAuditLogger {
 
     /// Eski dosyaları temizle
     fn cleanup_old_files(&self) -> Result<(), String> {
-        let entries = fs::read_dir(&self.logs_dir)
-            .map_err(|e| format!("Klasör okunamadı: {}", e))?;
+        let entries =
+            fs::read_dir(&self.logs_dir).map_err(|e| format!("Klasör okunamadı: {}", e))?;
 
         let mut files: Vec<_> = entries
             .filter_map(|e| {
                 e.ok().and_then(|entry| {
                     let path = entry.path();
                     if path.extension().is_some_and(|ext| ext == "json") {
-                        let modified = entry.metadata()
-                            .ok()?
-                            .modified()
-                            .ok()?;
+                        let modified = entry.metadata().ok()?.modified().ok()?;
                         Some((path, modified))
                     } else {
                         None
@@ -202,14 +199,14 @@ impl AutonomousAuditLogger {
     /// Bütün cycle loglarını oku
     pub fn read_all_cycles(&self) -> Result<Vec<CycleRecord>, String> {
         let mut cycles = Vec::new();
-        
-        let entries = fs::read_dir(&self.logs_dir)
-            .map_err(|e| format!("Klasör okunamadı: {}", e))?;
+
+        let entries =
+            fs::read_dir(&self.logs_dir).map_err(|e| format!("Klasör okunamadı: {}", e))?;
 
         for entry in entries {
             let entry = entry.map_err(|e| format!("Entry hatasız: {}", e))?;
             let path = entry.path();
-            
+
             if path.extension().is_some_and(|ext| ext == "json") {
                 if let Ok(content) = fs::read_to_string(&path) {
                     if let Ok(cycle) = serde_json::from_str::<CycleRecord>(&content) {
@@ -277,7 +274,7 @@ impl AutonomousAuditLogger {
 </head>
 <body>
     <h1>🤖 Autonomous Trader - Audit Report</h1>
-"#
+"#,
         );
 
         for cycle in cycles {
@@ -316,7 +313,11 @@ impl AutonomousAuditLogger {
             <tbody>
 "#,
                 cycle.cycle_id,
-                if cycle.status == "COMPLETED" { "ok" } else { "error" },
+                if cycle.status == "COMPLETED" {
+                    "ok"
+                } else {
+                    "error"
+                },
                 cycle.status,
                 cycle.started_at,
                 cycle.total_duration_ms,
@@ -337,7 +338,11 @@ impl AutonomousAuditLogger {
 "#,
                     stage.stage,
                     stage.name,
-                    if stage.status == AuditStageStatus::Error { "error" } else { "ok" },
+                    if stage.status == AuditStageStatus::Error {
+                        "error"
+                    } else {
+                        "ok"
+                    },
                     stage.status,
                     stage.duration_ms,
                 ));
@@ -359,7 +364,7 @@ mod tests {
     fn test_cycle_record() {
         let mut cycle = CycleRecord::new(1);
         assert_eq!(cycle.status, "RUNNING");
-        
+
         let stage = StageRecord {
             stage: 1,
             name: "Test".to_string(),
@@ -370,7 +375,7 @@ mod tests {
             error: None,
             validation: None,
         };
-        
+
         cycle.add_stage(stage);
         assert_eq!(cycle.stages.len(), 1);
     }

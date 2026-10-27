@@ -4,7 +4,7 @@
 // Diagnostic'ler çalıştır ve sistem sağlığını iyileştir
 
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Kurtarma Durumları
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,33 +35,24 @@ impl std::fmt::Display for RecoveryState {
 pub enum RecoveryAction {
     /// Hiçbir aksiyon - sistem sağlıklı
     None,
-    
+
     /// Uyarı ver - operatörü bilgilendir
     Warn {
         message: String,
-        severity: u8,  // 1-10, 10 = en ciddi
+        severity: u8, // 1-10, 10 = en ciddi
     },
-    
+
     /// Sistem kaynakları temizle
-    CleanupResources {
-        reason: String,
-    },
-    
+    CleanupResources { reason: String },
+
     /// Executor'u sıfırla
-    ResetExecutor {
-        executor_type: String,
-    },
-    
+    ResetExecutor { executor_type: String },
+
     /// Failover'ı tetikle
-    TriggerFailover {
-        from: String,
-        to: String,
-    },
-    
+    TriggerFailover { from: String, to: String },
+
     /// Sistem durdur
-    Shutdown {
-        reason: String,
-    },
+    Shutdown { reason: String },
 }
 
 /// Health Metric
@@ -82,7 +73,7 @@ impl HealthMetric {
     pub fn new(name: String, threshold: f64) -> Self {
         Self {
             name,
-            value: 1.0,  // Sağlıklı olarak başla
+            value: 1.0, // Sağlıklı olarak başla
             threshold,
             last_updated: Utc::now(),
         }
@@ -120,8 +111,8 @@ impl RecoveryStateMachine {
             last_state_change: Utc::now(),
             consecutive_healthy_checks: 0,
             consecutive_critical_checks: 0,
-            max_checks_to_recover: 3,     // 3 healthy check sonra recover
-            max_checks_to_critical: 2,    // 2 critical check sonra shutdown
+            max_checks_to_recover: 3,  // 3 healthy check sonra recover
+            max_checks_to_critical: 2, // 2 critical check sonra shutdown
         };
 
         // Varsayılan metrikleri ekle
@@ -199,7 +190,10 @@ impl RecoveryStateMachine {
                     self.consecutive_critical_checks += 1;
 
                     return RecoveryAction::Warn {
-                        message: format!("System critical: {} metrics unhealthy", unhealthy_metrics),
+                        message: format!(
+                            "System critical: {} metrics unhealthy",
+                            unhealthy_metrics
+                        ),
                         severity: 9,
                     };
                 } else if unhealthy_metrics == 0 && avg_health >= 0.8 {
@@ -328,7 +322,7 @@ mod tests {
 
         let action = machine.check_health();
         assert_eq!(machine.state(), RecoveryState::Degraded);
-        
+
         match action {
             RecoveryAction::Warn { severity, .. } => assert_eq!(severity, 5),
             _ => panic!("Expected Warn action"),
@@ -346,7 +340,7 @@ mod tests {
 
         machine.check_health();
         let action = machine.check_health();
-        
+
         assert_eq!(machine.state(), RecoveryState::Critical);
         match action {
             RecoveryAction::Warn { severity, .. } => assert_eq!(severity, 9),
@@ -384,8 +378,8 @@ mod tests {
         let _ = machine.update_metric("executor_health", 0.3);
 
         let (state, _avg_health, unhealthy) = machine.get_summary();
-        
-        assert_eq!(state, RecoveryState::Healthy);  // Hala healthy ama metric kötü
+
+        assert_eq!(state, RecoveryState::Healthy); // Hala healthy ama metric kötü
         assert!(!unhealthy.is_empty());
     }
 

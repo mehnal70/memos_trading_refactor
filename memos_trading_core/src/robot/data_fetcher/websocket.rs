@@ -49,11 +49,15 @@ pub struct BinanceKline {
 /// OHLCV Bütünlük Kontrolü (Otonom Veri Doğrulama Yasası)
 pub fn validate_ohlcv(open: f64, high: f64, low: f64, close: f64, volume: f64) -> Result<()> {
     if open <= 0.0 || high <= 0.0 || low <= 0.0 || close <= 0.0 {
-        return Err(format!("Hatalı Veri (Sıfır/Negatif): O={open} H={high} L={low} C={close}").into());
+        return Err(
+            format!("Hatalı Veri (Sıfır/Negatif): O={open} H={high} L={low} C={close}").into(),
+        );
     }
     // Matematiksel Tutarlılık Denetimi: High her şeyden büyük, Low her şeyden küçük olmalı.
     if high < low || high < open || high < close || low > open || low > close {
-        return Err(format!("Hatalı Veri (Mantıksız H/L): H={high} L={low} O={open} C={close}").into());
+        return Err(
+            format!("Hatalı Veri (Mantıksız H/L): H={high} L={low} O={open} C={close}").into(),
+        );
     }
     if volume < 0.0 {
         return Err(format!("Hatalı Veri (Negatif Hacim): {volume}").into());
@@ -66,7 +70,8 @@ pub fn parse_kline(update: BinanceKlineUpdate) -> Result<Candle> {
     let k = update.kline;
 
     let parse = |s: &str, field: &str| -> Result<f64> {
-        s.parse::<f64>().map_err(|_| format!("WS {field} parse hatası: '{s}'").into())
+        s.parse::<f64>()
+            .map_err(|_| format!("WS {field} parse hatası: '{s}'").into())
     };
 
     let (open, high, low, close, volume) = (
@@ -74,7 +79,7 @@ pub fn parse_kline(update: BinanceKlineUpdate) -> Result<Candle> {
         parse(&k.high, "high")?,
         parse(&k.low, "low")?,
         parse(&k.close, "close")?,
-        parse(&k.volume, "volume")?
+        parse(&k.volume, "volume")?,
     );
 
     // Otonom Doğrulama

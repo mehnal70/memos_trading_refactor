@@ -42,7 +42,11 @@ impl PluginRegistry {
             .iter()
             .map(|p| p.name().to_string())
             .collect();
-        Self { strategies, risk_filters, execution_policies }
+        Self {
+            strategies,
+            risk_filters,
+            execution_policies,
+        }
     }
 
     /// İnsan-okunabilir çok-satırlı rapor. Loglara, dashboard'a, telegram
@@ -54,11 +58,17 @@ impl PluginRegistry {
         for n in &self.strategies {
             out.push_str(&format!("  • {n}\n"));
         }
-        out.push_str(&format!("Risk filtreleri ({}, chain sırası):\n", self.risk_filters.len()));
+        out.push_str(&format!(
+            "Risk filtreleri ({}, chain sırası):\n",
+            self.risk_filters.len()
+        ));
         for (i, n) in self.risk_filters.iter().enumerate() {
             out.push_str(&format!("  {}. {n}\n", i + 1));
         }
-        out.push_str(&format!("Yürütme policy'leri ({}, chain sırası):\n", self.execution_policies.len()));
+        out.push_str(&format!(
+            "Yürütme policy'leri ({}, chain sırası):\n",
+            self.execution_policies.len()
+        ));
         for (i, n) in self.execution_policies.iter().enumerate() {
             out.push_str(&format!("  {}. {n}\n", i + 1));
         }
@@ -83,14 +93,21 @@ mod tests {
     fn snapshot_collects_three_axes_from_defaults() {
         let snap = PluginRegistry::snapshot();
         // Faz 4 c1 default risk chain: 3 filter (risk_gate / kelly_edge / value_at_risk).
-        assert_eq!(snap.risk_filters,
-            vec!["risk_gate", "kelly_edge", "value_at_risk"]);
+        assert_eq!(
+            snap.risk_filters,
+            vec!["risk_gate", "kelly_edge", "value_at_risk"]
+        );
         // Faz 4 c3 default execution chain: market_hours / idle_strategy / basket_empty.
-        assert_eq!(snap.execution_policies,
-            vec!["market_hours", "idle_strategy", "basket_empty"]);
+        assert_eq!(
+            snap.execution_policies,
+            vec!["market_hours", "idle_strategy", "basket_empty"]
+        );
         // c2 default strategy registry en az 15 girdi (alias dahil).
-        assert!(snap.strategies.len() >= 15,
-            "registry'de en az 15 kayıt beklenir, gelen: {}", snap.strategies.len());
+        assert!(
+            snap.strategies.len() >= 15,
+            "registry'de en az 15 kayıt beklenir, gelen: {}",
+            snap.strategies.len()
+        );
     }
 
     #[test]

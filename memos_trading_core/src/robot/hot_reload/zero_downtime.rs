@@ -3,8 +3,8 @@
 // Blue-Green deployment pattern
 // Mevcut stratejiler çalışmaya devam ederken yeni versiyonu hazırla ve geç
 
-use serde::{Serialize, Deserialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Update Durumları
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,35 +28,30 @@ pub enum UpdateState {
 pub enum UpdateAction {
     /// Hiçbir aksiyon
     None,
-    
+
     /// Yeni versiyonu hazırla
     PrepareNewVersion {
         strategy_name: String,
         new_version: String,
     },
-    
+
     /// Yeni versiyonu test et
     TestNewVersion {
         strategy_name: String,
         test_timeout_secs: u64,
     },
-    
+
     /// Blue-Green geçişi yap
     ExecuteBlueGreenSwitch {
         from_version: String,
         to_version: String,
     },
-    
+
     /// Rollback yap
-    RollbackToVersion {
-        version: String,
-        reason: String,
-    },
-    
+    RollbackToVersion { version: String, reason: String },
+
     /// Güncellemeyi iptal et
-    CancelUpdate {
-        reason: String,
-    },
+    CancelUpdate { reason: String },
 }
 
 /// Güncelleme Süreci Bilgisi
@@ -149,7 +144,7 @@ impl ZeroDowntimeUpdateManager {
 
             Ok(UpdateAction::TestNewVersion {
                 strategy_name: update.strategy_name.clone(),
-                test_timeout_secs: 300,  // 5 dakika test süresi
+                test_timeout_secs: 300, // 5 dakika test süresi
             })
         } else {
             Err("No update in progress".to_string())
@@ -250,7 +245,12 @@ impl ZeroDowntimeUpdateManager {
 
     /// İstatistikleri al
     pub fn stats(&self) -> (u32, u32, u32, u32) {
-        (self.total_updates, self.successful_updates, self.failed_updates, self.rollbacks)
+        (
+            self.total_updates,
+            self.successful_updates,
+            self.failed_updates,
+            self.rollbacks,
+        )
     }
 }
 
@@ -293,11 +293,8 @@ mod tests {
             "1.1.0".to_string(),
         );
 
-        let result = manager.start_update(
-            "rsi".to_string(),
-            "1.0.0".to_string(),
-            "1.1.0".to_string(),
-        );
+        let result =
+            manager.start_update("rsi".to_string(), "1.0.0".to_string(), "1.1.0".to_string());
 
         assert!(result.is_err());
     }

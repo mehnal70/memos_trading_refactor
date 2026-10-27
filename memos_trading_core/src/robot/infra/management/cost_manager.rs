@@ -57,10 +57,10 @@ impl CostManager for SimpleCostManager {
 
     fn average_liquidity(&self) -> f64 {
         let n = self.records.len();
-        if n == 0 { 
-            0.0 
-        } else { 
-            self.cached_total_liquidity / n as f64 
+        if n == 0 {
+            0.0
+        } else {
+            self.cached_total_liquidity / n as f64
         }
     }
 

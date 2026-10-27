@@ -2,16 +2,16 @@
 
 use crate::core::types::{Candle, Signal};
 use crate::robot::ml_engine::{FeatureExtractor, FeatureVector, LinearRegressor, Prediction};
-use crate::Result;
 use crate::MemosTradingError;
+use crate::Result;
 use serde::{Deserialize, Serialize};
 
 /// ML-tabanlı otonom sinyal tahmini ve güven analizi.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MLSignalPrediction {
     pub signal: Signal,
-    pub confidence: f64,      // 0.0 ile 1.0 arası (Modelin kararlılığı)
-    pub ml_score: f64,        // -1.0 ile 1.0 arası (Ham karar skoru)
+    pub confidence: f64, // 0.0 ile 1.0 arası (Modelin kararlılığı)
+    pub ml_score: f64,   // -1.0 ile 1.0 arası (Ham karar skoru)
     pub feature_importance: FeatureImportance,
 }
 
@@ -29,11 +29,11 @@ pub struct FeatureImportance {
 /// MLSignalPredictor: Modelleri orkestra eder ve nihai işlem kararını verir.
 pub struct MLSignalPredictor {
     model: LinearRegressor,
-    confidence_threshold: f64, 
+    confidence_threshold: f64,
 }
 
 impl MLSignalPredictor {
-    /// Yeni bir tahminci oluşturur. 
+    /// Yeni bir tahminci oluşturur.
     /// confidence_threshold: Sinyal üretmek için gereken minimum model güveni.
     pub fn new(confidence_threshold: f64) -> Self {
         Self {
@@ -46,12 +46,14 @@ impl MLSignalPredictor {
     /// robotic_loop içindeki 'sinyal oylama' mantığının yeni yuvasıdır.
     pub fn predict(&self, candles: &[Candle]) -> Result<MLSignalPrediction> {
         if candles.is_empty() {
-            return Err(MemosTradingError::Unknown("Veri yok — tahmin yapılamaz".into()));
+            return Err(MemosTradingError::Unknown(
+                "Veri yok — tahmin yapılamaz".into(),
+            ));
         }
 
         // 1. Otonom Öznitelik Çıkarımı (Feature Extraction)
         let features = FeatureExtractor::extract(candles);
-        
+
         // 2. Model Tahmini (Inference)
         let prediction = self.model.predict(&features);
 
@@ -78,9 +80,7 @@ impl MLSignalPredictor {
 
     /// Toplu (Batch) tahmin işleme — Geçmiş veriler üzerinde hızlı tarama sağlar.
     pub fn predict_batch(&self, candles_list: &[Vec<Candle>]) -> Result<Vec<MLSignalPrediction>> {
-        candles_list.iter()
-            .map(|c| self.predict(c))
-            .collect()
+        candles_list.iter().map(|c| self.predict(c)).collect()
     }
 
     /// Modeli otonom eğitir ve başarı oranını (Accuracy) döner.
@@ -113,13 +113,15 @@ impl MLSignalPredictor {
         // Her bir özniteliğin (normalize değer - nötr nokta) * model ağırlığı
         let rsi_impact = (norm.rsi - 0.5).abs() * self.model.weights[0];
         let macd_impact = (norm.macd - 0.5).abs() * self.model.weights[1];
-        
-        let bb_impact = ((norm.bb_upper - 0.5).abs() * self.model.weights[3] + 
-                        (norm.bb_lower - 0.5).abs() * self.model.weights[4]) / 2.0;
 
-        let sma_impact = ((norm.sma_5 - 0.5).abs() * self.model.weights[6] + 
-                         (norm.sma_10 - 0.5).abs() * self.model.weights[7] + 
-                         (norm.sma_20 - 0.5).abs() * self.model.weights[8]) / 3.0;
+        let bb_impact = ((norm.bb_upper - 0.5).abs() * self.model.weights[3]
+            + (norm.bb_lower - 0.5).abs() * self.model.weights[4])
+            / 2.0;
+
+        let sma_impact = ((norm.sma_5 - 0.5).abs() * self.model.weights[6]
+            + (norm.sma_10 - 0.5).abs() * self.model.weights[7]
+            + (norm.sma_20 - 0.5).abs() * self.model.weights[8])
+            / 3.0;
 
         let momentum_impact = (norm.momentum - 0.5).abs() * self.model.weights[9];
         let volatility_impact = norm.volatility * self.model.weights[10];
@@ -138,6 +140,10 @@ impl MLSignalPredictor {
         self.confidence_threshold = threshold.clamp(0.0, 1.0);
     }
 
-    pub fn get_model(&self) -> &LinearRegressor { &self.model }
-    pub fn get_model_mut(&mut self) -> &mut LinearRegressor { &mut self.model }
+    pub fn get_model(&self) -> &LinearRegressor {
+        &self.model
+    }
+    pub fn get_model_mut(&mut self) -> &mut LinearRegressor {
+        &mut self.model
+    }
 }

@@ -19,18 +19,20 @@ const EDGE_ML_WARM_MAX: f64 = 0.30;
 /// Kademeye karşılık gelen edge tabanları (ML olgunlaştıkça katılaşır).
 const EDGE_FLOOR_COLD: f64 = 0.20; // ML≈0: momentum tek-taşıyıcı, gevşek taban
 const EDGE_FLOOR_WARM: f64 = 0.35; // ML olgunlaşıyor: orta taban
-const EDGE_FLOOR_HOT:  f64 = 0.55; // ML hazır: katı filtre
+const EDGE_FLOOR_HOT: f64 = 0.55; // ML hazır: katı filtre
 
 impl Engine {
-
-
     /// Edge skoru: son 20 mumun momentum gücü (ATR'ye göre normalize) ile ML confidence ortalaması.
     /// Sinyal yönü momentum ile uyumlu değilse ceza uygulanır.
     ///
     /// Momentum gücü = |ham getiri / ATR%|, 1.0'a clamp'lenir. Yani 20 mum içinde fiyatın ATR'nin
     /// en az 1 katı yön yapması "tam güç" sayılır. Ham getiriyi kullanmak yerine ATR normalizasyonu
     /// 1m gibi düşük volatilite timeframe'lerinde edge'in pratik olarak ölçülebilir kalmasını sağlar.
-    pub(crate) fn compute_edge_score(candles: &[Candle], signal: &Signal, ml_confidence: f64) -> f64 {
+    pub(crate) fn compute_edge_score(
+        candles: &[Candle],
+        signal: &Signal,
+        ml_confidence: f64,
+    ) -> f64 {
         // Canlı yol sabit ters-momentum cezası ile çağırır (davranış birebir).
         // Parametrik sürüm backtest A/B'si (#3) için ayrı eşik denemesine izin verir.
         Self::compute_edge_score_with(candles, signal, ml_confidence, EDGE_REVERSE_PENALTY)
@@ -40,18 +42,29 @@ impl Engine {
     /// sinyal momentumla ters yöndeyse uygulanan dir_match çarpanı (canlı: 0.4).
     /// Düşürmek (örn. 0.2) ters girişleri daha çok bastırır; 1.0 cezayı kaldırır.
     pub(crate) fn compute_edge_score_with(
-        candles: &[Candle], signal: &Signal, ml_confidence: f64, reverse_penalty: f64,
+        candles: &[Candle],
+        signal: &Signal,
+        ml_confidence: f64,
+        reverse_penalty: f64,
     ) -> f64 {
-        if candles.len() < 20 { return 0.0; }
+        if candles.len() < 20 {
+            return 0.0;
+        }
         let recent = &candles[candles.len() - 20..];
         let first = recent.first().map(|c| c.close).unwrap_or(0.0);
-        let last  = recent.last().map(|c| c.close).unwrap_or(0.0);
-        if first <= 0.0 || last <= 0.0 { return 0.0; }
+        let last = recent.last().map(|c| c.close).unwrap_or(0.0);
+        if first <= 0.0 || last <= 0.0 {
+            return 0.0;
+        }
         let mom = ((last - first) / first).clamp(-1.0, 1.0); // göreli getiri
 
         // Momentum'u ATR%'ye göre normalize et: kaç ATR yön yapıldı?
         let atr = Self::calc_atr(candles, 14);
-        let atr_pct = if last > 0.0 { (atr / last).max(1e-6) } else { 1e-6 };
+        let atr_pct = if last > 0.0 {
+            (atr / last).max(1e-6)
+        } else {
+            1e-6
+        };
         let mom_strength = if atr_pct > 1e-6 {
             (mom.abs() / atr_pct).clamp(0.0, 1.0)
         } else {
@@ -59,14 +72,18 @@ impl Engine {
         };
 
         let dir_match = match signal {
-            Signal::Buy  if mom > 0.0  => 1.0,
-            Signal::Sell if mom < 0.0  => 1.0,
-            Signal::Hold               => 0.0,
-            _                          => reverse_penalty, // ters yön sinyali → ceza
+            Signal::Buy if mom > 0.0 => 1.0,
+            Signal::Sell if mom < 0.0 => 1.0,
+            Signal::Hold => 0.0,
+            _ => reverse_penalty, // ters yön sinyali → ceza
         };
         let ml = ml_confidence.clamp(0.0, 1.0);
         // ML henüz hazır değilse (0.0) momentum tek başına baskın olsun.
-        let ml_w = if ml < f64::EPSILON { 0.0 } else { EDGE_ML_BLEND_WEIGHT };
+        let ml_w = if ml < f64::EPSILON {
+            0.0
+        } else {
+            EDGE_ML_BLEND_WEIGHT
+        };
         let mom_w = 1.0 - ml_w;
         (dir_match * (mom_strength * mom_w + ml * ml_w)).clamp(0.0, 1.0)
     }
@@ -74,9 +91,13 @@ impl Engine {
     /// Dinamik edge eşiği: ML modeli henüz hazır değilken (confidence ≈ 0) momentum tek başına
     /// taşıyıcı, bu yüzden daha gevşek eşik. ML hazırlandıkça daha katı bir filtreye geçilir.
     pub(crate) fn dynamic_edge_threshold(ml_confidence: f64) -> f64 {
-        if ml_confidence < EDGE_ML_COLD_MAX { EDGE_FLOOR_COLD }
-        else if ml_confidence < EDGE_ML_WARM_MAX { EDGE_FLOOR_WARM }
-        else { EDGE_FLOOR_HOT }
+        if ml_confidence < EDGE_ML_COLD_MAX {
+            EDGE_FLOOR_COLD
+        } else if ml_confidence < EDGE_ML_WARM_MAX {
+            EDGE_FLOOR_WARM
+        } else {
+            EDGE_FLOOR_HOT
+        }
     }
 
     /// Faz 3 c3: rejim drift gözlemi. Önceki cycle'dan farklı bir rejime
@@ -85,10 +106,20 @@ impl Engine {
     /// İlk gözlem değişim sayılmaz (cold start).
     pub(crate) fn observe_regime_drift(state: &Arc<Mutex<AppState>>, regime: &str) {
         let drift = {
-            let st = match state.lock() { Ok(s) => s, Err(_) => return };
-            st.brain.parameters.write().ok().map(|mut p| p.observe_regime(regime)).unwrap_or(false)
+            let st = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            st.brain
+                .parameters
+                .write()
+                .ok()
+                .map(|mut p| p.observe_regime(regime))
+                .unwrap_or(false)
         };
-        if !drift { return; }
+        if !drift {
+            return;
+        }
         if let Ok(mut st) = state.lock() {
             let key = format!("REGIME-DRIFT-{}", regime);
             let msg = format!(
@@ -108,14 +139,25 @@ impl Engine {
     /// dokunmaz — HyperOpt veya manuel override'ın ezilmesini önler.
     /// Boş heuristic patch ise (Weak* / Unknown) hiç yazılmaz.
     pub(crate) fn ensure_regime_patch(state: &Arc<Mutex<AppState>>, regime: &str) {
-        let needs_patch = state.lock().ok()
-            .and_then(|st| st.brain.parameters.read().ok()
-                .map(|p| !p.regime_overrides.contains_key(regime)))
+        let needs_patch = state
+            .lock()
+            .ok()
+            .and_then(|st| {
+                st.brain
+                    .parameters
+                    .read()
+                    .ok()
+                    .map(|p| !p.regime_overrides.contains_key(regime))
+            })
             .unwrap_or(false);
-        if !needs_patch { return; }
+        if !needs_patch {
+            return;
+        }
 
         let patch = crate::robot::parameters::adaptive::default_patch_for_regime(regime);
-        if patch.is_empty() { return; }
+        if patch.is_empty() {
+            return;
+        }
 
         if let Ok(mut st) = state.lock() {
             if let Ok(mut params) = st.brain.parameters.write() {
@@ -145,24 +187,43 @@ impl Engine {
         status: crate::robot::data_pipeline::StepStatus,
     ) {
         use crate::robot::data_pipeline::{AnomalyKind, AnomalySeverity, StepStatus};
+        let now = crate::core::time::now_epoch_secs();
+        let mut emitted_anomaly: Option<(AnomalySeverity, AnomalyKind, String)> = None;
         if let Ok(st) = state.lock() {
             if let Ok(mut pipe) = st.guardian.live_pipeline.write() {
                 pipe.mark_stage_completed(stage, status);
-                let (severity, kind, msg) = match status {
-                    StepStatus::Failed => (
-                        AnomalySeverity::Critical,
-                        AnomalyKind::DataStall,
-                        format!("{} fazı başarısız: cycle bu aşamada koptu", stage.label()),
-                    ),
-                    StepStatus::Skipped => (
-                        AnomalySeverity::Warning,
-                        AnomalyKind::RiskBreach,
-                        format!("{} fazı atlandı: koruma/red akışı tetiklendi", stage.label()),
-                    ),
-                    _ => return, // Done / Idle / Running anomaly üretmez
-                };
-                pipe.push_anomaly(severity, kind, msg);
+                match status {
+                    StepStatus::Failed => {
+                        let msg =
+                            format!("{} fazı başarısız: cycle bu aşamada koptu", stage.label());
+                        pipe.push_anomaly(
+                            AnomalySeverity::Critical,
+                            AnomalyKind::DataStall,
+                            msg.clone(),
+                        );
+                        emitted_anomaly =
+                            Some((AnomalySeverity::Critical, AnomalyKind::DataStall, msg));
+                    }
+                    StepStatus::Skipped => {
+                        let msg = format!(
+                            "{} fazı atlandı: koruma/red akışı tetiklendi",
+                            stage.label()
+                        );
+                        pipe.push_anomaly(
+                            AnomalySeverity::Warning,
+                            AnomalyKind::RiskBreach,
+                            msg.clone(),
+                        );
+                        emitted_anomaly =
+                            Some((AnomalySeverity::Warning, AnomalyKind::RiskBreach, msg));
+                    }
+                    _ => {}
+                }
             }
+        }
+        emit_pipeline_step_event(state, stage.label(), status, now, 0);
+        if let Some((severity, kind, msg)) = emitted_anomaly {
+            emit_pipeline_anomaly_event(state, severity, kind, &msg);
         }
     }
 
@@ -190,10 +251,12 @@ impl Engine {
         gbt_enabled: bool,
         regime_adaptive_pctl: Option<f64>,
     ) -> crate::evolution::MarketRegime {
-        use crate::robot::logic::regime_context::{build_context, default_regime_detector, RegimeContext};
         use crate::robot::logic::market_regime::{
-            adaptive_thresholds, classify_market_regime_with,
-            compute_adx_from_candles, compute_atr_pct,
+            adaptive_thresholds, classify_market_regime_with, compute_adx_from_candles,
+            compute_atr_pct,
+        };
+        use crate::robot::logic::regime_context::{
+            build_context, default_regime_detector, RegimeContext,
         };
         let now_ms = crate::core::time::now_epoch_millis() as u64;
         let ttl_ms = ttl_secs.saturating_mul(1000);
@@ -216,7 +279,9 @@ impl Engine {
         let (det_candles, src) = match htf_slice {
             Some(h) if h.len() >= 20 => (
                 h,
-                crate::robot::data_pipeline::orchestrator::DataPipeline::get_htf_interval(base_interval),
+                crate::robot::data_pipeline::orchestrator::DataPipeline::get_htf_interval(
+                    base_interval,
+                ),
             ),
             _ => (base_candles, base_interval),
         };
@@ -230,7 +295,7 @@ impl Engine {
             state.lock().ok().and_then(|st| {
                 st.brain.intelligence_hub.read().ok().and_then(|hub| {
                     let input: Option<&[Candle]> = match hub.gbt_trained_interval.as_deref() {
-                        Some(ti) if ti == src           => Some(det_candles),
+                        Some(ti) if ti == src => Some(det_candles),
                         Some(ti) if ti == base_interval => Some(base_candles),
                         _ => None,
                     };
@@ -289,14 +354,17 @@ impl Engine {
     /// Tarihçe yetersizse 0.0 döner (trailing devre dışı sayılır).
     pub(crate) fn calc_atr(candles: &[Candle], period: usize) -> f64 {
         let n = candles.len();
-        if n < period + 1 { return 0.0; }
+        if n < period + 1 {
+            return 0.0;
+        }
         let slice = &candles[n - period - 1..];
         let mut sum = 0.0;
         for w in slice.windows(2) {
-            let prev = &w[0]; let cur = &w[1];
+            let prev = &w[0];
+            let cur = &w[1];
             let h_l = cur.high - cur.low;
             let h_pc = (cur.high - prev.close).abs();
-            let l_pc = (cur.low  - prev.close).abs();
+            let l_pc = (cur.low - prev.close).abs();
             sum += h_l.max(h_pc).max(l_pc);
         }
         sum / period as f64
@@ -311,13 +379,19 @@ mod edge_threshold_tests {
     /// sonra regresyon koruması). Sınırlar yarı-açık: `< COLD_MAX` cold, `< WARM_MAX` warm.
     #[test]
     fn dynamic_edge_threshold_cascade() {
-        assert_eq!(Engine::dynamic_edge_threshold(0.0),  EDGE_FLOOR_COLD);
+        assert_eq!(Engine::dynamic_edge_threshold(0.0), EDGE_FLOOR_COLD);
         assert_eq!(Engine::dynamic_edge_threshold(0.049), EDGE_FLOOR_COLD);
         // tam COLD_MAX (0.05) sınırı: `< 0.05` false → warm.
-        assert_eq!(Engine::dynamic_edge_threshold(EDGE_ML_COLD_MAX), EDGE_FLOOR_WARM);
+        assert_eq!(
+            Engine::dynamic_edge_threshold(EDGE_ML_COLD_MAX),
+            EDGE_FLOOR_WARM
+        );
         assert_eq!(Engine::dynamic_edge_threshold(0.29), EDGE_FLOOR_WARM);
         // tam WARM_MAX (0.30) sınırı: `< 0.30` false → hot.
-        assert_eq!(Engine::dynamic_edge_threshold(EDGE_ML_WARM_MAX), EDGE_FLOOR_HOT);
-        assert_eq!(Engine::dynamic_edge_threshold(1.0),  EDGE_FLOOR_HOT);
+        assert_eq!(
+            Engine::dynamic_edge_threshold(EDGE_ML_WARM_MAX),
+            EDGE_FLOOR_HOT
+        );
+        assert_eq!(Engine::dynamic_edge_threshold(1.0), EDGE_FLOOR_HOT);
     }
 }

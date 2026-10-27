@@ -19,27 +19,42 @@ impl Engine {
             // Tuner devrede olduğunu boot'ta operatöre bildir — aksi halde
             // "tuner çalışmadı mı?" şüphesi oluşuyordu (summary boş olunca
             // hiç log atılmıyor → görünürlük kayboluyordu).
-            push_state_log(&state, format!(
-                "🎚️ ScalpSwing tuner devrede (periyot={}sn, min trade=5)",
-                every_secs,
-            ));
+            push_state_log(
+                &state,
+                format!(
+                    "🎚️ ScalpSwing tuner devrede (periyot={}sn, min trade=5)",
+                    every_secs,
+                ),
+            );
 
             // İlk turda warmup için kısa bekle — boot anında stats boş olur.
             tokio::time::sleep(std::time::Duration::from_secs(every_secs.min(30))).await;
 
             loop {
-                let stop = state.lock()
-                    .map(|s| s.app_stop_signal.load(Ordering::Relaxed))
-                    .unwrap_or(true);
-                if stop { break; }
+                let lock_intent = "scalp_swing_tuner:stop";
+                crate::robot::infra::app_state_lock_watchdog::set_intent(lock_intent);
+                let stop = match state.try_lock() {
+                    Ok(s) => Some(s.app_stop_signal.load(Ordering::Relaxed)),
+                    Err(_) => None,
+                };
+                crate::robot::infra::app_state_lock_watchdog::clear_intent(lock_intent);
+                let Some(stop) = stop else {
+                    tokio::time::sleep(std::time::Duration::from_secs(every_secs)).await;
+                    continue;
+                };
+                if stop {
+                    break;
+                }
 
                 // 1) Stats + cfg snapshot (tek kısa mutex; sleep'ten önce drop).
                 let cfg_stats = {
-                    if let Ok(st) = state.lock() {
+                    if let Ok(st) = state.try_lock() {
                         let cfg = st.brain.scalp_swing_config.read().ok().map(|c| c.clone());
                         let stats = st.brain.scalp_swing_stats.read().ok().map(|t| t.clone());
                         cfg.zip(stats)
-                    } else { None }
+                    } else {
+                        None
+                    }
                 };
 
                 // 2) auto_tune çağrıları + yazma (mutex'ler block içinde).
@@ -72,7 +87,8 @@ impl Engine {
                             cfg.scalp_enabled = false;
                             summary.push(format!(
                                 "SCP Auto-Disabled (wr={:.2}, n={})",
-                                stats.scalp.win_rate(), stats.scalp.total_closed,
+                                stats.scalp.win_rate(),
+                                stats.scalp.total_closed,
                             ));
                         }
                         if cfg.swing_enabled
@@ -82,11 +98,12 @@ impl Engine {
                             cfg.swing_enabled = false;
                             summary.push(format!(
                                 "SWG Auto-Disabled (wr={:.2}, n={})",
-                                stats.swing.win_rate(), stats.swing.total_closed,
+                                stats.swing.win_rate(),
+                                stats.swing.total_closed,
                             ));
                         }
                         if !summary.is_empty() {
-                            if let Ok(st) = state.lock() {
+                            if let Ok(st) = state.try_lock() {
                                 if let Ok(mut w) = st.brain.scalp_swing_config.write() {
                                     *w = cfg;
                                 }
@@ -97,10 +114,14 @@ impl Engine {
 
                 // 3) Log (yine kısa scope).
                 if !summary.is_empty() {
-                    push_state_log(&state, format!(
-                        "🎚️ ScalpSwing tuner: {} ayar uygulandı → {}",
-                        summary.len(), summary.join(", "),
-                    ));
+                    push_state_log(
+                        &state,
+                        format!(
+                            "🎚️ ScalpSwing tuner: {} ayar uygulandı → {}",
+                            summary.len(),
+                            summary.join(", "),
+                        ),
+                    );
                 }
 
                 tokio::time::sleep(std::time::Duration::from_secs(every_secs)).await;
@@ -114,12 +135,17 @@ impl Engine {
     pub(crate) fn spawn_trail_feedback_processor(state: Arc<Mutex<AppState>>) {
         tokio::spawn(async move {
             const MATURE_SECS: u64 = 60;
-            const POLL_SECS:   u64 = 10;
-            const STALE_SECS:  u64 = 300; // 5dk: live_price yoksa gözlem düşer
+            const POLL_SECS: u64 = 10;
+            const STALE_SECS: u64 = 300; // 5dk: live_price yoksa gözlem düşer
 
             loop {
-                let stop = state.lock().map(|s| s.app_stop_signal.load(Ordering::Relaxed)).unwrap_or(true);
-                if stop { break; }
+                let stop = state
+                    .lock()
+                    .map(|s| s.app_stop_signal.load(Ordering::Relaxed))
+                    .unwrap_or(true);
+                if stop {
+                    break;
+                }
 
                 // Olgun + stale ayrımı yapıp tek scope'lu queue manipülasyonu.
                 let now = crate::core::time::now_epoch_secs();
@@ -131,18 +157,29 @@ impl Engine {
                             if now.saturating_sub(o.exit_epoch) >= STALE_SECS {
                                 continue; // 5dk üstü → düşür
                             }
-                            if o.is_mature(MATURE_SECS) { take.push(o); }
-                            else { keep.push_back(o); }
+                            if o.is_mature(MATURE_SECS) {
+                                take.push(o);
+                            } else {
+                                keep.push_back(o);
+                            }
                         }
                         *q = keep;
                         take
-                    } else { Vec::new() }
+                    } else {
+                        Vec::new()
+                    }
                 };
 
                 // Evalue + record — tek state.lock altında batch.
                 if !mature.is_empty() {
                     if let Ok(st) = state.lock() {
-                        let live_price = st.fleet.live_price.read().ok().map(|g| g.clone()).unwrap_or_default();
+                        let live_price = st
+                            .fleet
+                            .live_price
+                            .read()
+                            .ok()
+                            .map(|g| g.clone())
+                            .unwrap_or_default();
                         if let Ok(mut params) = st.brain.parameters.write() {
                             for obs in &mature {
                                 let cur = match live_price.get(&obs.symbol).copied() {
@@ -150,11 +187,17 @@ impl Engine {
                                     _ => continue, // fiyat yok → atla (kuyruktan zaten alındı, drop edilir)
                                 };
                                 let was_early = obs.evaluate(cur);
-                                let changed = params.record_trailing_outcome(&obs.symbol, &obs.strategy, was_early);
+                                let changed = params.record_trailing_outcome(
+                                    &obs.symbol,
+                                    &obs.strategy,
+                                    was_early,
+                                );
                                 if let Some(new_target) = changed {
                                     log::info!(
                                         "🎯 Trail feedback patch: {} ({}) → target={:.2}%",
-                                        obs.symbol, obs.strategy, new_target,
+                                        obs.symbol,
+                                        obs.strategy,
+                                        new_target,
                                     );
                                 }
                             }
@@ -176,29 +219,48 @@ impl Engine {
     pub(crate) fn spawn_sr_updater(state: Arc<Mutex<AppState>>) {
         tokio::spawn(async move {
             if std::env::var("SR_UPDATER_DISABLE").ok().as_deref() == Some("1") {
-                push_state_log(&state, "📐 SR updater: SR_UPDATER_DISABLE=1, task pasif".into());
+                push_state_log(
+                    &state,
+                    "📐 SR updater: SR_UPDATER_DISABLE=1, task pasif".into(),
+                );
                 return;
             }
             // Faz 2: interval ParameterStore'dan okunur. SR_UPDATE_EVERY_SECS env'i
             // store.from_env'de boot anında zaten alındı; runtime'da brain.parameters
             // güncellenirse bu task da sonraki turda yeni aralığı görür.
-            let interval_secs: u64 = state.lock().ok()
-                .and_then(|st| st.brain.parameters.read().ok().map(|p| p.sr_update_every_secs))
+            let interval_secs: u64 = state
+                .lock()
+                .ok()
+                .and_then(|st| {
+                    st.brain
+                        .parameters
+                        .read()
+                        .ok()
+                        .map(|p| p.sr_update_every_secs)
+                })
                 .unwrap_or(30);
             let detector = crate::robot::sr_detector::SrDetector::new(
-                crate::robot::sr_detector::SrDetectorConfig::default()
+                crate::robot::sr_detector::SrDetectorConfig::default(),
             );
             let mut first_run_logged = false;
 
             loop {
-                let stop = state.lock().map(|s| s.app_stop_signal.load(Ordering::Relaxed)).unwrap_or(true);
-                if stop { break; }
+                let stop = state
+                    .lock()
+                    .map(|s| s.app_stop_signal.load(Ordering::Relaxed))
+                    .unwrap_or(true);
+                if stop {
+                    break;
+                }
 
                 // 1) Aktif sembolleri topla. Canlı feed'i olmayan borsa sembolleri
                 // (örn. eski BIST mumları DB'de durur) SR/Market Gözetimi'ne girmesin →
                 // market-agnostik tek nokta: RuntimeTuning.symbol_eligible_for_live.
-                let (db_path, interval, market, symbols) = {
-                    let st = match state.lock() { Ok(s) => s, Err(_) => break };
+                let (db_path, interval, _market, symbols) = {
+                    let st = match state.lock() {
+                        Ok(s) => s,
+                        Err(_) => break,
+                    };
                     let tuning = Arc::clone(&st.tuning);
                     let eligible = |s: &str| tuning.symbol_eligible_for_live(s);
 
@@ -210,27 +272,44 @@ impl Engine {
                         symbols.push(st.config.symbol.clone());
                     }
                     for s in &st.config.pinned_symbols {
-                        if !eligible(s) { continue; }
-                        if !symbols.contains(s) { symbols.push(s.clone()); }
+                        if !eligible(s) {
+                            continue;
+                        }
+                        if !symbols.contains(s) {
+                            symbols.push(s.clone());
+                        }
                     }
                     if let Ok(orch) = st.fleet.symbol_orchestrator.read() {
                         for w in orch.get_worker_status() {
-                            if !eligible(&w.symbol) { continue; }
-                            if !symbols.contains(&w.symbol) { symbols.push(w.symbol); }
+                            if !eligible(&w.symbol) {
+                                continue;
+                            }
+                            if !symbols.contains(&w.symbol) {
+                                symbols.push(w.symbol);
+                            }
                         }
                     }
-                    (st.config.db_path.clone(), st.config.interval.clone(), st.config.market.clone(), symbols)
+                    (
+                        st.config.db_path.clone(),
+                        st.config.interval.clone(),
+                        st.config.market.clone(),
+                        symbols,
+                    )
                 };
 
                 // 2) Her sembol için candles oku, SR detect — IO/CPU lock dışında yapılır.
-                let mut zones_map: std::collections::HashMap<String, Vec<crate::robot::sr_detector::SrZone>>
-                    = Default::default();
+                let mut zones_map: std::collections::HashMap<
+                    String,
+                    Vec<crate::robot::sr_detector::SrZone>,
+                > = Default::default();
                 // Market Gözetimi "24h %" sütunu için ~24h önceki referans fiyat (SR'dan bağımsız;
                 // candles varsa hesaplanır). bridge displayed live_price ile % değişimi türetir.
                 let mut ref_map: std::collections::HashMap<String, f64> = Default::default();
                 let mut total_zones = 0usize;
                 for sym in &symbols {
-                    if let Ok(candles) = crate::persistence::reader::read_candles_market(&db_path, sym, &interval, &market, 200) {
+                    if let Ok(candles) =
+                        Self::read_candles_routed(&state, &db_path, sym, &interval, 200)
+                    {
                         let r = reference_price_24h_ago(&candles);
                         if r > 0.0 {
                             ref_map.insert(sym.clone(), r);
@@ -257,10 +336,15 @@ impl Engine {
                 }
 
                 if !first_run_logged {
-                    push_state_log(&state, format!(
-                        "📐 SR updater: {} sembol, {} bölge, her {}sn",
-                        symbols.len(), total_zones, interval_secs,
-                    ));
+                    push_state_log(
+                        &state,
+                        format!(
+                            "📐 SR updater: {} sembol, {} bölge, her {}sn",
+                            symbols.len(),
+                            total_zones,
+                            interval_secs,
+                        ),
+                    );
                     first_run_logged = true;
                 }
 
@@ -268,7 +352,6 @@ impl Engine {
             }
         });
     }
-
 }
 
 /// SAF: candles → son mum timestamp'inden ~24h önceki referans close fiyatı (Market Gözetimi
@@ -280,7 +363,9 @@ pub(crate) fn reference_price_24h_ago(candles: &[Candle]) -> f64 {
         None => return 0.0,
     };
     let cutoff = last.timestamp - chrono::Duration::hours(24);
-    candles.iter().rev()
+    candles
+        .iter()
+        .rev()
         .find(|c| c.timestamp <= cutoff)
         .map(|c| c.close)
         .unwrap_or_else(|| candles[0].close)
@@ -302,14 +387,24 @@ mod fleet_tuners_tests {
     fn reference_24h_picks_bar_at_or_before_cutoff() {
         // Son mum şimdi (0h), 24h önce close=100, 12h önce close=110, şimdi close=120.
         // 24h sınırına eşit/önceki en yeni mum = 24h'lik (100).
-        let candles = vec![candle(48, 90.0), candle(24, 100.0), candle(12, 110.0), candle(0, 120.0)];
+        let candles = vec![
+            candle(48, 90.0),
+            candle(24, 100.0),
+            candle(12, 110.0),
+            candle(0, 120.0),
+        ];
         assert!((reference_price_24h_ago(&candles) - 100.0).abs() < 1e-9);
     }
 
     #[test]
     fn reference_24h_partial_window_falls_back_to_oldest() {
         // Pencere yalnız 3h (1m benzeri kısa) → 24h öncesi yok → en eski mum referans.
-        let candles = vec![candle(3, 200.0), candle(2, 205.0), candle(1, 210.0), candle(0, 215.0)];
+        let candles = vec![
+            candle(3, 200.0),
+            candle(2, 205.0),
+            candle(1, 210.0),
+            candle(0, 215.0),
+        ];
         assert!((reference_price_24h_ago(&candles) - 200.0).abs() < 1e-9);
         assert_eq!(reference_price_24h_ago(&[]), 0.0, "boş → 0");
     }

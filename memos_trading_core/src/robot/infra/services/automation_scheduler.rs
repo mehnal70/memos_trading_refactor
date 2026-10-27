@@ -1,11 +1,11 @@
 // automation_scheduler.rs
 // Otomasyon Scheduler Modülü - Performans ve Asenkron Odaklı
 
-use tokio::time::{Duration, sleep};
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock; // Mutex yerine RwLock: Okuma operasyonları çok daha hızlıdır.
-use chrono::{Utc, DateTime};
+use tokio::time::{sleep, Duration};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)] // Copy eklendi, hafif enum
 pub enum AutomationTask {
@@ -35,15 +35,18 @@ pub struct AutomationScheduler {
 impl AutomationScheduler {
     pub fn new() -> Self {
         let mut tasks = HashMap::with_capacity(7); // Allocation optimizasyonu
-        
+
         // Helper closure: Kod tekrarını azaltır
         let mut add_task = |name: &str, task: AutomationTask, secs: u64| {
-            tasks.insert(name.to_string(), ScheduledTask {
-                task,
-                interval_sec: secs,
-                last_run: None,
-                enabled: true,
-            });
+            tasks.insert(
+                name.to_string(),
+                ScheduledTask {
+                    task,
+                    interval_sec: secs,
+                    last_run: None,
+                    enabled: true,
+                },
+            );
         };
 
         add_task("data_sync", AutomationTask::DataSync, 3600);
@@ -61,7 +64,7 @@ impl AutomationScheduler {
 
     pub async fn start(&self) {
         let tasks_ptr = self.tasks.clone();
-        
+
         tokio::spawn(async move {
             loop {
                 let now = Utc::now();
@@ -73,7 +76,9 @@ impl AutomationScheduler {
                     for (name, task) in tasks_read.iter() {
                         if task.enabled {
                             let should_run = match task.last_run {
-                                Some(last) => (now - last).num_seconds() >= task.interval_sec as i64,
+                                Some(last) => {
+                                    (now - last).num_seconds() >= task.interval_sec as i64
+                                }
                                 None => true,
                             };
                             if should_run {
@@ -89,7 +94,7 @@ impl AutomationScheduler {
                     tokio::spawn(async move {
                         // Görevi çalıştır
                         Self::run_task(task_kind).await;
-                        
+
                         // Son çalışma zamanını güncelle
                         let mut write_guard = tasks_write_ptr.write().await;
                         if let Some(t) = write_guard.get_mut(&name) {

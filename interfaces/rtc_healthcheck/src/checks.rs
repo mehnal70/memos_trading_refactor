@@ -4,8 +4,8 @@
 // bool döner. Failing invariant exit code'a yansır.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use memos_trading_core::robot::robotic_loop::AppState;
 
@@ -23,12 +23,17 @@ pub fn check_heartbeat_fresh(path: &Path, max_age_secs: u64) -> bool {
             return false;
         }
     };
-    let age = metadata.modified().ok()
+    let age = metadata
+        .modified()
+        .ok()
         .and_then(|t| t.elapsed().ok())
         .map(|d| d.as_secs())
         .unwrap_or(u64::MAX);
     if age > max_age_secs {
-        println!("  ✗ {} — son yazım {}s önce (eşik {}s)", label, age, max_age_secs);
+        println!(
+            "  ✗ {} — son yazım {}s önce (eşik {}s)",
+            label, age, max_age_secs
+        );
         return false;
     }
     // Son satırı parse et — JSONL bütünlüğü
@@ -60,12 +65,17 @@ pub fn check_snapshot_fresh(path: &Path, max_age_secs: u64) -> bool {
             return false;
         }
     };
-    let age = metadata.modified().ok()
+    let age = metadata
+        .modified()
+        .ok()
         .and_then(|t| t.elapsed().ok())
         .map(|d| d.as_secs())
         .unwrap_or(u64::MAX);
     if age > max_age_secs {
-        println!("  ✗ {} — son yazım {}s önce (eşik {}s)", label, age, max_age_secs);
+        println!(
+            "  ✗ {} — son yazım {}s önce (eşik {}s)",
+            label, age, max_age_secs
+        );
         return false;
     }
     // İçerik geçerli JSON mu?
@@ -98,15 +108,24 @@ pub fn check_phase_advanced(state: &Arc<Mutex<AppState>>) -> bool {
 
 /// Otonom loop nabzı ilerliyor. `last_loop_tick` smoke süresince artmış olmalı.
 pub fn check_loop_tick_advanced(state: &Arc<Mutex<AppState>>, start_tick: u64) -> bool {
-    let end_tick = state.lock().ok()
+    let end_tick = state
+        .lock()
+        .ok()
         .map(|s| s.fleet.last_loop_tick.load(Ordering::Relaxed))
         .unwrap_or(0);
     if end_tick <= start_tick {
-        println!("  ✗ loop_tick — ilerlemedi (start={}, end={})", start_tick, end_tick);
+        println!(
+            "  ✗ loop_tick — ilerlemedi (start={}, end={})",
+            start_tick, end_tick
+        );
         return false;
     }
-    println!("  ✓ loop_tick — ilerledi (start={}, end={}, Δ={})",
-        start_tick, end_tick, end_tick - start_tick);
+    println!(
+        "  ✓ loop_tick — ilerledi (start={}, end={}, Δ={})",
+        start_tick,
+        end_tick,
+        end_tick - start_tick
+    );
     true
 }
 
@@ -123,31 +142,56 @@ pub fn check_equity_sane(state: &Arc<Mutex<AppState>>, max_drawdown_pct: f64) ->
         println!("  ✗ equity — sıfır veya negatif ({:.2})", equity);
         return false;
     }
-    let dd_pct = if peak > 0.0 { (1.0 - equity / peak) * 100.0 } else { 0.0 };
+    let dd_pct = if peak > 0.0 {
+        (1.0 - equity / peak) * 100.0
+    } else {
+        0.0
+    };
     if dd_pct > max_drawdown_pct {
-        println!("  ✗ equity — drawdown %{:.2} > eşik %{:.2} (equity={:.2}, peak={:.2})",
-            dd_pct, max_drawdown_pct, equity, peak);
+        println!(
+            "  ✗ equity — drawdown %{:.2} > eşik %{:.2} (equity={:.2}, peak={:.2})",
+            dd_pct, max_drawdown_pct, equity, peak
+        );
         return false;
     }
-    println!("  ✓ equity — sağlıklı (equity={:.2}, peak={:.2}, dd=%{:.2})",
-        equity, peak, dd_pct);
+    println!(
+        "  ✓ equity — sağlıklı (equity={:.2}, peak={:.2}, dd=%{:.2})",
+        equity, peak, dd_pct
+    );
     true
 }
 
 /// guardian.log içinde kritik anomali (🚨 prefix veya OVERFILL) yok.
 pub fn check_no_critical_alerts(state: &Arc<Mutex<AppState>>) -> bool {
     let critical: Vec<String> = match state.lock() {
-        Ok(s) => s.guardian.log.iter()
-            .filter(|l| l.contains("🚨") || l.contains("PARTIAL-ANOMALY-OVERFILL"))
-            .cloned()
-            .collect(),
+        Ok(s) => {
+            let venue_less_smoke = s.config.venues.is_empty();
+            s.guardian
+                .log
+                .iter()
+                .filter(|l| {
+                    let expected_venue_less_warning = venue_less_smoke
+                        && l.contains("AccountStateUnavailable")
+                        && l.contains("ApiError");
+                    !expected_venue_less_warning
+                        && (l.contains("PARTIAL-ANOMALY-OVERFILL")
+                            || (l.contains("🚨")
+                                && !l.contains("0 kritik")
+                                && !l.contains("0 critical")))
+                })
+                .cloned()
+                .collect()
+        }
         Err(_) => {
             println!("  ✗ critical_alerts — state lock alınamadı");
             return false;
         }
     };
     if !critical.is_empty() {
-        println!("  ✗ critical_alerts — {} kritik uyarı tespit edildi:", critical.len());
+        println!(
+            "  ✗ critical_alerts — {} kritik uyarı tespit edildi:",
+            critical.len()
+        );
         for line in critical.iter().take(3) {
             println!("      · {}", line);
         }

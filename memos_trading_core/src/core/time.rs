@@ -35,7 +35,10 @@ mod tests {
     fn epoch_secs_is_plausible_and_monotonic_nondecreasing() {
         // 2026-01-01 ≈ 1_767_225_600; üst sınırı geniş tut (sadece "makul" kontrolü).
         let s = now_epoch_secs();
-        assert!(s > 1_700_000_000, "epoch saniyesi makul aralıkta değil: {s}");
+        assert!(
+            s > 1_700_000_000,
+            "epoch saniyesi makul aralıkta değil: {s}"
+        );
         let s2 = now_epoch_secs();
         assert!(s2 >= s, "saniye geriye gitti: {s} → {s2}");
     }
@@ -46,6 +49,9 @@ mod tests {
         let s = now_epoch_secs();
         // ms/1000 ile s arasında en fazla birkaç saniye fark olmalı (yarış payı).
         let ms_secs = (ms / 1000) as u64;
-        assert!(ms_secs.abs_diff(s) <= 2, "millis vs secs tutarsız: {ms_secs} vs {s}");
+        assert!(
+            ms_secs.abs_diff(s) <= 2,
+            "millis vs secs tutarsız: {ms_secs} vs {s}"
+        );
     }
 }
