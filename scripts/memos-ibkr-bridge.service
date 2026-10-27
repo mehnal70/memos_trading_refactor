@@ -4,18 +4,18 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/memos/PycharmProjects/memos_trading_refactor
-EnvironmentFile=-/home/memos/PycharmProjects/memos_trading_refactor/scripts/.autonomy.env
+WorkingDirectory=/opt/memos/memos_trading_refactor
+EnvironmentFile=-/opt/memos/memos_trading_refactor/scripts/.autonomy.env
 Environment=IBKR_API_HOST=127.0.0.1
 Environment=IBKR_API_PORT=4002
 Environment=IBKR_BRIDGE_ADDR=127.0.0.1:9101
 Environment=IBKR_ALLOWED_ACCOUNT=DUR948772
-ExecStart=/home/memos/PycharmProjects/memos_trading_refactor/scripts/ibkr/run_bridge.sh
+ExecStart=/opt/memos/memos_trading_refactor/scripts/ibkr/run_bridge.sh
 Restart=on-failure
 RestartSec=15
 RestartPreventExitStatus=3
-StandardOutput=append:/home/memos/PycharmProjects/memos_trading_refactor/logs/ibkr-bridge.log
-StandardError=append:/home/memos/PycharmProjects/memos_trading_refactor/logs/ibkr-bridge.log
+StandardOutput=append:/opt/memos/memos_trading_refactor/logs/ibkr-bridge.log
+StandardError=append:/opt/memos/memos_trading_refactor/logs/ibkr-bridge.log
 
 [Install]
 # Bilinçli olarak default.target'e bağlanmaz; menu/GUI ile manuel başlatılır.
