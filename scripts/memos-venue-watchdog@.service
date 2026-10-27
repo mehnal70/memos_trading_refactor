@@ -16,14 +16,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/memos/PycharmProjects/memos_trading_refactor
-Environment=RTC_LAUNCH_CONF=/home/memos/PycharmProjects/memos_trading_refactor/logs/.venue-runtime/profiles/%i.conf
-Environment=ENGINE_PID_PATH=/home/memos/PycharmProjects/memos_trading_refactor/logs/.venue-runtime/state/%i.engine.pid
-Environment=WATCHDOG_PAUSE_FILE=/home/memos/PycharmProjects/memos_trading_refactor/logs/.venue-runtime/state/%i.watchdog.pause
-Environment=WATCHDOG_LOCK_DIR=/home/memos/PycharmProjects/memos_trading_refactor/logs/.venue-runtime/state/%i.watchdog.lock
-Environment=WATCHDOG_LOG_PATH=/home/memos/PycharmProjects/memos_trading_refactor/logs/.venue-runtime/state/%i.watchdog.log
+WorkingDirectory=/opt/memos/memos_trading_refactor
+Environment=RTC_LAUNCH_CONF=/opt/memos/memos_trading_refactor/logs/.venue-runtime/profiles/%i.conf
+Environment=ENGINE_PID_PATH=/opt/memos/memos_trading_refactor/logs/.venue-runtime/state/%i.engine.pid
+Environment=WATCHDOG_PAUSE_FILE=/opt/memos/memos_trading_refactor/logs/.venue-runtime/state/%i.watchdog.pause
+Environment=WATCHDOG_LOCK_DIR=/opt/memos/memos_trading_refactor/logs/.venue-runtime/state/%i.watchdog.lock
+Environment=WATCHDOG_LOG_PATH=/opt/memos/memos_trading_refactor/logs/.venue-runtime/state/%i.watchdog.log
 Environment=VENUE_NAME=%i
-ExecStart=/home/memos/PycharmProjects/memos_trading_refactor/scripts/watchdog.sh --release
+ExecStart=/opt/memos/memos_trading_refactor/scripts/watchdog.sh --release
 Restart=always
 RestartSec=10
 KillMode=process

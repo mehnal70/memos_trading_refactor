@@ -14,9 +14,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/memos/PycharmProjects/memos_trading_refactor
-ExecStart=/home/memos/PycharmProjects/memos_trading_refactor/scripts/venue_engine.sh run %i
-ExecStopPost=/usr/bin/rm -f /home/memos/PycharmProjects/memos_trading_refactor/logs/.venue-runtime/state/%i.engine.pid
+WorkingDirectory=/opt/memos/memos_trading_refactor
+ExecStart=/opt/memos/memos_trading_refactor/scripts/venue_engine.sh run %i
+ExecStopPost=/usr/bin/rm -f /opt/memos/memos_trading_refactor/logs/.venue-runtime/state/%i.engine.pid
 Restart=on-failure
 RestartSec=10
 KillMode=control-group
